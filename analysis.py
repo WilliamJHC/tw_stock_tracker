@@ -21,6 +21,31 @@ SCORE_WEIGHTS = {
     "trend": 15, "vpPosition": 15, "orderFlow": 20,
 }
 
+# Composite-score label bands, shared by analyze() and chip_analysis() so the
+# front end can pull one source of truth via /api/config instead of duplicating
+# thresholds. Boundaries are intentionally asymmetric (>= for the bull side,
+# > for the bear side): score==20 lands 偏多, score==-20 lands 偏空.
+SCORE_BANDS = [60, 20, -20, -60]
+SCORE_LABELS = ["強多", "偏多", "中性", "偏空", "強空"]
+
+
+def label_for(score):
+    if score >= SCORE_BANDS[0]:
+        return SCORE_LABELS[0]
+    if score >= SCORE_BANDS[1]:
+        return SCORE_LABELS[1]
+    if score > SCORE_BANDS[2]:
+        return SCORE_LABELS[2]
+    if score > SCORE_BANDS[3]:
+        return SCORE_LABELS[3]
+    return SCORE_LABELS[4]
+
+
+# Chip (institutional/margin/shareholding/SBL) sub-score weights, kept separate
+# from SCORE_WEIGHTS so the technical score is unaffected.
+CHIP_WEIGHTS = {"institutional": 40, "margin": 20, "shareholding": 20, "sbl": 20}
+
+
 QUADRANT_INFO = {
     "PU_VU": {"label": "價漲量增", "desc": "多方動能健康", "bias": 1, "score": 1},
     "PU_VD": {"label": "價漲量縮", "desc": "上漲但量能未跟上，追高留意", "bias": 0, "score": 0.25},
@@ -321,19 +346,201 @@ def backtest_signal(ctx, fn, horizon=20, gap=5):
             "avg_ret": sum(hits) / len(hits) * 100}
 
 
-# ------------------------------------------------------------ analyze ----
+# --------------------------------------------------------- chip analysis ----
 
 def _clamp(x, lo=-1.0, hi=1.0):
     return max(lo, min(hi, x))
 
 
-def analyze(daily, minute=None, tick_days=None, inst=None):
+def _foreign_streak(inst):
+    """Consecutive same-sign foreign net-buy/sell days, most recent first."""
+    streak = 0
+    for r in reversed(inst):
+        if r["foreign"] > 0 and streak >= 0:
+            streak += 1
+        elif r["foreign"] < 0 and streak <= 0:
+            streak -= 1
+        else:
+            break
+    return streak
+
+
+def chip_analysis(inst, margin, shareholding, sbl, vol20_last):
+    """Institutional/margin/shareholding/SBL chip sub-score, independent of
+    the technical score (analyze()'s SCORE_WEIGHTS are untouched).
+
+    inst: [{date, foreign, trust}] shares, oldest first (get_institutional()).
+    margin: [{date, margin_balance, margin_delta, short_balance, short_delta}]
+        shares, oldest first (get_margin()).
+    shareholding: [{date, foreign_ratio, foreign_shares}] (get_shareholding()).
+    sbl: [{date, sbl_balance, sbl_sales, sbl_returns}] shares (get_sbl()).
+    vol20_last: 20-day average daily volume in shares (or None/0 if unknown).
+
+    Returns {"score": int(-100..100), "label": str, "components": {...},
+    "signals": [...], "coverage": [component names]}, or None if every
+    component is missing/guarded out.
+    """
+    components = {}
+    signals = []
+    has_vol = bool(vol20_last)
+
+    if inst and has_vol:
+        recent = inst[-5:]
+        net5 = sum(r["foreign"] + r["trust"] for r in recent)
+        c = _clamp(net5 / (5 * vol20_last) / 0.10)
+        f_streak = _foreign_streak(inst)
+        if abs(f_streak) >= 3:
+            c = _clamp(c + (0.2 if f_streak > 0 else -0.2))
+        components["institutional"] = {"c": c, "net5": net5, "foreign_streak": f_streak}
+        if abs(c) >= 0.3:
+            side = "淨買超" if net5 > 0 else "淨賣超"
+            signals.append({"text": f"法人5日{side} {abs(net5) // 1000:,} 張",
+                            "bias": 1 if net5 > 0 else -1, "bt": None})
+
+    if margin:
+        prev_idx = -6 if len(margin) >= 6 else 0
+        bal_last = margin[-1]["margin_balance"]
+        bal_prev = margin[prev_idx]["margin_balance"]
+        if bal_prev > 0:
+            chg5 = (bal_last - bal_prev) / bal_prev
+            c = _clamp(-chg5 / 0.05)
+            components["margin"] = {"c": c, "chg5": chg5}
+            if abs(c) >= 0.3:
+                direction = "增" if chg5 > 0 else "減"
+                signals.append({"text": f"融資5日{direction} {abs(chg5) * 100:.1f}%",
+                                "bias": -1 if chg5 > 0 else 1, "bt": None})
+        short_last = margin[-1]["short_balance"]
+        if bal_last > 0 and short_last / bal_last > 0.30:
+            signals.append({"text": "券資比偏高，留意軋空", "bias": 0, "bt": None})
+
+    if shareholding:
+        prev_idx = -20 if len(shareholding) >= 20 else 0
+        ratio_last = shareholding[-1]["foreign_ratio"]
+        ratio_prev = shareholding[prev_idx]["foreign_ratio"]
+        d20 = ratio_last - ratio_prev
+        c = _clamp(d20 / 1.0)
+        components["shareholding"] = {"c": c, "d20": d20}
+        if abs(c) >= 0.3:
+            sign = "+" if d20 >= 0 else "−"
+            signals.append({"text": f"外資持股比20日{sign}{abs(d20):.2f} pp",
+                            "bias": 1 if d20 > 0 else -1 if d20 < 0 else 0, "bt": None})
+
+    if sbl and has_vol:
+        prev_idx = -6 if len(sbl) >= 6 else 0
+        bal_last = sbl[-1]["sbl_balance"]
+        bal_prev = sbl[prev_idx]["sbl_balance"]
+        delta5 = bal_last - bal_prev
+        c = _clamp(-delta5 / (5 * vol20_last) / 0.05)
+        components["sbl"] = {"c": c, "delta5": delta5}
+        if abs(c) >= 0.3:
+            direction = "增" if delta5 > 0 else "減"
+            signals.append({"text": f"借券賣出餘額5日{direction} {abs(delta5) // 1000:,} 張",
+                            "bias": -1 if delta5 > 0 else 1, "bt": None})
+
+    if not components:
+        return None
+
+    total_w = sum(CHIP_WEIGHTS[k] for k in components)
+    weighted = sum(CHIP_WEIGHTS[k] * components[k]["c"] for k in components)
+    score = round(100 * weighted / total_w)
+    coverage = [k for k in CHIP_WEIGHTS if k in components]
+    return {"score": score, "label": label_for(score), "components": components,
+            "signals": signals, "coverage": coverage}
+
+
+# ---------------------------------------------------- attention priority ----
+
+# (points, matcher) applied top-to-bottom; first-encountered max wins ties,
+# matching the product spec's "平手時取上表由上而下第一個命中者".
+def compute_attention(tech_score, chip, result):
+    """Today's action priority, blending technical + chip scores with event triggers.
+
+    Returns {"priority": 0..100, "action": str, "reason": str, "triggers": [str]}.
+    Weights/thresholds below (0.6/0.4 blend, 40/50/25 action cutoffs, per-trigger
+    points) are a product judgment call, not derived — tune here if needed.
+    """
+    chip_score = chip["score"] if chip else None
+    composite = 0.6 * tech_score + 0.4 * chip_score if chip_score is not None else tech_score
+
+    signals = result.get("signals") or []
+    bt_set = {s.get("bt") for s in signals if s.get("bt")}
+    of = result.get("of")
+
+    triggers = []  # (points, reason text), in spec order
+    if "突破站上MA60" in bt_set:
+        triggers.append((15, "今日突破站上 60 日均線"))
+    if "跌破MA60" in bt_set:
+        triggers.append((15, "今日跌破 60 日均線"))
+    if of and of.get("divergence"):
+        text = ("量價背離：近10日價格上漲但主動賣盤佔優（出貨嫌疑）" if of["divergence"] == "bearish"
+                else "量價背離：近10日價格下跌但主動買盤佔優（吸籌嫌疑）")
+        triggers.append((15, text))
+    if "爆量(>2倍均量)" in bt_set:
+        triggers.append((10, "爆量：今日量能達 20 日均量 2 倍以上"))
+    of_streak = of["streak"] if of else 0
+    foreign_streak = 0
+    inst_comp = (chip or {}).get("components", {}).get("institutional")
+    if inst_comp:
+        foreign_streak = inst_comp.get("foreign_streak", 0)
+    if abs(of_streak) >= 3 or abs(foreign_streak) >= 3:
+        if abs(of_streak) >= abs(foreign_streak):
+            side = "買" if of_streak > 0 else "賣"
+            triggers.append((10, f"主動{side}盤已連續 {abs(of_streak)} 個交易日"))
+        else:
+            side = "買超" if foreign_streak > 0 else "賣超"
+            triggers.append((10, f"外資連續{side} {abs(foreign_streak)} 日"))
+    if chip and chip.get("components"):
+        strong = [(k, c) for k, c in chip["components"].items() if abs(c.get("c", 0)) >= 0.5]
+        if strong:
+            k, c = max(strong, key=lambda kv: abs(kv[1]["c"]))
+            name = {"institutional": "法人籌碼", "margin": "融資餘額",
+                    "shareholding": "外資持股", "sbl": "借券賣出餘額"}.get(k, k)
+            triggers.append((10, f"{name}訊號強烈（子分 {c['c'] * 100:+.0f}）"))
+    vp_position = result.get("vp_position")
+    if vp_position in ("above_va", "below_va"):
+        triggers.append((5, "價格在 Value Area 之外"))
+
+    trigger_points = sum(p for p, _ in triggers)
+    priority = min(100, round(0.6 * abs(composite) + trigger_points))
+
+    if composite >= 40 and priority >= 50:
+        action = "準備進場"
+    elif composite <= -40 and priority >= 50:
+        action = "減碼警示"
+    elif priority >= 50:
+        action = "今日關注"
+    elif priority >= 25:
+        action = "觀察"
+    else:
+        action = "無變化"
+
+    if triggers:
+        reason = max(triggers, key=lambda t: t[0])[1]
+    else:
+        strongest = None
+        best_abs = -1
+        for s in signals:
+            b = abs(s.get("bias", 0))
+            if b > best_abs:
+                best_abs = b
+                strongest = s
+        reason = strongest["text"] if strongest else "無明顯訊號"
+
+    return {"priority": priority, "action": action, "reason": reason,
+            "triggers": [t for _, t in triggers]}
+
+
+# ------------------------------------------------------------ analyze ----
+
+
+def analyze(daily, minute=None, tick_days=None, inst=None,
+            margin=None, shareholding=None, sbl=None):
     """Full analysis of one stock.
 
     daily: {t,o,h,l,c,v} 2y daily bars (shares).
     minute: optional 5m bars for OF estimation.
     tick_days: optional {date: tick_rows} for exact OF (paid tier).
-    inst: optional institutional rows [{date, foreign, trust}].
+    inst/margin/shareholding/sbl: optional chip data, see chip_analysis().
     """
     closes, highs, lows, vols, times = daily["c"], daily["h"], daily["l"], daily["v"], daily["t"]
     n = len(closes)
@@ -450,35 +657,25 @@ def analyze(daily, minute=None, tick_days=None, inst=None):
             signals.append({"text": "量價背離：近10日價格下跌但主動買盤佔優（吸籌嫌疑）", "bias": 1, "bt": None})
             score += 10
 
-    # ---- institutional (auxiliary, free FinMind data) ----
+    # ---- institutional summary (streak/signals now live in chip_analysis) ----
     inst_summary = None
     if inst:
-        f_streak = 0
-        for r in reversed(inst):
-            if r["foreign"] > 0 and f_streak >= 0:
-                f_streak += 1
-            elif r["foreign"] < 0 and f_streak <= 0:
-                f_streak -= 1
-            else:
-                break
+        f_streak = _foreign_streak(inst)
         inst_summary = {"foreign_streak": f_streak,
                         "foreign_recent": sum(r["foreign"] for r in inst[-5:]),
                         "trust_recent": sum(r["trust"] for r in inst[-5:])}
-        if abs(f_streak) >= 3:
-            side = "買超" if f_streak > 0 else "賣超"
-            signals.append({"text": f"外資連續{side} {abs(f_streak)} 日（近5日淨{'買' if inst_summary['foreign_recent']>0 else '賣'} {abs(inst_summary['foreign_recent'])//1000:,} 張）",
-                            "bias": 1 if f_streak > 0 else -1, "bt": None})
 
     # ---- finalize ----
     score = round(max(-100.0, min(100.0, score)))
-    label = ("強多" if score >= 60 else "偏多" if score >= 20 else
-             "中性" if score > -20 else "偏空" if score > -60 else "強空")
+    label = label_for(score)
 
     backtest = {}
     for sig in signals:
         key = sig.get("bt")
         if key and key in BACKTEST_SIGNALS and key not in backtest:
             backtest[key] = backtest_signal(ctx, BACKTEST_SIGNALS[key])
+
+    chip = chip_analysis(inst, margin, shareholding, sbl, vol20[last])
 
     return {
         "price": price,
@@ -488,7 +685,7 @@ def analyze(daily, minute=None, tick_days=None, inst=None):
         "trend": trend,
         "vp": vp, "vp_source": vp_src if vp else None, "vp_position": vp_position,
         "of": of, "of_mode": of_mode,
-        "inst": inst_summary,
+        "inst": inst_summary, "chip": chip,
         "signals": signals, "backtest": backtest,
         "score": score, "label": label,
     }
