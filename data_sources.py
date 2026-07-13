@@ -1,0 +1,362 @@
+# -*- coding: utf-8 -*-
+"""Data layer with source priority FinMind > yfinance > TWSE.
+
+Every public getter returns plain dicts/lists (JSON-ready) and tags the
+actual source used, so the UI can show where each number came from.
+Daily-granularity data is cached under cache/ and reused within the same
+calendar day to stay inside FinMind's rate limit (600 req/hr with token).
+"""
+import datetime as dt
+import json
+import os
+
+import requests
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CACHE_DIR = os.path.join(BASE_DIR, "cache")
+FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
+UA = {"User-Agent": "Mozilla/5.0 (stock-tracker local app)"}
+
+
+class SourceError(Exception):
+    pass
+
+
+def _load_token():
+    env_token = os.environ.get("FINMIND_TOKEN")
+    if env_token:
+        return env_token
+    path = os.path.join(BASE_DIR, ".env")
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                if key.strip() != "FINMIND_TOKEN":
+                    continue
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                    value = value[1:-1]
+                return value
+    except OSError:
+        pass
+    return ""
+
+
+FINMIND_TOKEN = _load_token()
+
+# ---------------------------------------------------------------- cache --
+
+def _cache_path(key):
+    return os.path.join(CACHE_DIR, f"{key}.json")
+
+
+def _cache_get(key):
+    try:
+        with open(_cache_path(key), encoding="utf-8") as f:
+            blob = json.load(f)
+        if blob.get("date") == dt.date.today().isoformat():
+            return blob["data"]
+    except (OSError, ValueError, KeyError):
+        pass
+    return None
+
+
+def _cache_put(key, data):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(_cache_path(key), "w", encoding="utf-8") as f:
+        json.dump({"date": dt.date.today().isoformat(), "data": data}, f)
+
+
+# -------------------------------------------------------------- finmind --
+
+def _finmind(dataset, data_id=None, start_date=None, end_date=None):
+    params = {"dataset": dataset}
+    if data_id:
+        params["data_id"] = data_id
+    if start_date:
+        params["start_date"] = start_date
+    if end_date:
+        params["end_date"] = end_date
+    headers = dict(UA)
+    if FINMIND_TOKEN:
+        headers["Authorization"] = f"Bearer {FINMIND_TOKEN}"
+    resp = requests.get(FINMIND_URL, params=params, headers=headers, timeout=30)
+    body = resp.json()
+    if resp.status_code != 200 or body.get("status") != 200:
+        raise SourceError(f"FinMind {dataset}: HTTP {resp.status_code} / {body.get('msg')}")
+    return body.get("data") or []
+
+
+# ------------------------------------------------------------- yfinance --
+
+def _yf_history(code, period, interval):
+    """Try .TW then .TWO; return a non-empty DataFrame or raise."""
+    import yfinance as yf
+    for suffix in (".TW", ".TWO"):
+        try:
+            df = yf.Ticker(code + suffix).history(period=period, interval=interval, auto_adjust=False)
+            if df is not None and len(df) > 0:
+                return df
+        except Exception:
+            continue
+    raise SourceError(f"yfinance: no data for {code}(.TW/.TWO)")
+
+
+def _df_to_hist(df):
+    hist = {"t": [], "o": [], "h": [], "l": [], "c": [], "v": []}
+    for ts, row in df.iterrows():
+        c = row.get("Close")
+        if c is None or c != c:  # NaN
+            continue
+        def val(name):
+            x = row.get(name)
+            return float(c) if x is None or x != x else float(x)
+        hist["t"].append(int(ts.timestamp()))
+        hist["o"].append(val("Open"))
+        hist["h"].append(val("High"))
+        hist["l"].append(val("Low"))
+        hist["c"].append(float(c))
+        hist["v"].append(0 if row.get("Volume") != row.get("Volume") else int(row.get("Volume") or 0))
+    if not hist["c"]:
+        raise SourceError("yfinance: all rows NaN")
+    return hist
+
+
+# ----------------------------------------------------------------- twse --
+
+def _roc_to_ts(roc_date):
+    parts = str(roc_date).split("/")
+    if len(parts) != 3:
+        return None
+    y = int(parts[0]) + 1911
+    d = dt.datetime(y, int(parts[1]), int(parts[2]))
+    return int(d.timestamp())
+
+
+def _twse_daily(code, months=4):
+    """TWSE STOCK_DAY monthly reports (listed stocks only)."""
+    hist = {"t": [], "o": [], "h": [], "l": [], "c": [], "v": []}
+    today = dt.date.today()
+    for i in range(months - 1, -1, -1):
+        m = today.month - i
+        y = today.year
+        while m <= 0:
+            m += 12
+            y -= 1
+        url = ("https://www.twse.com.tw/exchangeReport/STOCK_DAY"
+               f"?response=json&date={y}{m:02d}01&stockNo={code}")
+        try:
+            body = requests.get(url, headers=UA, timeout=30).json()
+        except Exception:
+            continue
+        for row in body.get("data") or []:
+            # columns: 0 date(ROC) 1 shares 2 amount 3 open 4 high 5 low 6 close
+            def num(s):
+                s = str(s).replace(",", "")
+                try:
+                    return float(s)
+                except ValueError:
+                    return None
+            close = num(row[6])
+            ts = _roc_to_ts(row[0])
+            if close is None or ts is None:
+                continue
+            o, h, l = num(row[3]), num(row[4]), num(row[5])
+            hist["t"].append(ts)
+            hist["o"].append(o if o is not None else close)
+            hist["h"].append(h if h is not None else close)
+            hist["l"].append(l if l is not None else close)
+            hist["c"].append(close)
+            hist["v"].append(int(num(row[1]) or 0))
+    if not hist["c"]:
+        raise SourceError(f"TWSE STOCK_DAY: no data for {code}")
+    return hist
+
+
+# ---------------------------------------------------------- public API --
+
+def get_daily(code, days=730):
+    """2y daily OHLCV. Volume unit: shares. Returns {t,o,h,l,c,v,source}."""
+    cached = _cache_get(f"daily_{code}")
+    if cached:
+        return cached
+
+    hist = None
+    # 1. FinMind
+    try:
+        start = (dt.date.today() - dt.timedelta(days=days + 30)).isoformat()
+        rows = _finmind("TaiwanStockPrice", code, start)
+        if rows:
+            hist = {"t": [], "o": [], "h": [], "l": [], "c": [], "v": []}
+            for r in rows:
+                c = r.get("close")
+                if not c:
+                    continue
+                d = dt.datetime.strptime(r["date"], "%Y-%m-%d")
+                hist["t"].append(int(d.timestamp()))
+                hist["o"].append(float(r.get("open") or c))
+                hist["h"].append(float(r.get("max") or c))
+                hist["l"].append(float(r.get("min") or c))
+                hist["c"].append(float(c))
+                hist["v"].append(int(r.get("Trading_Volume") or 0))
+            hist["source"] = "finmind"
+    except (SourceError, requests.RequestException, ValueError, KeyError):
+        hist = None
+
+    # 2. yfinance
+    if not hist or not hist["c"]:
+        try:
+            hist = _df_to_hist(_yf_history(code, "2y", "1d"))
+            hist["source"] = "yfinance"
+        except (SourceError, Exception):
+            hist = None
+
+    # 3. TWSE (short window fallback)
+    if not hist or not hist["c"]:
+        hist = _twse_daily(code)
+        hist["source"] = "twse"
+
+    _cache_put(f"daily_{code}", hist)
+    return hist
+
+
+def get_quote(code):
+    """Realtime-ish quote. TWSE MIS first (covers TWSE+TPEX), then yfinance."""
+    # 1. TWSE MIS
+    try:
+        ex_ch = f"tse_{code}.tw|otc_{code}.tw"
+        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex_ch}&json=1&delay=0"
+        body = requests.get(url, headers=UA, timeout=15).json()
+        for item in body.get("msgArray") or []:
+            def num(k):
+                s = item.get(k, "")
+                try:
+                    return float(s)
+                except (TypeError, ValueError):
+                    return None
+            prev = num("y")
+            price = num("z") or num("pz") or prev  # z='-' outside trading
+            if price is None:
+                continue
+            change = price - prev if prev else None
+            return {
+                "price": price,
+                "prev_close": prev,
+                "change": change,
+                "change_pct": (change / prev * 100) if (change is not None and prev) else None,
+                "vol_lots": int(num("v") or 0),  # accumulated lots (張)
+                "name": item.get("n") or code,
+                "source": "twse-mis",
+            }
+    except (requests.RequestException, ValueError):
+        pass
+
+    # 2. yfinance: last two daily closes
+    try:
+        df = _yf_history(code, "5d", "1d")
+        closes = [float(x) for x in df["Close"].dropna()]
+        vols = [int(x) for x in df["Volume"].fillna(0)]
+        if closes:
+            price = closes[-1]
+            prev = closes[-2] if len(closes) > 1 else None
+            change = price - prev if prev else None
+            return {
+                "price": price, "prev_close": prev, "change": change,
+                "change_pct": (change / prev * 100) if (change is not None and prev) else None,
+                "vol_lots": int(vols[-1] / 1000) if vols else 0,
+                "name": code, "source": "yfinance",
+            }
+    except (SourceError, Exception):
+        pass
+    return None
+
+
+def get_pe(code):
+    """Current PER/PBR/dividend yield from FinMind (free tier). None on failure."""
+    cached = _cache_get(f"pe_{code}")
+    if cached is not None:
+        return cached or None  # cached {} means known-missing
+    result = None
+    try:
+        start = (dt.date.today() - dt.timedelta(days=14)).isoformat()
+        rows = _finmind("TaiwanStockPER", code, start)
+        if rows:
+            r = rows[-1]
+            result = {
+                "pe": float(r["PER"]) if r.get("PER") else None,
+                "pbr": float(r["PBR"]) if r.get("PBR") else None,
+                "dividend_yield": float(r["dividend_yield"]) if r.get("dividend_yield") else None,
+                "date": r.get("date"),
+            }
+    except (SourceError, requests.RequestException, ValueError, KeyError):
+        result = None
+    _cache_put(f"pe_{code}", result or {})
+    return result
+
+
+def get_minute(code):
+    """5m bars, ~60 days, for order-flow estimation. Volume unit: shares."""
+    cached = _cache_get(f"minute_{code}")
+    if cached:
+        return cached
+    hist = _df_to_hist(_yf_history(code, "60d", "5m"))
+    hist["source"] = "yfinance-5m"
+    _cache_put(f"minute_{code}", hist)
+    return hist
+
+
+def get_ticks(code, date):
+    """FinMind tick data for one day. Raises SourceError if tier is insufficient."""
+    rows = _finmind("TaiwanStockPriceTick", code, date, date)
+    return rows
+
+
+_tick_tier_ok = None
+
+
+def tick_tier_available(probe_code="2330"):
+    """Probe once whether the token can access TaiwanStockPriceTick (paid tier)."""
+    global _tick_tier_ok
+    if _tick_tier_ok is not None:
+        return _tick_tier_ok
+    try:
+        daily = get_daily(probe_code)
+        last_date = dt.datetime.fromtimestamp(daily["t"][-1]).date().isoformat()
+        rows = get_ticks(probe_code, last_date)
+        _tick_tier_ok = bool(rows)
+    except (SourceError, requests.RequestException, ValueError, KeyError, IndexError):
+        _tick_tier_ok = False
+    return _tick_tier_ok
+
+
+def get_institutional(code, days=40):
+    """Recent institutional investors net buy/sell per day (FinMind, free).
+
+    Returns list of {date, foreign, trust} in shares, oldest first, or None.
+    """
+    cached = _cache_get(f"inst_{code}")
+    if cached is not None:
+        return cached or None
+    result = None
+    try:
+        start = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+        rows = _finmind("TaiwanStockInstitutionalInvestorsBuySell", code, start)
+        by_date = {}
+        for r in rows:
+            d = r.get("date")
+            name = (r.get("name") or "").lower()
+            net = int(r.get("buy") or 0) - int(r.get("sell") or 0)
+            slot = by_date.setdefault(d, {"date": d, "foreign": 0, "trust": 0})
+            if "foreign" in name:
+                slot["foreign"] += net
+            elif "investment_trust" in name:
+                slot["trust"] += net
+        if by_date:
+            result = [by_date[d] for d in sorted(by_date)]
+    except (SourceError, requests.RequestException, ValueError, KeyError):
+        result = None
+    _cache_put(f"inst_{code}", result or [])
+    return result
