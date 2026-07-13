@@ -65,6 +65,25 @@ tbody tr:hover td { background: var(--color-background-secondary); }
 .score-ss { background: #D5F0E4; color: #1E7A5E; }
 .of-pos { color: #B03A2E; font-weight: 600; }
 .of-neg { color: #1E7A5E; font-weight: 600; }
+.decision-panel { border: 1px solid var(--color-border-tertiary); border-radius: var(--border-radius-lg); padding: 14px 16px; margin-bottom: 1.5rem; }
+.decision-card { display: flex; align-items: center; gap: 10px; padding: 10px 6px; border-bottom: 1px solid var(--color-border-tertiary); cursor: pointer; flex-wrap: wrap; }
+.decision-card:last-of-type { border-bottom: none; }
+.decision-card:hover { background: var(--color-background-secondary); }
+.dc-code { font-family: var(--font-mono); font-weight: 600; }
+.dc-name { color: var(--color-text-secondary); font-size: 13px; }
+.dc-priority { font-size: 12px; color: var(--color-text-secondary); font-family: var(--font-mono); white-space: nowrap; }
+.dc-reason { flex: 1; min-width: 160px; font-size: 13px; }
+.dc-badges { display: flex; gap: 6px; flex-shrink: 0; }
+.action-badge { display: inline-block; font-size: 12px; padding: 3px 10px; border-radius: 4px; font-weight: 600; white-space: nowrap; }
+.action-buy { background: #FADBD8; color: #B03A2E; }
+.action-sell { background: #D5F0E4; color: #1E7A5E; }
+.action-watch { background: #FCEACB; color: #92600A; }
+.action-observe { background: #eaeaea; color: #666666; }
+.dc-nochange { margin-top: 8px; font-size: 13px; color: var(--color-text-secondary); }
+.dc-nochange summary { cursor: pointer; padding: 4px 0; }
+.dc-nochange-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.dc-nochange-item { font-family: var(--font-mono); font-size: 12px; padding: 2px 8px; background: var(--color-background-secondary); border-radius: 4px; cursor: pointer; }
+.dc-pending { font-size: 12px; color: var(--color-text-secondary); margin-top: 8px; }
 .detail-row > td { background: #fafafa !important; padding: 16px !important; }
 .detail-grid { display: grid; grid-template-columns: minmax(0, 2.3fr) minmax(280px, 1fr); gap: 20px; }
 @media (max-width: 980px) { .detail-grid { grid-template-columns: 1fr; } }
@@ -99,7 +118,7 @@ svg { touch-action: pan-y; }
     grid-template-areas:
       "code name  name  price"
       "chg  chg   chg   price"
-      "score score of    of"
+      "score chip of    of"
       "ma    ma    vp    vp"
       "pe    pe    vol   vol"
       "upd   upd   btns  btns";
@@ -119,6 +138,7 @@ svg { touch-action: pan-y; }
   .c-price { grid-area: price; font-size: 20px; text-align: right; }
   .c-chg { grid-area: chg; }
   .c-score { grid-area: score; }
+  .c-chip { grid-area: chip; }
   .c-of { grid-area: of; }
   .c-ma { grid-area: ma; }
   .c-vp { grid-area: vp; }
@@ -160,6 +180,11 @@ svg { touch-action: pan-y; }
     <div class="stat-card"><div class="stat-label">Order Flow 模式</div><div class="stat-value" id="statOfMode" style="font-size:15px; line-height:1.4;">—</div></div>
   </div>
 
+  <div class="decision-panel">
+    <div class="detail-section-title" style="margin-bottom:10px;">今日決策面板</div>
+    <div id="decisionPanel"><div class="empty" style="padding:1.5rem;">載入中...</div></div>
+  </div>
+
   <div class="search-filter">
     <input type="text" id="filterInput" placeholder="搜尋代碼或名稱..." oninput="renderTable()" />
     <select class="filter-select" id="scoreFilter" onchange="renderTable()">
@@ -184,13 +209,14 @@ svg { touch-action: pan-y; }
           <th onclick="sortBy('ofRatio')" title="近5日主動買賣淨額佔總量比">OF Δ5日 <span class="sort-arrow" id="sort-ofRatio"></span></th>
           <th onclick="sortBy('vpPos')" title="現價相對 Volume Profile 價值區位置">VP位置 <span class="sort-arrow" id="sort-vpPos"></span></th>
           <th onclick="sortBy('score')">技術評分 <span class="sort-arrow" id="sort-score"></span></th>
+          <th onclick="sortBy('chipScore')" title="法人／融資融券／外資持股／借券賣出餘額綜合子分">籌碼分 <span class="sort-arrow" id="sort-chipScore"></span></th>
           <th onclick="sortBy('vol')">成交量 <span class="sort-arrow" id="sort-vol"></span></th>
           <th style="width:76px;">更新</th>
           <th style="width:44px;"></th>
         </tr>
       </thead>
       <tbody id="stockTable">
-        <tr class="plain-row"><td colspan="13" class="empty">載入中，請稍候...</td></tr>
+        <tr class="plain-row"><td colspan="14" class="empty">載入中，請稍候...</td></tr>
       </tbody>
     </table>
   </div>
@@ -208,18 +234,28 @@ let data = {};           // code -> /api/analysis payload
 let failed = {};         // code -> error message
 let loadingSet = new Set();
 let expandedCode = null;
-let sortKey = 'code', sortAsc = true;
+let sortKey = 'priority', sortAsc = false;
 let tickTier = false;
+let CFG = { score_bands: [60, 20, -20, -60], score_labels: ["強多", "偏多", "中性", "偏空", "強空"],
+            action_thresholds: { composite: 40, priority_act: 50, priority_watch: 25 },
+            chip_weights: { institutional: 40, margin: 20, shareholding: 20, sbl: 20 } };
 const klineMeta = {};
+const ACTION_CLASS = { '準備進場': 'action-buy', '減碼警示': 'action-sell', '今日關注': 'action-watch', '觀察': 'action-observe' };
 
 const fmtP = p => p == null ? '—' : (p >= 500 ? p.toFixed(0) : p >= 100 ? p.toFixed(1) : p.toFixed(2));
 const fmtLots = v => { const l = v / 1000; return l >= 10000 ? (l / 1000).toFixed(1) + 'K張' : Math.round(l).toLocaleString() + '張'; };
 const fmtDate = ts => { const d = new Date(ts * 1000); return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`; };
+// asymmetric bands (>= for bull side, > for bear side), single source: CFG.score_bands
+const scoreClass = score => {
+  const b = CFG.score_bands;
+  return score >= b[0] ? 'score-sb' : score >= b[1] ? 'score-b' : score > b[2] ? 'score-n' : score > b[3] ? 'score-s' : 'score-ss';
+};
 
 // ---- data access helpers for sorting/cells ----
 function rowView(s) {
   const d = data[s.code];
   const a = d && d.analysis;
+  const att = d && d.attention;
   return {
     code: s.code,
     name: (s.name || (d && d.name) || s.code),
@@ -231,6 +267,11 @@ function rowView(s) {
     vpPos: a ? ({above_va: 2, inside_va: 1, below_va: 0}[a.vp_position] ?? null) : null,
     score: a ? a.score : null,
     label: a ? a.label : null,
+    chipScore: a && a.chip ? a.chip.score : null,
+    chipCoverage: a && a.chip ? a.chip.coverage.length : null,
+    priority: att ? att.priority : null,
+    action: att ? att.action : null,
+    reason: att ? att.reason : null,
     vol: d && d.quote ? d.quote.vol_lots : null,
     updated: d ? d.last_date : null,
   };
@@ -251,6 +292,10 @@ async function loadStock(code) {
 }
 
 async function init() {
+  try {
+    const cr = await fetch('/api/config');
+    if (cr.ok) CFG = await cr.json();
+  } catch (e) { /* keep built-in CFG defaults */ }
   const r = await fetch('/api/watchlist');
   const j = await r.json();
   watchlist = j.watchlist; tickTier = j.tick_tier;
@@ -304,13 +349,63 @@ function sortBy(key) {
 
 function updateStats() {
   const views = watchlist.map(rowView);
+  const [bullBand, bearBand] = [CFG.score_bands[1], CFG.score_bands[2]];
   document.getElementById('statCount').textContent = watchlist.length;
   document.getElementById('statAbove').textContent = views.filter(v => v.price != null && v.ma60 != null && v.price >= v.ma60).length;
   document.getElementById('statBelow').textContent = views.filter(v => v.price != null && v.ma60 != null && v.price < v.ma60).length;
-  const bulls = views.filter(v => v.score != null && v.score >= 20).length;
-  const bears = views.filter(v => v.score != null && v.score <= -20).length;
+  const bulls = views.filter(v => v.score != null && v.score >= bullBand).length;
+  const bears = views.filter(v => v.score != null && v.score <= bearBand).length;
   document.getElementById('statBullBear').innerHTML = views.some(v => v.score != null)
     ? `<span style="color:#B03A2E;">${bulls}</span> / <span style="color:#1E7A5E;">${bears}</span>` : '—';
+  renderDecisionPanel(views);
+}
+
+function focusStock(code) {
+  toggleDetail(code);
+  const row = document.getElementById('row-' + code);
+  if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function renderDecisionPanel(views) {
+  const panel = document.getElementById('decisionPanel');
+  if (!panel) return;
+  views = views || watchlist.map(rowView);
+  const withAttention = views.filter(v => v.priority != null);
+  const pendingCount = watchlist.length - withAttention.length;
+  const active = withAttention.filter(v => v.action !== '無變化').sort((a, b) => b.priority - a.priority);
+  const noChange = withAttention.filter(v => v.action === '無變化');
+
+  const card = v => {
+    const cls = ACTION_CLASS[v.action] || 'action-observe';
+    const chipBadge = v.chipScore != null
+      ? `<span class="score-badge ${scoreClass(v.chipScore)}" title="籌碼分（${v.chipCoverage}/4 項資料）">籌碼 ${v.chipScore > 0 ? '+' : ''}${v.chipScore}</span>`
+      : '<span class="score-badge score-n">籌碼 —</span>';
+    const techBadge = `<span class="score-badge ${scoreClass(v.score)}">技術 ${v.score > 0 ? '+' : ''}${v.score}</span>`;
+    return `<div class="decision-card" onclick="focusStock('${v.code}')">
+      <span class="action-badge ${cls}">${v.action}</span>
+      <span class="dc-code">${v.code}</span>
+      <span class="dc-name">${v.name}</span>
+      <span class="dc-priority" title="行動優先級">P${v.priority}</span>
+      <span class="dc-reason">${v.reason || ''}</span>
+      <span class="dc-badges">${techBadge}${chipBadge}</span>
+    </div>`;
+  };
+
+  let html;
+  if (!active.length && !noChange.length) {
+    html = `<div class="empty" style="padding:1.5rem;">${pendingCount ? '分析計算中…' : '目前無明顯訊號'}</div>`;
+  } else {
+    html = active.map(card).join('') || '<div class="empty" style="padding:1rem;">今日無需特別關注的個股</div>';
+    if (noChange.length) {
+      html += `<details class="dc-nochange"><summary>無變化 ${noChange.length} 檔</summary>
+        <div class="dc-nochange-list">${noChange.map(v => `<span class="dc-nochange-item" onclick="focusStock('${v.code}')">${v.code} ${v.name}</span>`).join('')}</div>
+      </details>`;
+    }
+  }
+  if (pendingCount > 0) {
+    html += `<div class="dc-pending"><span class="loading"></span> 尚有 ${pendingCount} 檔分析中…</div>`;
+  }
+  panel.innerHTML = html;
 }
 
 function renderTable() {
@@ -319,8 +414,8 @@ function renderTable() {
   const scoreFilter = document.getElementById('scoreFilter').value;
   let rows = watchlist.map(rowView);
   if (filter) rows = rows.filter(v => v.code.toLowerCase().includes(filter) || v.name.toLowerCase().includes(filter));
-  if (scoreFilter === 'bull') rows = rows.filter(v => v.score != null && v.score >= 20);
-  if (scoreFilter === 'bear') rows = rows.filter(v => v.score != null && v.score <= -20);
+  if (scoreFilter === 'bull') rows = rows.filter(v => v.score != null && v.score >= CFG.score_bands[1]);
+  if (scoreFilter === 'bear') rows = rows.filter(v => v.score != null && v.score <= CFG.score_bands[2]);
   rows.sort((x, y) => {
     let a = x[sortKey], b = y[sortKey];
     if (typeof a === 'string') a = a.toLowerCase();
@@ -330,7 +425,7 @@ function renderTable() {
   });
 
   if (!rows.length) {
-    tbody.innerHTML = `<tr class="plain-row"><td colspan="13" class="empty">${watchlist.length ? '沒有符合條件的個股' : '尚未新增個股'}</td></tr>`;
+    tbody.innerHTML = `<tr class="plain-row"><td colspan="14" class="empty">${watchlist.length ? '沒有符合條件的個股' : '尚未新增個股'}</td></tr>`;
     return;
   }
 
@@ -365,15 +460,18 @@ function renderTable() {
     }
     let score = isLoading ? spin : '—';
     if (!isLoading && v.score != null) {
-      const cls = v.score >= 60 ? 'score-sb' : v.score >= 20 ? 'score-b' : v.score > -20 ? 'score-n' : v.score > -60 ? 'score-s' : 'score-ss';
-      score = `<span class="score-badge ${cls}">${v.score > 0 ? '+' : ''}${v.score} ${v.label}</span>`;
+      score = `<span class="score-badge ${scoreClass(v.score)}">${v.score > 0 ? '+' : ''}${v.score} ${v.label}</span>`;
     }
     if (err && !isLoading) score = `<span title="${err}" style="color:#993C1D; font-size:12px; cursor:help;">載入失敗</span>`;
+    let chip = isLoading ? spin : '—';
+    if (!isLoading && v.chipScore != null) {
+      chip = `<span class="score-badge ${scoreClass(v.chipScore)}" title="籌碼分（${v.chipCoverage}/4 項資料）">${v.chipScore > 0 ? '+' : ''}${v.chipScore}</span>`;
+    }
 
     const isOpen = expandedCode === v.code;
     const d = data[v.code];
     const srcTag = d ? `<span class="src-tag" title="日線資料來源">${d.daily_source}</span>` : '';
-    const row = `<tr>
+    const row = `<tr id="row-${v.code}">
       <td class="c-exp" style="text-align:center;"><button class="expand-btn ${isOpen ? 'open' : ''}" onclick="toggleDetail('${v.code}')" title="展開K線圖與技術分析">▼</button></td>
       <td class="c-code" style="font-weight:600; font-family:var(--font-mono);">${v.code}</td>
       <td class="c-name" style="color:var(--color-text-secondary);">${v.name} ${srcTag}</td>
@@ -384,6 +482,7 @@ function renderTable() {
       <td class="c-of" data-label="OF Δ5日" style="font-family:var(--font-mono);">${of}</td>
       <td class="c-vp" data-label="VP位置">${vp}</td>
       <td class="c-score" data-label="技術評分">${score}</td>
+      <td class="c-chip" data-label="籌碼分">${chip}</td>
       <td class="c-vol" data-label="成交量" style="color:var(--color-text-secondary);">${v.vol != null ? v.vol.toLocaleString() + '張' : '—'}</td>
       <td class="c-upd" style="font-size:11px; color:var(--color-text-secondary);">${v.updated || '—'}</td>
       <td class="c-del" style="text-align:right;"><button class="del-btn" onclick="removeStock('${v.code}')" title="移除">×</button></td>
@@ -395,9 +494,9 @@ function renderTable() {
 // ================= detail panel =================
 
 function buildDetailRow(code) {
-  if (loadingSet.has(code)) return `<tr class="detail-row"><td colspan="13"><div class="empty" style="padding:1.5rem;">分析計算中 <span class="loading"></span></div></td></tr>`;
+  if (loadingSet.has(code)) return `<tr class="detail-row"><td colspan="14"><div class="empty" style="padding:1.5rem;">分析計算中 <span class="loading"></span></div></td></tr>`;
   const d = data[code];
-  if (!d) return `<tr class="detail-row"><td colspan="13"><div class="empty" style="padding:1.5rem;">${failed[code] || '無資料'}</div></td></tr>`;
+  if (!d) return `<tr class="detail-row"><td colspan="14"><div class="empty" style="padding:1.5rem;">${failed[code] || '無資料'}</div></td></tr>`;
   const a = d.analysis;
 
   const sigHtml = a.signals.length ? a.signals.map(sig => {
@@ -437,13 +536,23 @@ function buildDetailRow(code) {
       外資近5日淨${a.inst.foreign_recent >= 0 ? '買' : '賣'} ${Math.abs(Math.round(a.inst.foreign_recent / 1000)).toLocaleString()} 張、
       投信淨${a.inst.trust_recent >= 0 ? '買' : '賣'} ${Math.abs(Math.round(a.inst.trust_recent / 1000)).toLocaleString()} 張</div>`;
   }
+  if (a.chip) {
+    const c = a.chip.components;
+    const lines = [];
+    if (c.institutional) lines.push(`法人5日淨${c.institutional.net5 >= 0 ? '買' : '賣'} ${Math.abs(Math.round(c.institutional.net5 / 1000)).toLocaleString()} 張`);
+    if (c.margin) lines.push(`融資5日${c.margin.chg5 >= 0 ? '增' : '減'} ${Math.abs(c.margin.chg5 * 100).toFixed(1)}%`);
+    if (c.shareholding) lines.push(`外資持股比20日${c.shareholding.d20 >= 0 ? '+' : '−'}${Math.abs(c.shareholding.d20).toFixed(2)} pp`);
+    if (c.sbl) lines.push(`借券賣出餘額5日${c.sbl.delta5 >= 0 ? '增' : '減'} ${Math.abs(Math.round(c.sbl.delta5 / 1000)).toLocaleString()} 張`);
+    fc += `<div class="forecast-box"><div class="fc-title">籌碼面（綜合子分 ${a.chip.score > 0 ? '+' : ''}${a.chip.score} ${a.chip.label}，${a.chip.coverage.length}/4 項資料）</div>
+      ${lines.length ? lines.join('<br>') : '無可用組件'}</div>`;
+  }
 
   const srStr = [
     a.sr.resistances.length ? `壓力 ${a.sr.resistances.map(fmtP).join(' / ')}` : '',
     a.sr.supports.length ? `支撐 ${a.sr.supports.map(fmtP).join(' / ')}` : '',
   ].filter(Boolean).join('　');
 
-  return `<tr class="detail-row"><td colspan="13">
+  return `<tr class="detail-row"><td colspan="14">
     <div class="detail-grid">
       <div class="kline-wrap">
         <div class="kline-legend">近${isMobile() ? Math.min(60, d.chart.c.length) : d.chart.c.length}個交易日　紅漲綠跌（台股慣例）
