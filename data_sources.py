@@ -360,3 +360,96 @@ def get_institutional(code, days=40):
         result = None
     _cache_put(f"inst_{code}", result or [])
     return result
+
+
+def get_margin(code, days=40):
+    """Margin purchase / short sale balances via TaiwanStockMarginPurchaseShortSale.
+    Returns [{date, margin_balance, margin_delta, short_balance, short_delta}] in shares
+    (source unit is lots; multiply by 1000), oldest first, or None on failure."""
+    cached = _cache_get(f"margin_{code}")
+    if cached is not None:
+        return cached or None
+    result = None
+    try:
+        start = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+        rows = _finmind("TaiwanStockMarginPurchaseShortSale", code, start)
+        by_date = {}
+        for r in rows:
+            d = r.get("date")
+            if not d:
+                continue
+            today_bal = int(float(r.get("MarginPurchaseTodayBalance") or 0)) * 1000
+            yest_bal = int(float(r.get("MarginPurchaseYesterdayBalance") or 0)) * 1000
+            short_today = int(float(r.get("ShortSaleTodayBalance") or 0)) * 1000
+            short_yest = int(float(r.get("ShortSaleYesterdayBalance") or 0)) * 1000
+            by_date[d] = {
+                "date": d,
+                "margin_balance": today_bal,
+                "margin_delta": today_bal - yest_bal,
+                "short_balance": short_today,
+                "short_delta": short_today - short_yest,
+            }
+        if by_date:
+            result = [by_date[d] for d in sorted(by_date)]
+    except (SourceError, requests.RequestException, ValueError, KeyError):
+        result = None
+    _cache_put(f"margin_{code}", result or [])
+    return result
+
+
+def get_shareholding(code, days=40):
+    """Foreign shareholding via TaiwanStockShareholding.
+    Returns [{date, foreign_ratio, foreign_shares}] (ratio in %), oldest first, or None."""
+    cached = _cache_get(f"sh_{code}")
+    if cached is not None:
+        return cached or None
+    result = None
+    try:
+        start = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+        rows = _finmind("TaiwanStockShareholding", code, start)
+        by_date = {}
+        for r in rows:
+            d = r.get("date")
+            if not d:
+                continue
+            by_date[d] = {
+                "date": d,
+                "foreign_ratio": float(r.get("ForeignInvestmentSharesRatio") or 0),
+                "foreign_shares": int(float(r.get("ForeignInvestmentShares") or 0)),
+            }
+        if by_date:
+            result = [by_date[d] for d in sorted(by_date)]
+    except (SourceError, requests.RequestException, ValueError, KeyError):
+        result = None
+    _cache_put(f"sh_{code}", result or [])
+    return result
+
+
+def get_sbl(code, days=40):
+    """SBL short sale balances via TaiwanDailyShortSaleBalances.
+    Returns [{date, sbl_balance, sbl_sales, sbl_returns}] in shares (source is already
+    in shares — do NOT multiply by 1000), oldest first, or None."""
+    cached = _cache_get(f"sbl_{code}")
+    if cached is not None:
+        return cached or None
+    result = None
+    try:
+        start = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+        rows = _finmind("TaiwanDailyShortSaleBalances", code, start)
+        by_date = {}
+        for r in rows:
+            d = r.get("date")
+            if not d:
+                continue
+            by_date[d] = {
+                "date": d,
+                "sbl_balance": int(float(r.get("SBLShortSalesCurrentDayBalance") or 0)),
+                "sbl_sales": int(float(r.get("SBLShortSalesShortSales") or 0)),
+                "sbl_returns": int(float(r.get("SBLShortSalesReturns") or 0)),
+            }
+        if by_date:
+            result = [by_date[d] for d in sorted(by_date)]
+    except (SourceError, requests.RequestException, ValueError, KeyError):
+        result = None
+    _cache_put(f"sbl_{code}", result or [])
+    return result
