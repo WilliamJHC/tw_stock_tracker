@@ -116,9 +116,15 @@ def api_analysis(code: str):
         tick_days = _fetch_tick_days(code, daily["t"])
 
     inst = ds.get_institutional(code)
-    result = an.analyze(daily, minute, tick_days, inst)
+    margin = ds.get_margin(code)
+    shareholding = ds.get_shareholding(code)
+    sbl = ds.get_sbl(code)
+    result = an.analyze(daily, minute, tick_days, inst,
+                        margin=margin, shareholding=shareholding, sbl=sbl)
     if result is None:
         raise HTTPException(422, f"{code} 歷史資料不足，無法分析")
+
+    attention = an.compute_attention(result["score"], result.get("chip"), result)
 
     quote = ds.get_quote(code)
     pe = ds.get_pe(code)
@@ -146,4 +152,15 @@ def api_analysis(code: str):
         "ma60_last": result["ma60"][lastidx],
         "chart": chart,
         "analysis": analysis_out,
+        "attention": attention,
+    }
+
+
+@app.get("/api/config")
+def api_config():
+    return {
+        "score_bands": an.SCORE_BANDS,
+        "score_labels": an.SCORE_LABELS,
+        "action_thresholds": an.ACTION_THRESHOLDS,
+        "chip_weights": an.CHIP_WEIGHTS,
     }

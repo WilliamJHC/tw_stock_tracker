@@ -45,6 +45,10 @@ def label_for(score):
 # from SCORE_WEIGHTS so the technical score is unaffected.
 CHIP_WEIGHTS = {"institutional": 40, "margin": 20, "shareholding": 20, "sbl": 20}
 
+# compute_attention() action cutoffs, exposed so app.py's /api/config can
+# report the same numbers instead of re-hardcoding them.
+ACTION_THRESHOLDS = {"composite": 40, "priority_act": 50, "priority_watch": 25}
+
 
 QUADRANT_INFO = {
     "PU_VU": {"label": "價漲量增", "desc": "多方動能健康", "bias": 1, "score": 1},
@@ -502,14 +506,15 @@ def compute_attention(tech_score, chip, result):
 
     trigger_points = sum(p for p, _ in triggers)
     priority = min(100, round(0.6 * abs(composite) + trigger_points))
+    t = ACTION_THRESHOLDS
 
-    if composite >= 40 and priority >= 50:
+    if composite >= t["composite"] and priority >= t["priority_act"]:
         action = "準備進場"
-    elif composite <= -40 and priority >= 50:
+    elif composite <= -t["composite"] and priority >= t["priority_act"]:
         action = "減碼警示"
-    elif priority >= 50:
+    elif priority >= t["priority_act"]:
         action = "今日關注"
-    elif priority >= 25:
+    elif priority >= t["priority_watch"]:
         action = "觀察"
     else:
         action = "無變化"
