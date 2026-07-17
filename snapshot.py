@@ -4,6 +4,7 @@
 Run:  .venv\\Scripts\\python snapshot.py --mode full --out dist
 """
 import argparse
+import copy
 import json
 import os
 import shutil
@@ -11,6 +12,8 @@ import sys
 import time
 from zoneinfo import ZoneInfo
 import datetime as dt
+
+import requests
 
 import data_sources as ds
 import pipeline as pl
@@ -90,6 +93,67 @@ def run_full(out_dir):
     return ok, fail, len(watchlist)
 
 
+def load_base(base_file, base_url):
+    """Fetch the previous snapshot to use as the light-mode base. Returns None on failure."""
+    if base_file:
+        try:
+            with open(base_file, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError) as e:
+            print(f"[snapshot] 讀取 --base-file 失敗：{e}", file=sys.stderr)
+            return None
+    if base_url:
+        try:
+            r = requests.get(base_url.rstrip("/") + "/data.json", timeout=15)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            print(f"[snapshot] 下載 --base-url 失敗：{e}", file=sys.stderr)
+            return None
+    return None
+
+
+def merge_light(base, quotes, now_iso):
+    """Overwrite per-stock quote (and quote-carried name) only; set mode=light and
+    quotes_updated_at=now_iso; keep full_generated_at / analysis / attention / chart untouched."""
+    out = copy.deepcopy(base)
+    out["mode"] = "light"
+    out["quotes_updated_at"] = now_iso
+    for code, stock in out.get("stocks", {}).items():
+        if not isinstance(stock, dict) or "error" in stock:
+            continue
+        q = quotes.get(code)
+        if q:
+            stock["quote"] = q
+            if q.get("name"):
+                stock["name"] = q["name"]
+    return out
+
+
+def run_light(out_dir, base):
+    watchlist = base.get("watchlist", [])
+    quotes = {}
+    ok, fail = 0, 0
+    for s in watchlist:
+        code = s["code"]
+        try:
+            q = ds.get_quote(code)
+        except Exception:
+            q = None
+        if q:
+            quotes[code] = q
+            ok += 1
+        else:
+            fail += 1  # keep the stock's previous quote untouched
+
+    payload = merge_light(base, quotes, now_iso())
+    assemble_site(out_dir)
+    with open(os.path.join(out_dir, "data.json"), "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+
+    return ok, fail, len(watchlist)
+
+
 def main():
     parser = argparse.ArgumentParser(description="產生 stock_tracker 靜態快照")
     parser.add_argument("--mode", choices=["full", "light"], required=True)
@@ -101,13 +165,20 @@ def main():
     out_dir = os.path.join(BASE_DIR, args.out) if not os.path.isabs(args.out) else args.out
     t0 = time.time()
 
+    actual_mode = args.mode
     if args.mode == "full":
         ok, fail, total = run_full(out_dir)
     else:
-        sys.exit("light 模式尚未實作（見計畫書 Phase 2）")
+        base = load_base(args.base_file, args.base_url)
+        if base is None:
+            print("[snapshot] 取不到 light 基底，改跑 full", file=sys.stderr)
+            ok, fail, total = run_full(out_dir)
+            actual_mode = "full"
+        else:
+            ok, fail, total = run_light(out_dir, base)
 
     elapsed = time.time() - t0
-    print(f"[snapshot] mode={args.mode} 成功={ok} 失敗={fail}/{total} 耗時={elapsed:.1f}s")
+    print(f"[snapshot] mode={actual_mode} 成功={ok} 失敗={fail}/{total} 耗時={elapsed:.1f}s")
 
     if fail > total / 2:
         print(f"[snapshot] 失敗檔數過半（{fail}/{total}），視為失敗", file=sys.stderr)
