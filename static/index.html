@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#1a1a1a">
+<meta name="robots" content="noindex, nofollow">
 <link rel="manifest" href="/static/manifest.json">
 <link rel="apple-touch-icon" href="/static/icon.png">
 <title>台灣股市追蹤器 v2</title>
@@ -103,6 +104,7 @@ tbody tr:hover td { background: var(--color-background-secondary); }
 .src-tag { display: inline-block; font-size: 10px; padding: 1px 5px; border-radius: 3px; background: #eef2f7; color: #5a6b7f; font-family: var(--font-mono); }
 button, .expand-btn, .del-btn { -webkit-tap-highlight-color: transparent; }
 svg { touch-action: pan-y; }
+body.static-mode .add-bar, body.static-mode .del-btn { display: none; }
 
 /* ===== Mobile: table rows become cards (desktop layout untouched) ===== */
 @media (max-width: 768px) {
@@ -291,7 +293,46 @@ async function loadStock(code) {
   updateStats(); renderTable();
 }
 
+let staticMode = false;
+
+function fmtDT(iso) {
+  const d = new Date(iso);
+  return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+function fmtT(iso) {
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+function applyStaticSnapshot(snap) {
+  CFG = snap.config || CFG;
+  watchlist = snap.watchlist || [];
+  tickTier = !!snap.tick_tier;
+  data = {}; failed = {};
+  for (const code of Object.keys(snap.stocks || {})) {
+    const v = snap.stocks[code];
+    if (v && v.error) failed[code] = v.error; else data[code] = v;
+  }
+  document.getElementById('statOfMode').textContent = tickTier ? '逐筆內外盤（精確）' : '分鐘K推估';
+  updateStats(); renderTable();
+  document.getElementById('lastUpdate').textContent =
+    `分析 ${fmtDT(snap.full_generated_at)}・報價 ${fmtT(snap.quotes_updated_at)}`;
+}
+
 async function init() {
+  try {
+    const dr = await fetch('data.json', { cache: 'no-store' });
+    if (dr.ok) {
+      staticMode = true;
+      document.body.classList.add('static-mode');
+      applyStaticSnapshot(await dr.json());
+      return;
+    }
+  } catch (e) { /* fall through to live API mode */ }
+  await initLive();
+}
+
+async function initLive() {
   try {
     const cr = await fetch('/api/config');
     if (cr.ok) CFG = await cr.json();
@@ -306,6 +347,13 @@ async function init() {
 }
 
 async function refreshAll() {
+  if (staticMode) {
+    try {
+      const dr = await fetch('data.json', { cache: 'no-store' });
+      if (dr.ok) { applyStaticSnapshot(await dr.json()); }
+    } catch (e) { /* keep showing the last snapshot */ }
+    return;
+  }
   data = {}; failed = {};
   for (const s of watchlist) await loadStock(s.code);
   document.getElementById('lastUpdate').textContent = '最後更新：' + new Date().toLocaleTimeString('zh-TW');
