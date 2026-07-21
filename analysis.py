@@ -16,9 +16,20 @@ import math
 #   trend       20-day regression slope
 #   vpPosition  price vs Volume Profile value area (acceptance/rejection)
 #   orderFlow   recent aggressive buy/sell net delta
+# 2026-07-20: rebalanced to make room for three new scored short/mid-term
+# signals (gapTracker, donchianPosition, rsRanking) added in the intraday
+# dev plan Phase 4. Old weights scaled by ~0.74 and rounded; new weights
+# picked so the total stays 100. ATR / bollinger squeeze / MA20 deviation
+# are informational-only (see analyze()) and intentionally carry no weight:
+#   - ATR is a volatility magnitude, not directional -> nothing to score.
+#   - squeeze predicts a coming volatility expansion but not its direction
+#     -> scoring it would mean guessing a direction we don't have.
+#   - MA20 deviation duplicates what maPosition already scores (price vs
+#     MA20), it's shown as a precise number but not double-counted.
 SCORE_WEIGHTS = {
-    "maPosition": 25, "maAlign": 10, "volumePrice": 15,
-    "trend": 15, "vpPosition": 15, "orderFlow": 20,
+    "maPosition": 19, "maAlign": 7, "volumePrice": 11,
+    "trend": 11, "vpPosition": 11, "orderFlow": 15,
+    "gapTracker": 8, "donchianPosition": 10, "rsRanking": 8,
 }
 
 # Composite-score label bands, shared by analyze() and chip_analysis() so the
@@ -137,6 +148,183 @@ def trend_estimate(closes, window=20, horizon=20):
         "slope_pct_per_day": slope_pct * 100,
         "est": {"low": price * (1 + drift - band), "mid": price * (1 + drift), "high": price * (1 + drift + band)},
     }
+
+
+# --------------------------------------------- short/mid-term indicators ----
+
+# Thresholds for the short-term (1-5d) / mid-term (2-8w) indicators added
+# 2026-07-20. Centralized here per the SCORE_WEIGHTS/SCORE_BANDS convention.
+SHORT_TERM_THRESHOLDS = {
+    "atr_period": 14,
+    "big_candle_vol_mult": 1.5,   # volume > 1.5x vol20 (looser than the existing 2x "爆量" signal)
+    "big_candle_body_pct": 0.03,  # |close-open|/open >= 3%
+    "gap_pct": 0.02,              # |open-prev_close|/prev_close >= 2% counts as a gap
+    "gap_lookback": 20,
+}
+MID_TERM_THRESHOLDS = {
+    "bb_period": 20, "bb_std_mult": 2, "bb_lookback": 120, "bb_squeeze_pct": 20,
+    "donchian_short": 55, "donchian_long": 120,
+}
+
+
+def atr(highs, lows, closes, period=14):
+    """Average True Range, Wilder smoothing.
+
+    TR[i] = max(H[i]-L[i], |H[i]-C[i-1]|, |L[i]-C[i-1]|).
+    First ATR = simple mean of the first `period` TRs; subsequent values use
+    Wilder's recursive smoothing: ATR[i] = (ATR[i-1]*(period-1) + TR[i]) / period.
+    Returns the latest ATR value, or None if there's not enough history
+    (need period+1 bars: period TRs each require a previous close).
+    """
+    n = len(closes)
+    if n < period + 1:
+        return None
+    trs = []
+    for i in range(1, n):
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+        trs.append(tr)
+    a = sum(trs[:period]) / period
+    for tr in trs[period:]:
+        a = (a * (period - 1) + tr) / period
+    return a
+
+
+def big_candle_signal(opens, closes, vols, vol20, i):
+    """爆量長紅/長黑：volume > vol_mult*vol20 AND |close-open|/open >= body_pct.
+
+    Returns "bull", "bear", or None. Deliberately not weighted in
+    SCORE_WEIGHTS (see comment there) -- shown/backtested like the existing
+    "爆量(>2倍均量)" signal.
+    """
+    t = SHORT_TERM_THRESHOLDS
+    if not vol20[i] or not opens[i]:
+        return None
+    if vols[i] <= t["big_candle_vol_mult"] * vol20[i]:
+        return None
+    body_pct = (closes[i] - opens[i]) / opens[i]
+    if abs(body_pct) < t["big_candle_body_pct"]:
+        return None
+    return "bull" if body_pct > 0 else "bear"
+
+
+def gap_tracker(opens, highs, lows, closes, lookback=20, gap_pct_threshold=None):
+    """Track price gaps (open vs prior close) over the last `lookback` bars.
+
+    filled: True if any bar from the gap day onward traded back into the
+    prior-close level (gap up filled when a later low <= prev_close; gap
+    down filled when a later high >= prev_close).
+    Returns [{date_idx, gap_pct, direction, filled}], oldest first.
+    """
+    n = len(closes)
+    threshold = gap_pct_threshold if gap_pct_threshold is not None else SHORT_TERM_THRESHOLDS["gap_pct"]
+    start = max(1, n - lookback)
+    gaps = []
+    for i in range(start, n):
+        prev_close = closes[i - 1]
+        if not prev_close:
+            continue
+        gap_pct = (opens[i] - prev_close) / prev_close
+        if abs(gap_pct) < threshold:
+            continue
+        direction = "up" if gap_pct > 0 else "down"
+        filled = False
+        for j in range(i, n):
+            if direction == "up" and lows[j] <= prev_close:
+                filled = True
+                break
+            if direction == "down" and highs[j] >= prev_close:
+                filled = True
+                break
+        gaps.append({"date_idx": i, "gap_pct": gap_pct * 100, "direction": direction, "filled": filled})
+    return gaps
+
+
+def rs_ranking(returns_by_code):
+    """Rank codes by a pre-computed return (e.g. 5-day % return).
+
+    Pure ranking function -- callers compute the returns (cross-file
+    concern) and pass them in as {code: return_pct}.
+    Returns {code: {rank, percentile, return_pct}}; rank 1 = best return.
+    percentile 100 = best performer, 0 = worst; with a single code it gets
+    100 (nothing to rank it against, treated as top of one).
+    """
+    if not returns_by_code:
+        return {}
+    items = sorted(returns_by_code.items(), key=lambda kv: kv[1], reverse=True)
+    total = len(items)
+    out = {}
+    for rank, (code, ret) in enumerate(items, start=1):
+        percentile = 100.0 if total == 1 else (total - rank) / (total - 1) * 100
+        out[code] = {"rank": rank, "percentile": percentile, "return_pct": ret}
+    return out
+
+
+def bollinger_squeeze(closes, period=20, std_mult=2, lookback=120, pct_threshold=20):
+    """Bollinger bandwidth ((upper-lower)/middle) percentile vs its own history.
+
+    is_squeeze: current bandwidth is at/below the `pct_threshold`-th
+    percentile of the last `lookback` bandwidth readings -- i.e. unusually
+    tight, often preceding a volatility expansion (direction unknown).
+    Returns None if there's not enough history for even one bandwidth point.
+    """
+    n = len(closes)
+    if n < period:
+        return None
+    widths = []
+    for i in range(period - 1, n):
+        seg = closes[i - period + 1:i + 1]
+        m = sum(seg) / period
+        sd = stdev(seg)
+        if not sd or not m:
+            widths.append(None)
+            continue
+        widths.append((2 * std_mult * sd) / m)
+    valid = [w for w in widths if w is not None]
+    if not valid or widths[-1] is None:
+        return None
+    current = widths[-1]
+    window = valid[-lookback:]
+    percentile = sum(1 for w in window if w <= current) / len(window) * 100
+    return {"bandwidth": current, "percentile": percentile, "is_squeeze": percentile <= pct_threshold}
+
+
+def donchian_position(highs, lows, closes, period_short=55, period_long=120):
+    """Position of the current price within the Donchian channel(s), 0-100%
+    (0 = at the period low, 100 = at the period high). `short` uses the last
+    `period_short` bars, `long` the last `period_long`; either is None if
+    there isn't enough history yet.
+    """
+    n = len(closes)
+    if n < 2:
+        return None
+    price = closes[-1]
+
+    def _pos(period):
+        if n < period:
+            return None
+        hh = max(highs[-period:])
+        ll = min(lows[-period:])
+        if hh <= ll:
+            return None
+        return (price - ll) / (hh - ll) * 100
+
+    short = _pos(period_short)
+    long_ = _pos(period_long)
+    if short is None and long_ is None:
+        return None
+    return {"short": short, "long": long_}
+
+
+def ma20_deviation(price, ma20_value):
+    """MA20 deviation %: (price - ma20) / ma20 * 100.
+
+    Kept as a tiny named function (not inlined) for testability/symmetry
+    with the other new indicators; it's display-only in analyze() (see
+    SCORE_WEIGHTS comment -- maPosition already scores price vs MA20).
+    """
+    if not ma20_value:
+        return None
+    return (price - ma20_value) / ma20_value * 100
 
 
 # ---------------------------------------------------- volume profile ----
@@ -326,6 +514,8 @@ BACKTEST_SIGNALS = {
     "均線空頭排列": lambda c, i: c["ma5"][i] is not None and c["ma60"][i] is not None
         and c["ma5"][i] < c["ma20"][i] < c["ma60"][i],
     "爆量(>2倍均量)": lambda c, i: c["vol20"][i] and c["vols"][i] > 2 * c["vol20"][i],
+    "爆量長紅": lambda c, i: big_candle_signal(c["opens"], c["closes"], c["vols"], c["vol20"], i) == "bull",
+    "爆量長黑": lambda c, i: big_candle_signal(c["opens"], c["closes"], c["vols"], c["vol20"], i) == "bear",
 }
 
 
@@ -539,15 +729,21 @@ def compute_attention(tech_score, chip, result):
 
 
 def analyze(daily, minute=None, tick_days=None, inst=None,
-            margin=None, shareholding=None, sbl=None):
+            margin=None, shareholding=None, sbl=None, rs_info=None):
     """Full analysis of one stock.
 
     daily: {t,o,h,l,c,v} 2y daily bars (shares).
     minute: optional 5m bars for OF estimation.
     tick_days: optional {date: tick_rows} for exact OF (paid tier).
     inst/margin/shareholding/sbl: optional chip data, see chip_analysis().
+    rs_info: optional {rank, percentile, return_pct} for this code, from
+        analysis.rs_ranking() computed across the watchlist by the caller
+        (single-stock analyze() has no cross-stock visibility -- see
+        pipeline.build_watchlist_payloads()). None if unavailable (e.g. a
+        single-stock live lookup with no batch context).
     """
-    closes, highs, lows, vols, times = daily["c"], daily["h"], daily["l"], daily["v"], daily["t"]
+    closes, highs, lows, vols, opens, times = (
+        daily["c"], daily["h"], daily["l"], daily["v"], daily["o"], daily["t"])
     n = len(closes)
     if n < 5:
         return None
@@ -556,7 +752,7 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
     ma60 = ma_series(closes, 60)
     vol20 = ma_series(vols, 20)
     quadrant = [quadrant_at(closes, vols, vol20, i) for i in range(n)]
-    ctx = {"closes": closes, "vols": vols, "ma5": ma5, "ma20": ma20,
+    ctx = {"closes": closes, "vols": vols, "opens": opens, "ma5": ma5, "ma20": ma20,
            "ma60": ma60, "vol20": vol20, "quadrant": quadrant}
     last = n - 1
     price = closes[last]
@@ -595,6 +791,11 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
     if BACKTEST_SIGNALS["爆量(>2倍均量)"](ctx, last):
         signals.append({"text": f"爆量：今日量為 20 日均量 {vols[last] / vol20[last]:.1f} 倍",
                         "bias": 0, "bt": "爆量(>2倍均量)"})
+    candle = big_candle_signal(opens, closes, vols, vol20, last)
+    if candle:
+        bt_key = "爆量長紅" if candle == "bull" else "爆量長黑"
+        signals.append({"text": f"{'爆量長紅' if candle == 'bull' else '爆量長黑'}：量增且實體 K 棒 {abs(closes[last] - opens[last]) / opens[last] * 100:.1f}%",
+                        "bias": 1 if candle == "bull" else -1, "bt": bt_key})
 
     # ---- trend ----
     trend = trend_estimate(closes)
@@ -662,6 +863,41 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
             signals.append({"text": "量價背離：近10日價格下跌但主動買盤佔優（吸籌嫌疑）", "bias": 1, "bt": None})
             score += 10
 
+    # ---- short-term (1-5d): ATR, gap tracker ----
+    atr_val = atr(highs, lows, closes, SHORT_TERM_THRESHOLDS["atr_period"])  # info only, not scored
+    gaps = gap_tracker(opens, highs, lows, closes, SHORT_TERM_THRESHOLDS["gap_lookback"])
+    open_gap = next((g for g in reversed(gaps) if not g["filled"]), None)
+    if open_gap:
+        bias = 1 if open_gap["direction"] == "up" else -1
+        score += bias * w["gapTracker"]
+        signals.append({"text": f"{'向上' if bias > 0 else '向下'}跳空缺口尚未回補（{open_gap['gap_pct']:+.1f}%）",
+                        "bias": bias, "bt": None})
+
+    # ---- mid-term (2-8w): bollinger squeeze (info only), donchian position, MA20 deviation (info only) ----
+    squeeze = bollinger_squeeze(closes, MID_TERM_THRESHOLDS["bb_period"], MID_TERM_THRESHOLDS["bb_std_mult"],
+                                MID_TERM_THRESHOLDS["bb_lookback"], MID_TERM_THRESHOLDS["bb_squeeze_pct"])
+    if squeeze and squeeze["is_squeeze"]:
+        signals.append({"text": f"布林通道擠壓（帶寬處於近{MID_TERM_THRESHOLDS['bb_lookback']}日第{squeeze['percentile']:.0f}百分位）：變盤機率上升，方向未定",
+                        "bias": 0, "bt": None})
+    donch = donchian_position(highs, lows, closes, MID_TERM_THRESHOLDS["donchian_short"], MID_TERM_THRESHOLDS["donchian_long"])
+    if donch and donch["short"] is not None:
+        rel = (donch["short"] - 50) / 50
+        score += rel * w["donchianPosition"]
+        if donch["short"] >= 90:
+            signals.append({"text": f"價格逼近 {MID_TERM_THRESHOLDS['donchian_short']} 日 Donchian 通道上緣（{donch['short']:.0f}%）", "bias": 1, "bt": None})
+        elif donch["short"] <= 10:
+            signals.append({"text": f"價格逼近 {MID_TERM_THRESHOLDS['donchian_short']} 日 Donchian 通道下緣（{donch['short']:.0f}%）", "bias": -1, "bt": None})
+    ma20_dev = ma20_deviation(price, ma20[last])
+
+    # ---- short-term: 5-day relative strength ranking (cross-stock, see rs_info docstring) ----
+    if rs_info:
+        rel = (rs_info["percentile"] - 50) / 50
+        score += rel * w["rsRanking"]
+        if rs_info["percentile"] >= 80:
+            signals.append({"text": f"5日相對強弱排名領先（第 {rs_info['rank']} 名，百分位 {rs_info['percentile']:.0f}）", "bias": 1, "bt": None})
+        elif rs_info["percentile"] <= 20:
+            signals.append({"text": f"5日相對強弱排名落後（第 {rs_info['rank']} 名，百分位 {rs_info['percentile']:.0f}）", "bias": -1, "bt": None})
+
     # ---- institutional summary (streak/signals now live in chip_analysis) ----
     inst_summary = None
     if inst:
@@ -690,6 +926,9 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
         "trend": trend,
         "vp": vp, "vp_source": vp_src if vp else None, "vp_position": vp_position,
         "of": of, "of_mode": of_mode,
+        "atr": atr_val, "gaps": gaps,
+        "bollinger_squeeze": squeeze, "donchian": donch, "ma20_deviation": ma20_dev,
+        "rs_rank": rs_info,
         "inst": inst_summary, "chip": chip,
         "signals": signals, "backtest": backtest,
         "score": score, "label": label,

@@ -10,6 +10,7 @@ import os
 
 import analysis as an
 import data_sources as ds
+import intraday_feedback as ifb
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WATCHLIST_PATH = os.path.join(BASE_DIR, "watchlist.json")
@@ -63,8 +64,14 @@ def _fetch_tick_days(code, times):
     return out or None
 
 
-def build_stock_payload(code):
+def build_stock_payload(code, rs_info=None):
     """Fetch, analyze, and assemble the full per-stock response dict.
+
+    rs_info: optional {rank, percentile, return_pct} for this code (from
+        an.rs_ranking() across the watchlist) -- see build_watchlist_payloads().
+        A single-stock caller (e.g. app.py's /api/analysis/{code}) has no
+        batch context, so it's left as None there; the RS signal/score
+        contribution is simply skipped for that request.
 
     Raises ds.SourceError if daily data can't be fetched, or ValueError if
     history is insufficient for analysis.
@@ -72,11 +79,22 @@ def build_stock_payload(code):
     code = code.strip().upper()
     daily = ds.get_daily(code)  # raises ds.SourceError
 
+    # Prefer today's local intraday-monitor cache (higher frequency, no
+    # network call) if monitor.py has been running and produced one; fall
+    # back to yfinance's delayed 5m bars on any miss/failure (no cache file
+    # yet today, corrupt cache, code never monitored, etc.) -- see
+    # intraday_feedback.py's module docstring for the data-quality caveat
+    # (activity-count volume proxy, not real traded volume).
     minute = None
     try:
-        minute = ds.get_minute(code)
+        minute = ifb.get_minute_from_intraday_cache(code)
     except Exception:
         minute = None
+    if not minute:
+        try:
+            minute = ds.get_minute(code)
+        except Exception:
+            minute = None
 
     tick_days = None
     if ds.tick_tier_available():
@@ -87,7 +105,7 @@ def build_stock_payload(code):
     shareholding = ds.get_shareholding(code)
     sbl = ds.get_sbl(code)
     result = an.analyze(daily, minute, tick_days, inst,
-                        margin=margin, shareholding=shareholding, sbl=sbl)
+                        margin=margin, shareholding=shareholding, sbl=sbl, rs_info=rs_info)
     if result is None:
         raise ValueError(f"{code} 歷史資料不足")
 
@@ -121,3 +139,42 @@ def build_stock_payload(code):
         "analysis": analysis_out,
         "attention": attention,
     }
+
+
+def build_watchlist_payloads(codes=None):
+    """Batch-assemble payloads for a set of codes (default: the full
+    watchlist), including cross-stock 5-day relative-strength ranking
+    (an.rs_ranking()) -- something build_stock_payload() alone can't do,
+    since a single an.analyze() call only ever sees one stock.
+
+    Used by snapshot.py's run_full() (the only existing "run the whole
+    watchlist" loop); app.py's per-code /api/analysis/{code} endpoint stays
+    single-stock and doesn't get an rs_rank (see build_stock_payload docstring).
+
+    Returns {code: payload} on success or {code: {"error": str}} on failure,
+    matching snapshot.py's existing per-code try/except convention.
+    """
+    if codes is None:
+        codes = [s["code"] for s in load_watchlist()]
+
+    returns_by_code = {}
+    for code in codes:
+        try:
+            closes = ds.get_daily(code)["c"]  # cached -- build_stock_payload() below re-fetches for free
+        except Exception:
+            continue
+        if len(closes) >= 6 and closes[-6]:
+            returns_by_code[code] = (closes[-1] - closes[-6]) / closes[-6] * 100
+
+    # rank() needs >= 2 codes to mean anything; skip (no rs_info) otherwise
+    rs_ranks = an.rs_ranking(returns_by_code) if len(returns_by_code) >= 2 else {}
+
+    out = {}
+    for code in codes:
+        try:
+            out[code] = build_stock_payload(code, rs_info=rs_ranks.get(code))
+        except Exception as e:
+            # broad by design: matches snapshot.py's prior per-code try/except
+            # (one bad stock must not abort the whole watchlist batch)
+            out[code] = {"error": str(e)}
+    return out

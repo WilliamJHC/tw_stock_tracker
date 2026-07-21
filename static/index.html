@@ -567,6 +567,35 @@ function buildDetailRow(code) {
       ${fmtP(a.trend.est.low)} ~ ${fmtP(a.trend.est.high)}（中值 ${fmtP(a.trend.est.mid)}）<br>
       近20日趨勢斜率 ${a.trend.slope_pct_per_day >= 0 ? '+' : ''}${a.trend.slope_pct_per_day.toFixed(2)}%/日</div>`;
   }
+  {
+    // 2026-07-20: short-term (1-5d) / mid-term (2-8w) indicators (dev plan Phase 4)
+    const lines = [];
+    if (a.atr != null) lines.push(`ATR(14) ${fmtP(a.atr)}（波動幅度參考，不列入評分）`);
+    const openGap = a.gaps && a.gaps.length ? a.gaps[a.gaps.length - 1] : null;
+    if (openGap && !openGap.filled) {
+      lines.push(`跳空缺口：${openGap.direction === 'up' ? '向上' : '向下'} ${openGap.gap_pct >= 0 ? '+' : ''}${openGap.gap_pct.toFixed(1)}%，尚未回補`);
+    } else if (a.gaps && a.gaps.length) {
+      lines.push(`近期缺口已回補（最近一次 ${a.gaps[a.gaps.length - 1].gap_pct >= 0 ? '+' : ''}${a.gaps[a.gaps.length - 1].gap_pct.toFixed(1)}%）`);
+    }
+    if (a.bollinger_squeeze) {
+      lines.push(`布林擠壓：帶寬第${a.bollinger_squeeze.percentile.toFixed(0)}百分位${a.bollinger_squeeze.is_squeeze ? '（擠壓中，方向未定）' : ''}`);
+    }
+    if (a.donchian) {
+      const parts = [];
+      if (a.donchian.short != null) parts.push(`55日通道 ${a.donchian.short.toFixed(0)}%`);
+      if (a.donchian.long != null) parts.push(`120日通道 ${a.donchian.long.toFixed(0)}%`);
+      if (parts.length) lines.push(`Donchian 位置：${parts.join('　')}（0%=下緣、100%=上緣）`);
+    }
+    if (a.ma20_deviation != null) lines.push(`MA20 乖離率 ${a.ma20_deviation >= 0 ? '+' : ''}${a.ma20_deviation.toFixed(2)}%`);
+    if (a.rs_rank) {
+      lines.push(`5日相對強弱：第 ${a.rs_rank.rank} 名（百分位 ${a.rs_rank.percentile.toFixed(0)}，5日報酬 ${a.rs_rank.return_pct >= 0 ? '+' : ''}${a.rs_rank.return_pct.toFixed(1)}%）`);
+    } else {
+      lines.push('5日相對強弱：無資料（需完整批次分析 watchlist 才可排名）');
+    }
+    if (lines.length) {
+      fc += `<div class="forecast-box"><div class="fc-title">短中線指標</div>${lines.join('<br>')}</div>`;
+    }
+  }
   if (a.vp) {
     fc += `<div class="forecast-box"><div class="fc-title">Volume Profile（${a.vp_source === 'minute-60d' ? '近60天分鐘資料' : '近120日日線'}）</div>
       POC ${fmtP(a.vp.poc)}｜VA ${fmtP(a.vp.val)} ~ ${fmtP(a.vp.vah)}<br>

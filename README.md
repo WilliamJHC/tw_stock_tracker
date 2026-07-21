@@ -92,6 +92,42 @@ netsh advfirewall firewall add rule name="stock-tracker-8932" dir=in action=allo
   上櫃股票直接填代碼即可（FinMind/TWSE 原生支援，yfinance 備援會自動嘗試 .TWO）。
 - `cache/`：日線等資料的當日快取，可隨時整個刪掉。
 
+## 盤中監控（monitor.py）
+
+常駐輪詢監控：抓報價／逐筆 → 累積 CVD／VWAP／開盤區間（ORB）／委買賣簿失衡等盤中指標 → 觸發到門檻就發 Telegram 警報 → 同時把每輪快照寫進 `cache/intraday_{code}_{date}.json`，供盤後分析（`pipeline.py`）優先讀取，減少對 yfinance 的依賴（見下方「已知限制」）。
+
+**啟動方式**：
+
+```powershell
+cd C:\Users\william.chen\claude\stock_tracker
+.venv\Scripts\python monitor.py
+```
+
+不帶參數執行 `monitor.py` 的 `main()`：追蹤清單抓自 `watchlist.json`（與網頁 UI 共用），台股盤中時間內（08:30–13:30，含試撮）每 30 秒輪詢一次，永久跑到手動關閉（Ctrl+C）為止。若要寫腳本自訂追蹤清單、輪詢間隔或跑固定輪數（例如測試用），改成 `import monitor` 後呼叫 `monitor.main(codes=[...], sleep_seconds=..., max_iterations=...)`；細節見 `monitor.py` 檔頭 docstring。
+
+**加密貨幣（Binance）追蹤**：目前僅接好資料層與指標計算（`realtime/`、`intraday.py`），`main()` 尚未接上即時 WebSocket 推送迴圈（`crypto_codes` 預設空清單）；`monitor.py` 檔頭 docstring 的「KNOWN SIMPLIFICATION」段落有記錄，屬 Phase 5 待補項。
+
+**怎麼調整警報門檻**：
+
+- `alerts.py` 第 23 行 `ALERT_RULES`：`cvd_window`（CVD 反轉偵測用的比較窗格數）與 `priorities`（各警報類型：`vwap_breakout`／`orb_breakout`／`cvd_reversal`／`depth_wall`／`volume_anomaly` 的優先分數，決定要不要送、送幾分）。
+- `intraday.py` 第 23 行 `INTRADAY_THRESHOLDS`：指標本身觸發的門檻，例如委買賣簿失衡比例（`imbalance_side`）、大單牆倍數（`wall_multiple`）、委託單被抽掉的比例（`pulled_order_pct`）、爆量倍數（`volume_anomaly_ratio`）。改這裡會影響 `ALERT_RULES` 的警報是否觸發（門檻在指標層，優先分數在警報層，兩層都可以調）。
+
+**Telegram 設定**：
+
+1. 跟 Telegram 的 BotFather 對話建立一個 bot（`/newbot`），取得 bot token；再跟該 bot 對話一次取得你的 `chat_id`（例如用 `https://api.telegram.org/bot<token>/getUpdates` 查）。
+2. 在專案根目錄的 `.env`（`.env.example` 有範本）加兩行：
+   ```
+   TELEGRAM_BOT_TOKEN=你的bot token
+   TELEGRAM_CHAT_ID=你的chat id
+   ```
+3. 沒填也不會壞：`alerts.py` 的 `send_telegram()` 讀不到就跳過送出、不丟例外，`monitor.py` 照常記錄快照與 log，只是不會實際推播。
+
+**已知限制**：
+- 台股 CVD／Order Flow 皆為**估算級**，不是真逐筆內外盤：盤中即時走 tick-rule 推估（`intraday.py`），盤後走 `analysis.py` 的 `of_from_minutes()`（yfinance 5 分 K 的 tick-rule 推估）或 `of_from_ticks()`（FinMind 付費 tick，僅付費 token 可用）。
+- `pipeline.py` 現在會優先讀當日 `cache/intraday_{code}_{date}.json`（`intraday_feedback.py` 轉換）取代 yfinance 分鐘 K，但這個快取目前**沒有真實成交量欄位**（`monitor.py` 的 `_persist_snapshot()` 尚未記錄逐筆量），只能用「每分鐘快照筆數」當活躍度代理值，比真實量更粗略；沒有當日快取（例如監控沒開過、非交易日）時自動退回 yfinance。
+- KGI SUPER PY（券商 API）尚未串接——需要使用者完成簽約後才會排入開發。
+- TradingView webhook 尚未實作——計畫書列為可選項，目前優先度較低，暫緩。
+
 ## 免責
 
 技術評分、訊號、回測勝率與推估區間均為歷史統計整理，屬機率傾向而非預測，不構成投資建議。

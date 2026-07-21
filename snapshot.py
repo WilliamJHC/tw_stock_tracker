@@ -63,16 +63,13 @@ def assemble_site(out_dir):
 
 def run_full(out_dir):
     watchlist = pl.load_watchlist()
-    stocks = {}
-    ok, fail = 0, 0
-    for s in watchlist:
-        code = s["code"]
-        try:
-            stocks[code] = pl.build_stock_payload(code)
-            ok += 1
-        except Exception as e:
-            stocks[code] = {"error": str(e)}
-            fail += 1
+    codes = [s["code"] for s in watchlist]
+    # build_watchlist_payloads() batches the whole watchlist together so it
+    # can compute 5-day relative-strength ranking across stocks (an.rs_ranking()),
+    # which a per-code build_stock_payload() call can't see on its own.
+    stocks = pl.build_watchlist_payloads(codes)
+    ok = sum(1 for v in stocks.values() if "error" not in v)
+    fail = len(stocks) - ok
 
     ts = now_iso()
     payload = {
