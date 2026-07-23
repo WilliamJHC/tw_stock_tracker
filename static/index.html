@@ -271,7 +271,7 @@ function rowView(s) {
     score: a ? a.score : null,
     label: a ? a.label : null,
     chipScore: a && a.chip ? a.chip.score : null,
-    chipCoverage: a && a.chip ? a.chip.coverage.length : null,
+    chipCoverage: a && a.chip && a.chip.coverage ? a.chip.coverage.length : null,
     priority: att ? att.priority : null,
     action: att ? att.action : null,
     reason: att ? att.reason : null,
@@ -835,7 +835,13 @@ window.addEventListener('resize', () => {
   if (isMobile() !== lastMobileMode) { lastMobileMode = isMobile(); renderTable(); }
 });
 
-init();
+// Last-resort safety net: init() shouldn't reject in normal flow, but if a
+// future change (e.g. a renamed #loadError/#lastUpdate id) makes showLoadError
+// itself throw inside a catch, this prevents a silent unhandled rejection.
+init().catch((e) => {
+  console.error('init() failed:', e);
+  try { showLoadError('資料載入失敗，請稍後重新整理。'); } catch (_) { /* nothing left to do */ }
+});
 </script>
 
 </body>
