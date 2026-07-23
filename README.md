@@ -57,6 +57,60 @@ netsh advfirewall firewall add rule name="stock-tracker-8932" dir=in action=allo
 
 **注意**：`start_server.bat` 與 Claude preview（launch.json）都用 8932 port，不要同時啟動。
 
+## 手機雲端版（PC 關機也能看）
+
+架構：GitHub private repo（程式碼＋`watchlist.json`）＋ GitHub Actions 排程執行 `snapshot.py` 產生靜態快照 ＋ Cloudflare Pages Direct Upload（`wrangler` 從 CI 直傳，repo 不連 Cloudflare、保持私有）。
+
+```
+GitHub Actions（排程）
+  └─ snapshot.py --mode full|light ──▶ dist/（index.html + data.json + _headers）
+       └─ npx wrangler pages deploy dist ──▶ https://<專案名>.pages.dev
+                                                  ▲
+                                          手機瀏覽器（純讀，加入主畫面當 App）
+```
+
+網址難猜＋`_headers` 帶 `X-Robots-Tag: noindex`＋頁面 `<meta name="robots">`，不需要密碼。手機端**純讀**：新增/刪除按鈕在靜態模式下自動隱藏，watchlist 只能回 PC 改，或用手機 GitHub App／網頁編輯 `watchlist.json`。
+
+### 排程表（`.github/workflows/snapshot.yml`）
+
+| cron（UTC） | 台北時間 | 模式 |
+|---|---|---|
+| `7,27,47 1-5 * * 1-5` | 09:07–13:47 每 20 分 | light（只重打報價，不重抓 FinMind） |
+| `10 0 * * 1-5` | 08:10 | full（早晨重建） |
+| `40 13 * * 1-5` | 21:40 | full（盤後：法人/融資券/外資持股/借券已入庫） |
+
+也可以到 GitHub → Actions → snapshot → **Run workflow** 手動選 `full` 或 `light` 立即跑一次。
+
+### GitHub Secrets
+
+4 個 secret 放在 repo 的 **Environment「Cloudflare」**底下（不是直接放在 repo-level secrets）——`.github/workflows/snapshot.yml` 的 job 因此宣告了 `environment: Cloudflare`，缺這行的話 `secrets.*` 會全部解析成空字串。
+
+| Secret | 內容 |
+|---|---|
+| `FINMIND_TOKEN` | 現有的 FinMind token |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare My Profile → API Tokens 建立，權限僅 `Account / Cloudflare Pages / Edit` |
+| `CLOUDFLARE_ACCOUNT_ID` | **32 位十六進位字串**（dash.cloudflare.com → Workers & Pages → 右側欄複製；不是帳號名稱，填錯會報 Cloudflare API code 7003） |
+| `CF_PAGES_PROJECT` | 隨機專案名（如 `tw-xxxxxxxxxxxx`），部署網址即 `https://<此值>.pages.dev` |
+
+### 用手機改 watchlist
+
+1. 手機裝 GitHub App（或瀏覽器登入 github.com）
+2. 開 repo → `watchlist.json` → 編輯 → 加入或刪除股票 → commit 到 `main`
+3. 等下一次排程（最多約 20 分鐘），或到 Actions 頁手動 Run workflow（`mode=full`）立即生效
+
+### 故障排查（Actions 紅燈看哪裡）
+
+點進失敗的 run → 展開紅色 ✕ 的那個 step 看訊息。目前遇過兩種：
+
+- **`deploy` 報 `Must specify a project name.`**：workflow job 沒吃到 secrets——檢查 job 是否有 `environment: Cloudflare`（名稱要跟 Settings → Environments 裡的環境名一字不差）。
+- **`deploy` 報 `Could not route to /accounts/<一串文字>/... code: 7003`**：`CLOUDFLARE_ACCOUNT_ID` 填成了帳號名稱（如 `xxx@gmail.com's Account`），要換成 32 位十六進位 Account ID。
+
+`check secrets` 這個 step 會提早擋掉以上兩種錯誤並印出明確訊息，比等 wrangler 報隱晦錯誤好定位。
+
+### 手機加入主畫面
+
+手機瀏覽器開部署網址 → 選單「加入主畫面」→ 以獨立視窗（standalone）開啟，manifest 沿用本機版的 `static/manifest.json`。
+
 ## 決策面板與籌碼分
 
 **技術分**（`-100~100`）：MA 位置/排列、量價四象限、20日趨勢、Volume Profile 位置、Order Flow，權重見 `analysis.py` 的 `SCORE_WEIGHTS`。
