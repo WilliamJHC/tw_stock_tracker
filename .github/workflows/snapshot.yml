@@ -44,7 +44,13 @@ jobs:
             echo "::error::缺少或空白的 secrets:$missing（請到 Settings → Secrets and variables → Actions 的 Secrets 分頁確認，不是 Variables 分頁）"
             exit 1
           fi
-          echo "所有必要 secrets 都在。"
+          # Account ID 必須是 32 位十六進位字串；填成帳號名稱（如
+          # "xxx@gmail.com's Account"）時 Cloudflare API 會回 code 7003
+          if ! printf '%s' "$CLOUDFLARE_ACCOUNT_ID" | grep -Eiq '^[0-9a-f]{32}$'; then
+            echo "::error::CLOUDFLARE_ACCOUNT_ID 格式不對（要 32 位十六進位字串，不是帳號名稱）。到 Cloudflare dashboard → Workers & Pages → 右側 Account ID 複製，或看網址列 dash.cloudflare.com/<Account ID>/"
+            exit 1
+          fi
+          echo "所有必要 secrets 都在，Account ID 格式正確。"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
