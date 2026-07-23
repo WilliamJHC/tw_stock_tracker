@@ -19,6 +19,10 @@ concurrency:
 jobs:
   snapshot:
     runs-on: ubuntu-latest
+    # 4 個 secrets 建在 Environment「Cloudflare」底下，job 必須宣告 environment
+    # 才拿得到；沒有這行的話 secrets.* 全部解析成空字串（wrangler 會噴
+    # "Must specify a project name."）
+    environment: Cloudflare
     env:
       FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
       CF_PAGES_PROJECT: ${{ secrets.CF_PAGES_PROJECT }}
