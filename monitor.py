@@ -174,7 +174,7 @@ def _compute_indicators(hist):
 # --------------------------------------------------------------- cache ----
 
 def _cache_file(code, date_str):
-    return os.path.join(ds.CACHE_DIR, f"intraday_{code}_{date_str}.json")
+    return ds.intraday_cache_file(code, date_str)
 
 
 def _persist_snapshot(code, market, now, indicators):

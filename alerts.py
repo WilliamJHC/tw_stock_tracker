@@ -6,14 +6,15 @@ mirroring the "event trigger + priority" pattern in
 analysis.py:459-535 compute_attention() -- it does not reuse that function's
 logic, just its shape: a flat list of (rule, points) checks, no shared state.
 
-send_telegram() follows the .env-then-environment-variable loading pattern in
-data_sources.py:25-45 _load_token(), duplicated here (not imported) so this
-module has zero dependency on data_sources.py's FinMind-specific state.
+send_telegram() reads its TELEGRAM_* credentials via env_utils.load_env_value(),
+the shared .env-then-environment-variable loader (also used by data_sources.py).
 """
 import datetime as dt
 import os
 
 import requests
+
+import env_utils
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -148,31 +149,6 @@ def dedupe_and_cooldown(alerts, state, cooldown_minutes=5, now=None):
 
 # -------------------------------------------------------------- Telegram ----
 
-def _load_env(key):
-    """.env-then-environment-variable loader, same convention as
-    data_sources.py:25-45 _load_token() but generalised to any key name."""
-    env_val = os.environ.get(key)
-    if env_val:
-        return env_val
-    path = os.path.join(BASE_DIR, ".env")
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, _, v = line.partition("=")
-                if k.strip() != key:
-                    continue
-                v = v.strip()
-                if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
-                    v = v[1:-1]
-                return v
-    except OSError:
-        pass
-    return ""
-
-
 def send_telegram(message):
     """Sends `message` via the Telegram Bot API. Reads TELEGRAM_BOT_TOKEN /
     TELEGRAM_CHAT_ID (env var first, then .env). Never raises: missing
@@ -181,8 +157,8 @@ def send_telegram(message):
     than propagated, so a bad Telegram response never kills monitor.py's
     loop.
     """
-    token = _load_env("TELEGRAM_BOT_TOKEN")
-    chat_id = _load_env("TELEGRAM_CHAT_ID")
+    token = env_utils.load_env_value("TELEGRAM_BOT_TOKEN", BASE_DIR)
+    chat_id = env_utils.load_env_value("TELEGRAM_CHAT_ID", BASE_DIR)
     if not token or not chat_id:
         print("[alerts] Telegram 未設定，警報未送出：" + message)
         return {"skipped": True, "reason": "telegram not configured"}

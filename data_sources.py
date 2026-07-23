@@ -9,13 +9,23 @@ calendar day to stay inside FinMind's rate limit (600 req/hr with token).
 import datetime as dt
 import json
 import os
+import time
 
 import requests
+
+import env_utils
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 UA = {"User-Agent": "Mozilla/5.0 (stock-tracker local app)"}
+
+# Back-off delays (seconds) between retries when FinMind returns a transient
+# failure (network error or 5xx). Its length + 1 is the total attempt count;
+# set to () to disable retries. Client errors (quota 402, auth 401/403) are
+# never retried. Tests monkeypatch this to keep the suite fast.
+FINMIND_RETRY_DELAYS = (0.5, 1.5)
+_FINMIND_TRANSIENT_HTTP = {429, 500, 502, 503, 504}
 
 
 class SourceError(Exception):
@@ -23,34 +33,32 @@ class SourceError(Exception):
 
 
 def _load_token():
-    env_token = os.environ.get("FINMIND_TOKEN")
-    if env_token:
-        return env_token
-    path = os.path.join(BASE_DIR, ".env")
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                if key.strip() != "FINMIND_TOKEN":
-                    continue
-                value = value.strip()
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-                    value = value[1:-1]
-                return value
-    except OSError:
-        pass
-    return ""
+    # Reads BASE_DIR at call time so tests can monkeypatch it (see
+    # tests/test_data_sources.py). Shared parser lives in env_utils.
+    return env_utils.load_env_value("FINMIND_TOKEN", BASE_DIR)
 
 
 FINMIND_TOKEN = _load_token()
+
+
+def data_tier():
+    """"premium" when a FinMind token is configured (unlocking PER / institutional
+    / margin / shareholding / SBL and the 600 req/hr limit), else "free" (those
+    getters degrade or return None). Reflects *configuration*, not live validity:
+    an expired token still reads "premium" until a real call 401s."""
+    return "premium" if FINMIND_TOKEN else "free"
 
 # ---------------------------------------------------------------- cache --
 
 def _cache_path(key):
     return os.path.join(CACHE_DIR, f"{key}.json")
+
+
+def intraday_cache_file(code, date_str):
+    """Path of the per-day intraday snapshot written by monitor.py and read
+    back by intraday_feedback.py. Single source of truth for the filename
+    convention, shared by both modules."""
+    return os.path.join(CACHE_DIR, f"intraday_{code}_{date_str}.json")
 
 
 def _cache_get(key):
@@ -83,11 +91,28 @@ def _finmind(dataset, data_id=None, start_date=None, end_date=None):
     headers = dict(UA)
     if FINMIND_TOKEN:
         headers["Authorization"] = f"Bearer {FINMIND_TOKEN}"
-    resp = requests.get(FINMIND_URL, params=params, headers=headers, timeout=30)
-    body = resp.json()
-    if resp.status_code != 200 or body.get("status") != 200:
-        raise SourceError(f"FinMind {dataset}: HTTP {resp.status_code} / {body.get('msg')}")
-    return body.get("data") or []
+
+    last_err = None
+    for attempt in range(len(FINMIND_RETRY_DELAYS) + 1):
+        try:
+            resp = requests.get(FINMIND_URL, params=params, headers=headers, timeout=30)
+            body = resp.json()
+        except requests.RequestException as e:
+            last_err = SourceError(f"FinMind {dataset}: request failed ({e})")
+        else:
+            if resp.status_code == 200 and body.get("status") == 200:
+                return body.get("data") or []
+            err = SourceError(f"FinMind {dataset}: HTTP {resp.status_code} / {body.get('msg')}")
+            body_status = body.get("status") or 0
+            transient = resp.status_code in _FINMIND_TRANSIENT_HTTP or body_status >= 500
+            if not transient:
+                # Client-side errors (quota 402, auth 401/403, bad request) will
+                # not fix themselves on retry -- fail fast so callers can degrade.
+                raise err
+            last_err = err
+        if attempt < len(FINMIND_RETRY_DELAYS):
+            time.sleep(FINMIND_RETRY_DELAYS[attempt])
+    raise last_err
 
 
 # ------------------------------------------------------------- yfinance --

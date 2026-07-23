@@ -5,6 +5,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import json
+
 import snapshot as snap
 
 
@@ -61,3 +63,28 @@ def test_merge_light_does_not_mutate_base():
     snap.merge_light(base, quotes, "2026-07-17T09:07:00+08:00")
     assert base["stocks"]["2330"]["quote"]["price"] == 900
     assert base["mode"] == "full"
+
+
+# ---------------------------------------------------------------- load_base --
+# light mode runs every 20 min off the previous snapshot; load_base must never
+# crash the scheduled job when that base is absent or corrupt (it returns None
+# and run_light/main is expected to skip rather than deploy a broken data.json).
+
+def test_load_base_reads_valid_file(tmp_path):
+    p = tmp_path / "data.json"
+    p.write_text(json.dumps(_base()), encoding="utf-8")
+    out = snap.load_base(str(p), None)
+    assert out is not None
+    assert out["mode"] == "full"
+
+
+def test_load_base_missing_file_returns_none(tmp_path):
+    out = snap.load_base(str(tmp_path / "nope.json"), None)
+    assert out is None
+
+
+def test_load_base_corrupt_file_returns_none(tmp_path):
+    p = tmp_path / "data.json"
+    p.write_text("{not valid json", encoding="utf-8")
+    out = snap.load_base(str(p), None)
+    assert out is None

@@ -33,13 +33,12 @@ volume instead of the snapshot-count proxy.
 """
 import datetime as dt
 import json
-import os
 
 import data_sources as ds
 
 
 def _cache_file(code, date_str):
-    return os.path.join(ds.CACHE_DIR, f"intraday_{code}_{date_str}.json")
+    return ds.intraday_cache_file(code, date_str)
 
 
 def load_intraday_cache(code, date_str):

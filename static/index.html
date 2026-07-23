@@ -160,6 +160,7 @@ body.static-mode .add-bar, body.static-mode .del-btn { display: none; }
 <body>
 
 <div class="container">
+  <div id="loadError" style="display:none; margin:12px 0; padding:14px 16px; border-radius:10px; background:#F9E7E5; color:#8A2A20; border:1px solid #E0B4AE; font-size:14px; line-height:1.5;"></div>
   <div class="header">
     <div>
       <div class="title">台灣股市追蹤器 v2</div>
@@ -319,17 +320,39 @@ function applyStaticSnapshot(snap) {
     `分析 ${fmtDT(snap.full_generated_at)}・報價 ${fmtT(snap.quotes_updated_at)}`;
 }
 
+function showLoadError(msg) {
+  const el = document.getElementById('loadError');
+  el.textContent = msg;
+  el.style.display = 'block';
+  document.getElementById('lastUpdate').textContent = '資料載入失敗';
+}
+
 async function init() {
+  let snapPresent = false;
   try {
     const dr = await fetch('data.json', { cache: 'no-store' });
     if (dr.ok) {
+      snapPresent = true;
       staticMode = true;
       document.body.classList.add('static-mode');
       applyStaticSnapshot(await dr.json());
       return;
     }
-  } catch (e) { /* fall through to live API mode */ }
-  await initLive();
+  } catch (e) {
+    if (snapPresent) {
+      // data.json exists but couldn't be parsed/applied. On the cloud there is
+      // no live API to fall back to, so show an explicit message instead of a
+      // blank screen (falling through to initLive would 404 on Cloudflare Pages).
+      showLoadError('資料載入失敗：快照檔可能正在更新或已損毀，請稍後重新整理。');
+      return;
+    }
+    /* no snapshot present -> try local live API mode below */
+  }
+  try {
+    await initLive();
+  } catch (e) {
+    showLoadError('資料載入失敗：無法連線到本機伺服器，請確認 app.py 是否已啟動。');
+  }
 }
 
 async function initLive() {

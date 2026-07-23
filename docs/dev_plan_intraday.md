@@ -1,5 +1,7 @@
 # stock_tracker 盤中 Day Trading ＋ 盤後技術分析 開發計畫書
 
+> **狀態（2026-07-23 補註）**：Phase 1-3（realtime/ 資料層、intraday.py 指標、alerts.py 警報）對應模組已存在且有測試通過；Phase 4-5（量價反饋、WebSocket 監控主迴圈）部分完成、仍在進行。實際狀態以 `git log` 與 `pytest tests/` 為準，勿把未完成 Phase 當已完成。
+
 > 版本：v1.0（2026-07-20 定稿，經使用者核准）
 > 執行者：Sonnet 5 (medium)。本文件自成一體，執行前不需要其他對話脈絡。
 > 專案路徑：`C:\Users\william.chen\claude\stock_tracker`（Windows 11 ＋ PowerShell 5.1；Python 虛擬環境在 `.venv\`）

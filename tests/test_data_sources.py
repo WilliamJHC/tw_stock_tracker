@@ -47,6 +47,35 @@ def test_finmind_ok_returns_data():
     assert result == rows
 
 
+def test_finmind_retries_transient_then_succeeds(monkeypatch):
+    monkeypatch.setattr(ds, "FINMIND_RETRY_DELAYS", (0, 0))  # no real sleep
+    rows = [{"date": "2026-01-02", "close": 100}]
+    responses = [
+        _fake_response(status=503, body_status=503, msg="temporarily down"),
+        _fake_response(data=rows),
+    ]
+    with patch("data_sources.requests.get", side_effect=responses) as mock_get:
+        result = ds._finmind("TaiwanStockPrice", "2330", "2026-01-01")
+    assert result == rows
+    assert mock_get.call_count == 2
+
+
+def test_finmind_no_retry_on_client_error(monkeypatch):
+    monkeypatch.setattr(ds, "FINMIND_RETRY_DELAYS", (0, 0))
+    resp = _fake_response(status=402, body_status=402, msg="quota exceeded")
+    with patch("data_sources.requests.get", return_value=resp) as mock_get:
+        with pytest.raises(ds.SourceError):
+            ds._finmind("TaiwanStockPrice", "2330", "2026-01-01")
+    assert mock_get.call_count == 1  # quota errors fail fast, no retry
+
+
+def test_data_tier_reflects_token_presence(monkeypatch):
+    monkeypatch.setattr(ds, "FINMIND_TOKEN", "some-token")
+    assert ds.data_tier() == "premium"
+    monkeypatch.setattr(ds, "FINMIND_TOKEN", "")
+    assert ds.data_tier() == "free"
+
+
 # -------------------------------------------------------------- get_margin --
 
 def test_get_margin_parses_and_converts_lots_to_shares():
@@ -92,7 +121,8 @@ def test_get_margin_no_data_returns_none():
     assert result is None
 
 
-def test_get_margin_error_returns_none():
+def test_get_margin_error_returns_none(monkeypatch):
+    monkeypatch.setattr(ds, "FINMIND_RETRY_DELAYS", ())  # skip back-off sleeps
     with patch("data_sources.requests.get", return_value=_fake_response(status=500, body_status=500)):
         result = ds.get_margin("2330")
     assert result is None

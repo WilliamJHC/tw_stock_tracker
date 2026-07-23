@@ -1,5 +1,7 @@
 # stock_tracker 手機獨立查看計畫書：雲端排程快照 + 靜態頁
 
+> **狀態（2026-07-23 補註）**：本文為歷史計畫書，非當前狀態。雲端快照鏈路已實作並上線（snapshot.py、.github/workflows/snapshot.yml、Cloudflare Pages 部署皆存在）。實際狀態以 `git log` 與實際部署為準，勿把本計畫書當待辦清單。
+
 - 撰寫日期：2026-07-14
 - 執行者：Sonnet 5 (medium effort)，逐 Phase 執行，每 Phase 有獨立驗收條件，Phase 之間允許中斷
 - 專案根目錄：`C:\Users\william.chen\claude\stock_tracker\`（下文相對路徑以此為根）

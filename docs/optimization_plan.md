@@ -1,5 +1,7 @@
 # stock_tracker 優化計畫書：機構投資人決策面板 + FinMind 籌碼資料擴充
 
+> **狀態（2026-07-23 補註）**：本文為歷史計畫書，非當前狀態。文中各 Phase 多數已實作（analysis.py 籌碼分、data_sources.py FinMind getters 等對應模組存在且測試通過）。實際完成度以 `git log` 與 `pytest tests/` 為準，勿把本計畫書當待辦清單；翻新前先跑測試建立基準。
+
 - 撰寫日期：2026-07-13
 - 執行者：Sonnet 5 (medium effort)，逐 Phase 執行，每 Phase 有獨立驗收條件，Phase 之間允許中斷
 - 專案根目錄：`C:\Users\william.chen\claude\stock_tracker\`（下文相對路徑皆以此為根）

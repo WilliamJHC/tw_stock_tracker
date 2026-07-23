@@ -60,6 +60,20 @@ CHIP_WEIGHTS = {"institutional": 40, "margin": 20, "shareholding": 20, "sbl": 20
 # report the same numbers instead of re-hardcoding them.
 ACTION_THRESHOLDS = {"composite": 40, "priority_act": 50, "priority_watch": 25}
 
+# chip_analysis() tuning knobs -- product judgment calls, not derived. Hoisted
+# out of the function body so they read as named dials for back-testing. Each
+# *_full value is the input level that maps to a full ±1.0 component score;
+# signal_c is the |component| above which a human-readable signal is emitted.
+CHIP_THRESHOLDS = {
+    "inst_net_full": 0.10,        # 5d institutional net buy / (5d avg volume)
+    "margin_chg_full": 0.05,      # 5d margin-balance change ratio
+    "sbl_delta_full": 0.05,       # 5d SBL-balance delta / (5d avg volume)
+    "shareholding_pp_full": 1.0,  # 20d foreign-holding change, percentage points
+    "short_margin_warn": 0.30,    # short/margin balance ratio warning a squeeze
+    "signal_c": 0.30,             # |component| threshold to emit a signal
+    "foreign_streak_bonus": 0.20, # score nudge for a >=3-day foreign buy/sell streak
+}
+
 
 QUADRANT_INFO = {
     "PU_VU": {"label": "價漲量增", "desc": "多方動能健康", "bias": 1, "score": 1},
@@ -581,12 +595,13 @@ def chip_analysis(inst, margin, shareholding, sbl, vol20_last):
     if inst and has_vol:
         recent = inst[-5:]
         net5 = sum(r["foreign"] + r["trust"] for r in recent)
-        c = _clamp(net5 / (5 * vol20_last) / 0.10)
+        c = _clamp(net5 / (5 * vol20_last) / CHIP_THRESHOLDS["inst_net_full"])
         f_streak = _foreign_streak(inst)
         if abs(f_streak) >= 3:
-            c = _clamp(c + (0.2 if f_streak > 0 else -0.2))
+            bonus = CHIP_THRESHOLDS["foreign_streak_bonus"]
+            c = _clamp(c + (bonus if f_streak > 0 else -bonus))
         components["institutional"] = {"c": c, "net5": net5, "foreign_streak": f_streak}
-        if abs(c) >= 0.3:
+        if abs(c) >= CHIP_THRESHOLDS["signal_c"]:
             side = "淨買超" if net5 > 0 else "淨賣超"
             signals.append({"text": f"法人5日{side} {abs(net5) // 1000:,} 張",
                             "bias": 1 if net5 > 0 else -1, "bt": None})
@@ -597,14 +612,14 @@ def chip_analysis(inst, margin, shareholding, sbl, vol20_last):
         bal_prev = margin[prev_idx]["margin_balance"]
         if bal_prev > 0:
             chg5 = (bal_last - bal_prev) / bal_prev
-            c = _clamp(-chg5 / 0.05)
+            c = _clamp(-chg5 / CHIP_THRESHOLDS["margin_chg_full"])
             components["margin"] = {"c": c, "chg5": chg5}
-            if abs(c) >= 0.3:
+            if abs(c) >= CHIP_THRESHOLDS["signal_c"]:
                 direction = "增" if chg5 > 0 else "減"
                 signals.append({"text": f"融資5日{direction} {abs(chg5) * 100:.1f}%",
                                 "bias": -1 if chg5 > 0 else 1, "bt": None})
         short_last = margin[-1]["short_balance"]
-        if bal_last > 0 and short_last / bal_last > 0.30:
+        if bal_last > 0 and short_last / bal_last > CHIP_THRESHOLDS["short_margin_warn"]:
             signals.append({"text": "券資比偏高，留意軋空", "bias": 0, "bt": None})
 
     if shareholding:
@@ -612,9 +627,9 @@ def chip_analysis(inst, margin, shareholding, sbl, vol20_last):
         ratio_last = shareholding[-1]["foreign_ratio"]
         ratio_prev = shareholding[prev_idx]["foreign_ratio"]
         d20 = ratio_last - ratio_prev
-        c = _clamp(d20 / 1.0)
+        c = _clamp(d20 / CHIP_THRESHOLDS["shareholding_pp_full"])
         components["shareholding"] = {"c": c, "d20": d20}
-        if abs(c) >= 0.3:
+        if abs(c) >= CHIP_THRESHOLDS["signal_c"]:
             sign = "+" if d20 >= 0 else "−"
             signals.append({"text": f"外資持股比20日{sign}{abs(d20):.2f} pp",
                             "bias": 1 if d20 > 0 else -1 if d20 < 0 else 0, "bt": None})
@@ -624,9 +639,9 @@ def chip_analysis(inst, margin, shareholding, sbl, vol20_last):
         bal_last = sbl[-1]["sbl_balance"]
         bal_prev = sbl[prev_idx]["sbl_balance"]
         delta5 = bal_last - bal_prev
-        c = _clamp(-delta5 / (5 * vol20_last) / 0.05)
+        c = _clamp(-delta5 / (5 * vol20_last) / CHIP_THRESHOLDS["sbl_delta_full"])
         components["sbl"] = {"c": c, "delta5": delta5}
-        if abs(c) >= 0.3:
+        if abs(c) >= CHIP_THRESHOLDS["signal_c"]:
             direction = "增" if delta5 > 0 else "減"
             signals.append({"text": f"借券賣出餘額5日{direction} {abs(delta5) // 1000:,} 張",
                             "bias": -1 if delta5 > 0 else 1, "bt": None})

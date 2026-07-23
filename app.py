@@ -65,4 +65,5 @@ def api_config():
         "score_labels": an.SCORE_LABELS,
         "action_thresholds": an.ACTION_THRESHOLDS,
         "chip_weights": an.CHIP_WEIGHTS,
+        "data_tier": ds.data_tier(),
     }
