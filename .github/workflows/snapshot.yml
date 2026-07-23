@@ -27,7 +27,7 @@ jobs:
       FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
       CF_PAGES_PROJECT: ${{ secrets.CF_PAGES_PROJECT }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: check secrets
         # 提早檢查必要 secrets 都非空，避免後面 wrangler 噴出隱晦的
         # "Must specify a project name."；注意 secret 要加在 Secrets 分頁而非 Variables
@@ -51,7 +51,7 @@ jobs:
             exit 1
           fi
           echo "所有必要 secrets 都在，Account ID 格式正確。"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: pip
@@ -68,7 +68,7 @@ jobs:
             echo "mode=full" >> "$GITHUB_OUTPUT"
           fi
       - run: python snapshot.py --mode "${{ steps.mode.outputs.mode }}" --out dist --base-url "https://${CF_PAGES_PROJECT}.pages.dev"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
       - name: create pages project (idempotent)
