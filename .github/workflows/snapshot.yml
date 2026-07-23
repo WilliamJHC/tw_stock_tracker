@@ -24,6 +24,23 @@ jobs:
       CF_PAGES_PROJECT: ${{ secrets.CF_PAGES_PROJECT }}
     steps:
       - uses: actions/checkout@v4
+      - name: check secrets
+        # 提早檢查必要 secrets 都非空，避免後面 wrangler 噴出隱晦的
+        # "Must specify a project name."；注意 secret 要加在 Secrets 分頁而非 Variables
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          missing=""
+          [ -z "$CF_PAGES_PROJECT" ] && missing="$missing CF_PAGES_PROJECT"
+          [ -z "$CLOUDFLARE_API_TOKEN" ] && missing="$missing CLOUDFLARE_API_TOKEN"
+          [ -z "$CLOUDFLARE_ACCOUNT_ID" ] && missing="$missing CLOUDFLARE_ACCOUNT_ID"
+          [ -z "$FINMIND_TOKEN" ] && missing="$missing FINMIND_TOKEN"
+          if [ -n "$missing" ]; then
+            echo "::error::缺少或空白的 secrets:$missing（請到 Settings → Secrets and variables → Actions 的 Secrets 分頁確認，不是 Variables 分頁）"
+            exit 1
+          fi
+          echo "所有必要 secrets 都在。"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
