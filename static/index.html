@@ -306,6 +306,10 @@ function fmtT(iso) {
 }
 
 function applyStaticSnapshot(snap) {
+  // A snapshot applied successfully clears any earlier failure banner --
+  // otherwise a mid-deploy error stays on screen above fresh, correct data
+  // after the user hits 重新整理全部.
+  hideLoadError();
   CFG = snap.config || CFG;
   watchlist = snap.watchlist || [];
   tickTier = !!snap.tick_tier;
@@ -327,31 +331,40 @@ function showLoadError(msg) {
   document.getElementById('lastUpdate').textContent = '資料載入失敗';
 }
 
+function hideLoadError() {
+  document.getElementById('loadError').style.display = 'none';
+}
+
 async function init() {
-  let snapPresent = false;
+  let snapFetched = false;
   try {
     const dr = await fetch('data.json', { cache: 'no-store' });
     if (dr.ok) {
-      snapPresent = true;
+      snapFetched = true;
       staticMode = true;
       document.body.classList.add('static-mode');
       applyStaticSnapshot(await dr.json());
       return;
     }
+    /* 404 -> no snapshot deployed; fall through to live API mode below */
   } catch (e) {
-    if (snapPresent) {
-      // data.json exists but couldn't be parsed/applied. On the cloud there is
-      // no live API to fall back to, so show an explicit message instead of a
-      // blank screen (falling through to initLive would 404 on Cloudflare Pages).
+    if (snapFetched) {
+      // data.json was served but couldn't be parsed/applied: the file is there,
+      // so this is a mid-deploy or corrupt snapshot, not local live mode.
       showLoadError('資料載入失敗：快照檔可能正在更新或已損毀，請稍後重新整理。');
       return;
     }
-    /* no snapshot present -> try local live API mode below */
+    /* fetch itself failed -> no snapshot; try local live API mode below */
   }
+  // No usable data.json. Locally that is normal -- app.py serves the live API
+  // instead. On a static host it means the first snapshot hasn't deployed yet
+  // (or snapshot.py exited 1 before the deploy step) and initLive() will 404
+  // too, so the message must cover both instead of blaming app.py.
   try {
     await initLive();
   } catch (e) {
-    showLoadError('資料載入失敗：無法連線到本機伺服器，請確認 app.py 是否已啟動。');
+    showLoadError('資料載入失敗：找不到快照資料（data.json），本機 API 也無回應。'
+      + '若這是雲端頁面，代表快照尚未成功產生；若在本機，請確認 app.py 已啟動。');
   }
 }
 

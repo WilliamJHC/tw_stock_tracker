@@ -67,8 +67,10 @@ def test_merge_light_does_not_mutate_base():
 
 # ---------------------------------------------------------------- load_base --
 # light mode runs every 20 min off the previous snapshot; load_base must never
-# crash the scheduled job when that base is absent or corrupt (it returns None
-# and run_light/main is expected to skip rather than deploy a broken data.json).
+# crash the scheduled job when that base is absent or corrupt. It returns None
+# and main() then falls back to a full run -- never deploying a data.json built
+# on a missing base. test_main_falls_back_to_full_when_base_missing locks that
+# second half so the two can't drift apart.
 
 def test_load_base_reads_valid_file(tmp_path):
     p = tmp_path / "data.json"
@@ -88,3 +90,18 @@ def test_load_base_corrupt_file_returns_none(tmp_path):
     p.write_text("{not valid json", encoding="utf-8")
     out = snap.load_base(str(p), None)
     assert out is None
+
+
+def test_main_falls_back_to_full_when_base_missing(monkeypatch, tmp_path):
+    """--mode light with an unusable base must run full, not skip: skipping
+    would leave the 20-min cadence deploying nothing after a bad deploy."""
+    monkeypatch.setattr(sys, "argv", [
+        "snapshot.py", "--mode", "light",
+        "--base-file", str(tmp_path / "nope.json"),
+        "--out", str(tmp_path / "dist"),
+    ])
+    calls = []
+    monkeypatch.setattr(snap, "run_full", lambda out_dir: calls.append("full") or (5, 0, 5))
+    monkeypatch.setattr(snap, "run_light", lambda out_dir, base: calls.append("light") or (0, 0, 0))
+    snap.main()
+    assert calls == ["full"]
