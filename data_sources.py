@@ -25,7 +25,21 @@ UA = {"User-Agent": "Mozilla/5.0 (stock-tracker local app)"}
 # set to () to disable retries. Client errors (quota 402, auth 401/403) are
 # never retried. Tests monkeypatch this to keep the suite fast.
 FINMIND_RETRY_DELAYS = (0.5, 1.5)
-_FINMIND_TRANSIENT_HTTP = {429, 500, 502, 503, 504}
+# 429 is deliberately absent: FinMind's limit is hourly, so a rate limit cannot
+# clear inside our back-off window -- retrying would spend three requests of an
+# already-exhausted quota instead of one, pushing recovery further out. Fail
+# fast and let callers degrade, same as 402/401.
+_FINMIND_TRANSIENT_HTTP = {500, 502, 503, 504}
+FINMIND_TIMEOUT = 30            # per-request timeout (seconds)
+# Wall-clock ceiling for one _finmind() call, retries and back-off included.
+# Equal to the per-request timeout on purpose: run_full() makes ~6 calls per
+# stock and walks the watchlist sequentially, so retries must not raise the
+# worst-case run time above what it was before retries existed. Consequence:
+# a request that burns the whole budget (server accepting but never answering)
+# gets no retry, while fast failures -- connection refused, prompt 5xx -- still
+# get every one, which is the case retrying actually helps.
+FINMIND_CALL_BUDGET = 30.0
+_FINMIND_MIN_ATTEMPT = 1.0      # don't start an attempt with less budget than this left
 
 
 class SourceError(Exception):
@@ -42,10 +56,13 @@ FINMIND_TOKEN = _load_token()
 
 
 def data_tier():
-    """"premium" when a FinMind token is configured (unlocking PER / institutional
-    / margin / shareholding / SBL and the 600 req/hr limit), else "free" (those
-    getters degrade or return None). Reflects *configuration*, not live validity:
-    an expired token still reads "premium" until a real call 401s."""
+    """"premium" when a FinMind token is configured, else "free". A token buys
+    request head-room (600 req/hr), not extra datasets: PER / institutional /
+    margin / shareholding / SBL all work without one -- see those getters --
+    and access to the paid tick dataset is reported separately by
+    tick_tier_available(). Reflects *configuration*, not live validity: an
+    expired token still reads "premium" until a real call 401s. Published for
+    humans reading /api/config and the snapshot config; nothing gates on it."""
     return "premium" if FINMIND_TOKEN else "free"
 
 # ---------------------------------------------------------------- cache --
@@ -93,9 +110,16 @@ def _finmind(dataset, data_id=None, start_date=None, end_date=None):
         headers["Authorization"] = f"Bearer {FINMIND_TOKEN}"
 
     last_err = None
+    deadline = time.monotonic() + FINMIND_CALL_BUDGET
     for attempt in range(len(FINMIND_RETRY_DELAYS) + 1):
+        remaining = deadline - time.monotonic()
+        if attempt and remaining < _FINMIND_MIN_ATTEMPT:
+            break  # budget spent -- a further attempt would only add wall time
         try:
-            resp = requests.get(FINMIND_URL, params=params, headers=headers, timeout=30)
+            resp = requests.get(
+                FINMIND_URL, params=params, headers=headers,
+                timeout=min(FINMIND_TIMEOUT, max(remaining, _FINMIND_MIN_ATTEMPT)),
+            )
             body = resp.json()
         except requests.RequestException as e:
             last_err = SourceError(f"FinMind {dataset}: request failed ({e})")
@@ -111,7 +135,7 @@ def _finmind(dataset, data_id=None, start_date=None, end_date=None):
                 raise err
             last_err = err
         if attempt < len(FINMIND_RETRY_DELAYS):
-            time.sleep(FINMIND_RETRY_DELAYS[attempt])
+            time.sleep(min(FINMIND_RETRY_DELAYS[attempt], max(deadline - time.monotonic(), 0)))
     raise last_err
 
 

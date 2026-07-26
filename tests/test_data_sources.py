@@ -69,6 +69,31 @@ def test_finmind_no_retry_on_client_error(monkeypatch):
     assert mock_get.call_count == 1  # quota errors fail fast, no retry
 
 
+def test_finmind_no_retry_on_rate_limit(monkeypatch):
+    # 429 can only clear when the hourly window rolls over, so retrying would
+    # spend three requests of an exhausted quota instead of one.
+    monkeypatch.setattr(ds, "FINMIND_RETRY_DELAYS", (0, 0))
+    resp = _fake_response(status=429, body_status=429, msg="rate limit exceeded")
+    with patch("data_sources.requests.get", return_value=resp) as mock_get:
+        with pytest.raises(ds.SourceError):
+            ds._finmind("TaiwanStockPrice", "2330", "2026-01-01")
+    assert mock_get.call_count == 1
+
+
+def test_finmind_stops_retrying_once_budget_is_spent(monkeypatch):
+    # A zero budget stands in for "the first request ate the whole window":
+    # retries must not extend a call past FINMIND_CALL_BUDGET.
+    monkeypatch.setattr(ds, "FINMIND_RETRY_DELAYS", (0, 0))
+    monkeypatch.setattr(ds, "FINMIND_CALL_BUDGET", 0.0)
+    resp = _fake_response(status=503, body_status=503, msg="temporarily down")
+    with patch("data_sources.requests.get", return_value=resp) as mock_get:
+        with pytest.raises(ds.SourceError):
+            ds._finmind("TaiwanStockPrice", "2330", "2026-01-01")
+    assert mock_get.call_count == 1
+    # the one attempt still gets a usable, bounded timeout
+    assert 0 < mock_get.call_args.kwargs["timeout"] <= ds.FINMIND_TIMEOUT
+
+
 def test_data_tier_reflects_token_presence(monkeypatch):
     monkeypatch.setattr(ds, "FINMIND_TOKEN", "some-token")
     assert ds.data_tier() == "premium"
