@@ -1,8 +1,5 @@
 # 台股追蹤器 v2（本地 Python 版）
 
-前身是單檔 HTML 版（`legacy/taiwan_stock_tracker.html`，保留於此當參考）。
-v2 改為 Python 後端＋網頁 UI：資料抓取與指標計算全部在 Python，瀏覽器只負責顯示。
-
 ## 功能
 
 - **今日決策面板**：開首頁最上方，按行動優先級排序告訴你今天該看哪幾檔、為什麼、建議動作（見下方「決策面板與籌碼分」）
@@ -18,16 +15,45 @@ v2 改為 Python 後端＋網頁 UI：資料抓取與指標計算全部在 Pytho
 
 ## 安裝與啟動
 
+**全程用完整路徑（`.venv\Scripts\python`），不要打裸 `python`／`pip`**：本機 PATH 上還有另一個專案（`report_generator`）的 venv 排在前面，裸 `python` 會跑到那個環境去，裝套件、建 venv 都會用錯環境。
+
 ```powershell
 cd C:\Users\william.chen\claude\stock_tracker
-python -m venv .venv                       # 第一次
-.venv\Scripts\pip install -r requirements.txt
+
+# 第一次：用系統內建的 base Python 建 venv（不要用 .venv 自己的 python.exe 重建自己，
+# 也不要用裸 python——理由見上一段與下方「疑難排解」）
+& "C:\Users\william.chen\AppData\Local\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\python.exe" -m venv .venv
+# 上面那個路徑不存在的話（Store 版 Python 版本號會變），改用：
+# & "C:\Users\william.chen\AppData\Local\Microsoft\WindowsApps\python.exe" -m venv .venv
+
+.venv\Scripts\python -m pip install --upgrade pip
+.venv\Scripts\python -m pip install -r requirements.txt
 .venv\Scripts\python -m uvicorn app:app --port 8932
 ```
 
 瀏覽器開 http://localhost:8932
 
-日常使用直接雙擊 `start_server.bat` 即可（會顯示手機用的網址並以區網模式啟動）。
+日常使用直接雙擊 `start_server.bat` 即可（會顯示手機用的網址並以區網模式啟動，且已經是用完整路徑，不受上述 PATH 問題影響）。
+
+### 跑測試
+
+```powershell
+$env:PYTHONIOENCODING='utf-8'
+.venv\Scripts\python -m pytest tests\ -q
+```
+
+全部離線（monkeypatch，不打網路），跑起來應該幾秒內完成。中文輸出如果變亂碼，就是沒設 `PYTHONIOENCODING`。
+
+### 疑難排解
+
+**新開的 PowerShell 視窗裝不了/啟動不了，但上一個視窗明明可以？** 三個獨立成因，可能同時發生：
+
+1. **`.venv` 裡的套件被清空或損毀**（`site-packages` 只剩 `pip`，`.venv\Scripts` 沒有 `uvicorn.exe`/`pytest.exe`）：整個 `.venv` 目錄砍掉重建（`Remove-Item -Recurse -Force .venv`），不要只補 `pip install`——半殘的套件目錄會遮蔽之後重裝的真套件。重建時**不要**用 `.venv\Scripts\python.exe -m venv .venv`（自己重建自己），要用系統內建的 base Python（見上方安裝指令）。
+2. **PowerShell ExecutionPolicy 擋 `Activate.ps1`**：這台機器的 Machine/User/CurrentUser policy 都是 `Undefined`，新開的視窗會落在 `Restricted`，`.venv\Scripts\Activate.ps1` 會被拒絕執行（錯誤訊息通常提到「未經數位簽章」或「已停用」）。**本專案不需要 activate**——上面所有指令都直接用完整路徑 `.venv\Scripts\python`，跳過這個問題。若你仍想用 `Activate.ps1`（例如想要 shell prompt 顯示 `(.venv)`），有兩條不改系統設定的路：
+   - 改用 `.venv\Scripts\activate.bat`（cmd 版不受 PowerShell 的 ExecutionPolicy 限制）
+   - 該次開視窗時用 `powershell -ExecutionPolicy Bypass` 啟動
+   - **不要**跑 `Set-ExecutionPolicy` 改系統設定
+3. **PATH 上有別的專案的 venv 排更前面**：`where python` 第一個結果如果不是這個專案的 `.venv\Scripts\python.exe`，裸 `python`／`pip` 指令就會默默用錯環境（包括建 venv 本身）。解法同上：一律用完整路徑。
 
 ## 手機存取（同一 Wi-Fi）
 
