@@ -682,7 +682,10 @@ def chip_analysis(inst, margin, shareholding, sbl, vol20_last):
 def compute_attention(tech_score, chip, result):
     """Today's action priority, blending technical + chip scores with event triggers.
 
-    Returns {"priority": 0..100, "action": str, "reason": str, "triggers": [str]}.
+    Returns {"priority": 0..100, "action": str, "reason": str, "triggers": [str],
+    "composite": float}. `composite` is exposed (not just used internally) so
+    callers replaying historical scores (docs/backtest_plan.md Phase 4) can
+    persist it without recomputing the tech/chip blend themselves.
     Weights/thresholds below (0.6/0.4 blend, 40/50/25 action cutoffs, per-trigger
     points) are a product judgment call, not derived — tune here if needed.
     """
@@ -755,7 +758,7 @@ def compute_attention(tech_score, chip, result):
         reason = strongest["text"] if strongest else "無明顯訊號"
 
     return {"priority": priority, "action": action, "reason": reason,
-            "triggers": [t for _, t in triggers]}
+            "triggers": [t for _, t in triggers], "composite": composite}
 
 
 # ------------------------------------------------------------ analyze ----

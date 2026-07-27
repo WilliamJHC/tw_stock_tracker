@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """CLI entry point for the 2-year backtest database (docs/backtest_plan.md).
 
-Currently implements Phase 2 (data import) and Phase 3 (signal win-rate
-stats). Later phases (score replay, strategy simulation) extend this same
-CLI without changing these steps.
+Implements Phase 2 (data import), Phase 3 (signal win-rate stats), and
+Phase 4 (score replay + strategy simulation).
 """
 import argparse
 import datetime as dt
+import json
+import time
 
 import backtest as bt
 import data_sources as ds
@@ -77,6 +78,27 @@ def _chip_rows(code):
     ]
 
 
+def _split_chip_rows(chip_rows):
+    """Un-merge chip_daily's wide rows back into the four getter-shaped lists
+    analyze()/chip_analysis() expect (inverse of _chip_rows() above). A row
+    missing a given source's fields (e.g. an ETF with no margin data, or a
+    date margin/shareholding/SBL hasn't published for yet -- see Phase 4's
+    "籌碼延遲一個交易日" note) is simply excluded from that source's list."""
+    inst = [{"date": r["date"], "foreign": r["foreign_net"], "trust": r["trust_net"]}
+            for r in chip_rows if r["foreign_net"] is not None and r["trust_net"] is not None]
+    margin = [{"date": r["date"], "margin_balance": r["margin_balance"],
+               "margin_delta": r["margin_delta"], "short_balance": r["short_balance"],
+               "short_delta": r["short_delta"]}
+              for r in chip_rows if r["margin_balance"] is not None]
+    shareholding = [{"date": r["date"], "foreign_ratio": r["foreign_ratio"],
+                     "foreign_shares": r["foreign_shares"]}
+                    for r in chip_rows if r["foreign_ratio"] is not None]
+    sbl = [{"date": r["date"], "sbl_balance": r["sbl_balance"], "sbl_sales": r["sbl_sales"],
+            "sbl_returns": r["sbl_returns"]}
+           for r in chip_rows if r["sbl_balance"] is not None]
+    return inst, margin, shareholding, sbl
+
+
 def import_data(conn, codes):
     """Pull daily bars + chip data from FinMind (cache=False -- see
     data_sources.py's cache param docstring) and upsert into the DB.
@@ -119,6 +141,70 @@ def compute_signal_stats(conn, codes):
         print(f"  {code}: {len(rows)} 組訊號×天期（{n_with_samples} 組有樣本）")
 
 
+def run_replay_and_simulate(conn, codes, run_id=None):
+    """Phase 4: recompute daily scores bar-by-bar and run the strategy
+    simulation for every code, writing score_history/strategy_runs/trades.
+    Sets meta.last_run_at/last_run_id/params_json/of_excluded on success --
+    the frontend's sole source for "回測資料更新於 X" (docs/backtest_plan.md
+    Phase 1), so this only happens once the full pipeline has actually run,
+    not after the raw data import in Phase 2."""
+    run_id = run_id or dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    print(f"\n重算歷史分數與策略回測（run_id={run_id}）...")
+
+    bars_by_code = {}
+    for code in codes:
+        bars = db.query_daily_bars(conn, code)
+        if bars:
+            bars_by_code[code] = bars
+    rs_by_code_date = bt.compute_rs_by_date(bars_by_code) if len(bars_by_code) >= 2 else {}
+    if len(bars_by_code) < 2:
+        print("  可用日線資料的股票不足 2 檔，RS 排名略過（其餘照常執行）")
+
+    t0 = time.monotonic()
+    for i, code in enumerate(codes, 1):
+        bars = bars_by_code.get(code)
+        if not bars:
+            print(f"[{i}/{len(codes)}] {code}: 尚無日線資料，略過（先跑 --refresh-data）")
+            continue
+
+        chip_rows = db.query_chip_daily(conn, code)
+        inst, margin, shareholding, sbl = _split_chip_rows(chip_rows)
+        rs_by_date = rs_by_code_date.get(code, {})
+
+        t1 = time.monotonic()
+        score_rows = bt.replay_scores(bars, inst, margin, shareholding, sbl, rs_by_date=rs_by_date)
+        elapsed = time.monotonic() - t1
+        if not score_rows:
+            print(f"[{i}/{len(codes)}] {code}: 日線不足 warmup 天數，無法重算分數，略過")
+            continue
+        db.upsert_score_history(conn, code, score_rows)
+
+        sim = bt.simulate(score_rows, bars)
+        db.upsert_strategy_run(conn, run_id, code, {
+            "params_json": json.dumps(bt.STRATEGY_PARAMS, ensure_ascii=False),
+            **sim["summary"],
+            "computed_at": dt.datetime.now().isoformat(),
+        })
+        db.insert_trades(conn, run_id, code, sim["trades"])
+
+        s = sim["summary"]
+        tr = f"{s['total_return']:.1f}%" if s["total_return"] is not None else "無交易"
+        print(f"[{i}/{len(codes)}] {code}: {len(score_rows)} 天分數（{elapsed:.1f}s）、"
+              f"{s['n_trades']} 筆交易、總報酬 {tr}")
+
+    total_elapsed = time.monotonic() - t0
+    print(f"\n重算完成，共耗時 {total_elapsed:.1f} 秒（{total_elapsed / 60:.1f} 分鐘）")
+
+    db.set_meta(conn, "last_run_at", dt.datetime.now().isoformat())
+    db.set_meta(conn, "last_run_id", run_id)
+    db.set_meta(conn, "params_json", json.dumps(bt.STRATEGY_PARAMS, ensure_ascii=False))
+    # OF (orderFlow, 15/100 of SCORE_WEIGHTS) can't be reconstructed 2 years
+    # back -- see docs/backtest_plan.md Phase 4's "硬限制" section. Every
+    # replayed score is scored as if OF contributed 0; build_suggestions()
+    # (Phase 5) must check this flag to compare like with like.
+    db.set_meta(conn, "of_excluded", "1")
+
+
 def main():
     parser = argparse.ArgumentParser(description="建立/更新回測資料庫")
     parser.add_argument("--codes", type=str, default=None,
@@ -147,6 +233,8 @@ def main():
 
     print("\n計算訊號勝率統計 ...")
     compute_signal_stats(conn, codes)
+
+    run_replay_and_simulate(conn, codes)
 
     conn.close()
 

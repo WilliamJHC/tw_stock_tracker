@@ -70,7 +70,7 @@ def init_db(conn):
             tech_score REAL,
             chip_score REAL,
             composite REAL,
-            priority TEXT,
+            priority REAL,
             action TEXT,
             signals_json TEXT,
             PRIMARY KEY (code, date)
