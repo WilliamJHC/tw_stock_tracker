@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """CLI entry point for the 2-year backtest database (docs/backtest_plan.md).
 
-Currently implements Phase 2 (data import): pull daily bars + chip data for
-the watchlist into data/backtest.db. Later phases (signal win-rate stats,
-score replay, strategy simulation) extend this same CLI without changing
-the import step.
+Currently implements Phase 2 (data import) and Phase 3 (signal win-rate
+stats). Later phases (score replay, strategy simulation) extend this same
+CLI without changing these steps.
 """
 import argparse
 import datetime as dt
 
+import backtest as bt
 import data_sources as ds
 import db
 import pipeline as pl
@@ -99,6 +99,26 @@ def import_data(conn, codes):
     return failed
 
 
+def compute_signal_stats(conn, codes):
+    """Compute + store signal_stats (Phase 3) for every code that already
+    has daily bars in the DB. Codes never imported (no bars yet) are
+    skipped with a message -- run with --refresh-data first."""
+    computed_at = dt.datetime.now().isoformat()
+    for code in codes:
+        bars = db.query_daily_bars(conn, code)
+        if not bars:
+            print(f"  {code}: 尚無日線資料，略過（先跑 --refresh-data）")
+            continue
+        daily = {"c": [r["c"] for r in bars], "v": [r["v"] for r in bars],
+                  "o": [r["o"] for r in bars]}
+        rows = bt.signal_win_rates(daily)
+        for row in rows:
+            row["computed_at"] = computed_at
+        db.upsert_signal_stats(conn, code, rows)
+        n_with_samples = sum(1 for r in rows if r["n"] > 0)
+        print(f"  {code}: {len(rows)} 組訊號×天期（{n_with_samples} 組有樣本）")
+
+
 def main():
     parser = argparse.ArgumentParser(description="建立/更新回測資料庫")
     parser.add_argument("--codes", type=str, default=None,
@@ -112,21 +132,21 @@ def main():
     conn = db.connect()
     db.init_db(conn)
 
-    if not args.refresh_data:
+    if args.refresh_data:
+        print(f"匯入 {len(codes)} 檔股票的日線（{DAILY_DAYS} 天）與籌碼（{CHIP_DAYS} 天）資料 ...")
+        failed = import_data(conn, codes)
+        if failed:
+            print(f"\n{len(failed)}/{len(codes)} 檔匯入失敗: {', '.join(failed)}")
+        else:
+            print(f"\n{len(codes)} 檔全部匯入成功")
+    else:
         print("未加 --refresh-data，不會呼叫 FinMind。目前 DB 內容：")
         for code in codes:
             bars = db.query_daily_bars(conn, code)
             print(f"  {code}: {len(bars)} 筆日線")
-        conn.close()
-        return
 
-    print(f"匯入 {len(codes)} 檔股票的日線（{DAILY_DAYS} 天）與籌碼（{CHIP_DAYS} 天）資料 ...")
-    failed = import_data(conn, codes)
-
-    if failed:
-        print(f"\n{len(failed)}/{len(codes)} 檔匯入失敗: {', '.join(failed)}")
-    else:
-        print(f"\n{len(codes)} 檔全部匯入成功")
+    print("\n計算訊號勝率統計 ...")
+    compute_signal_stats(conn, codes)
 
     conn.close()
 
