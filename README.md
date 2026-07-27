@@ -136,6 +136,49 @@ GitHub Actions（排程）
 - `analysis.py` 的 `ACTION_THRESHOLDS`：行動優先級的 40/50/25 門檻
 - `analysis.py` 的 `compute_attention()` 函式內：各事件加分的分值與各組件滿分刻度（法人 10%、融資 5%、外資持股 1pp、借券 5%）寫在 `chip_analysis()` 內
 
+## 回測與建議
+
+`run_backtest.py` 建立/更新一個獨立的 SQLite 回測資料庫（`data/backtest.db`，已 `.gitignore`，不會進版控），提供決策面板的信心度徽章與展開列的回測績效區塊。**這是離線批次工具，不會在啟動 `app.py` 或每次分析時自動執行**——資料是手動跑出來的一份快照，過期了要自己重跑。
+
+### CLI 用法
+
+```powershell
+# 只讀現有 DB（不打 FinMind），印出各代碼目前有幾筆日線，並重算訊號勝率統計
+.venv\Scripts\python run_backtest.py
+
+# 完整重建：向 FinMind 重抓日線＋籌碼、重算訊號勝率、逐 bar 重算分數、跑策略回測
+.venv\Scripts\python run_backtest.py --refresh-data
+
+# 只處理指定代碼（逗號分隔），預設是完整 watchlist.json
+.venv\Scripts\python run_backtest.py --codes 2330,0050 --refresh-data
+```
+
+沒有 `--codes` 時處理完整追蹤清單（19 檔），`--refresh-data` 時每檔要打 5 次 FinMind（日線 + 4 種籌碼），19 檔 ≈ 95 次，遠低於 FinMind 600 次/hr 上限；不加 `--refresh-data` 則完全不連網，只用 DB 裡既有的日線重算訊號勝率／分數／策略。實測 19 檔完整重算（不含資料匯入）約 1 分鐘。
+
+### 資料庫內容（`data/backtest.db`，schema 見 `db.py`）
+
+| 表 | 內容 | 由誰產生 |
+|---|---|---|
+| `daily_bars` | 日線 OHLCV（約 1000 天，含 warmup 緩衝） | 匯入階段 |
+| `chip_daily` | 法人／融資融券／外資持股／借券賣出餘額（合併寬表，約 730 天） | 匯入階段 |
+| `score_history` | 逐日重算的技術分／籌碼分／綜合分／優先級／行動／當日訊號 | 分數重算（`backtest.replay_scores()`） |
+| `signal_stats` | 11 個訊號 × 3 個持有天期（5/10/20日）的歷史勝率與平均報酬 | 訊號統計（`backtest.signal_win_rates()`） |
+| `strategy_runs` | 單方策略回測摘要（總報酬／買進持有／勝率／最大回撤／交易次數） | 策略回測（`backtest.simulate()`） |
+| `trades` | 策略回測的逐筆交易明細 | 策略回測 |
+| `meta` | `last_run_at`／`last_run_id`／`params_json`／`of_excluded` | 每次完整跑完後更新 |
+
+`GET /api/suggestions`（決策面板信心度）與 `GET /api/backtest/{code}`（該檔完整回測明細）讀這個 DB；DB 不存在或空表時兩者都優雅降級（`confidence`/`data_as_of` 回 `null`），不會出錯，只是代表還沒跑過 `run_backtest.py`。
+
+### 三項已知限制（務必理解後再看信心度數字）
+
+1. **回測不含 Order Flow**：OF 佔綜合評分權重 15/100，但 2 年前的逐筆／分鐘資料無法重建（yfinance 只給近 60 天 5 分 K，FinMind tick 是付費層且一次只能抓一天）。`replay_scores()` 重算歷史分數時 OF 一律當作貢獻 0，`meta.of_excluded=1` 記錄這件事。這代表回測分數比即時分數更容易落在中性區間，兩者不能直接比較誰「更準」。
+2. **倖存者偏誤**：`watchlist.json` 是現在這份名單，回測「過去兩年」用的是「現在還留在清單上」的股票，不是「兩年前實際存在的候選池」。曾經在清單上但已刪除的股票不會出現在回測裡，實際勝率可能被高估。
+3. **靜態快照模式不支援回測**：手機雲端版（見上方「手機雲端版」一節）用 GitHub Actions 產生的靜態快照沒有 `data/backtest.db`（已 gitignore，乾淨 checkout 裡不存在），所以決策面板的信心度徽章、展開列的回測績效區塊、頁首的回測更新時間，在靜態快照模式一律不顯示，只有本機 `app.py` 即時模式才有。
+
+### 多久該重跑一次
+
+決策面板頁首會顯示「回測資料更新於 X（N 天前）」，超過 7 天會變成警示色。籌碼資料（法人／融資券／外資持股／借券）每個交易日都有新的一筆，建議收盤後（約 21:00 之後，待三大法人與融資券資料入庫）跑一次 `--refresh-data`；純粹想更新訊號勝率／策略回測、不想重打 FinMind，可以不加 `--refresh-data` 直接跑（用 DB 既有日線重算）。
+
 ## 設定
 
 - `.env`：`FINMIND_TOKEN=你的token`（https://finmindtrade.com 免費註冊後在會員頁取得）。
