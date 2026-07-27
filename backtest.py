@@ -24,6 +24,13 @@ STRATEGY_PARAMS = {
     "fee_pct": 0.6,
 }
 
+# Phase 5 confidence-engine knobs. horizon=20 matches this project's other
+# "hold ~1 month" framing (max_hold_days=60, but 20d is the default backtest
+# horizon used elsewhere); min_samples guards against an n=1 or n=2 signal
+# occurrence dominating the weighted average with a lucky/unlucky outcome.
+CONFIDENCE_HORIZON = 20
+MIN_SAMPLES = 8
+
 
 def signal_win_rates(daily, horizons=DEFAULT_HORIZONS):
     """Win rate + avg return for every analysis.BACKTEST_SIGNALS signal, at
@@ -312,3 +319,56 @@ def simulate(score_rows, bars, params=None):
         "end_date": end_date,
     }
     return {"trades": trades, "summary": summary}
+
+
+# --------------------------------------------------------- confidence ----
+
+def compute_confidence(signals, signal_stats, horizon=CONFIDENCE_HORIZON, min_samples=MIN_SAMPLES):
+    """Sample-weighted confidence that today's triggered signals are backed
+    by real historical edge (docs/backtest_plan.md Phase 5).
+
+    signals: today's result["signals"] list ({..., "bt": str|None}). VP/OF
+        signals have bt=None (no backtest evidence exists for them -- see
+        BACKTEST_SIGNALS' docstring in analysis.py) and are excluded here,
+        not by the caller.
+    signal_stats: this code's db.query_signal_stats() rows (any mix of
+        horizons is fine; only rows matching `horizon` are considered).
+
+    confidence = Σ(nᵢ·win_rateᵢ)/Σnᵢ, expected_ret = Σ(nᵢ·avg_retᵢ)/Σnᵢ --
+    weighted by sample size so a signal with n=2 can't dominate one with
+    n=80. A signal contributes only if its stored n >= min_samples.
+
+    Returns {"confidence": float|None, "expected_ret": float|None,
+    "sample_n": int, "note": str|None, "evidence": [{signal, horizon, n,
+    win_rate, avg_ret}]}. confidence is None (never 0 or a guess) when
+    nothing meets the sample bar -- note is "樣本不足" in that case.
+    """
+    seen = set()
+    triggered = []
+    for s in signals:
+        key = s.get("bt")
+        if key and key not in seen:
+            seen.add(key)
+            triggered.append(key)
+
+    stats_by_signal = {r["signal"]: r for r in signal_stats if r["horizon"] == horizon}
+
+    evidence = []
+    total_n = 0
+    weighted_win = 0.0
+    weighted_ret = 0.0
+    for sig in triggered:
+        row = stats_by_signal.get(sig)
+        if not row or not row["n"] or row["n"] < min_samples:
+            continue
+        evidence.append({"signal": sig, "horizon": horizon, "n": row["n"],
+                         "win_rate": row["win_rate"], "avg_ret": row["avg_ret"]})
+        total_n += row["n"]
+        weighted_win += row["n"] * row["win_rate"]
+        weighted_ret += row["n"] * row["avg_ret"]
+
+    if total_n == 0:
+        return {"confidence": None, "expected_ret": None, "sample_n": 0,
+                "note": "樣本不足", "evidence": []}
+    return {"confidence": weighted_win / total_n, "expected_ret": weighted_ret / total_n,
+            "sample_n": total_n, "note": None, "evidence": evidence}
