@@ -227,9 +227,14 @@ def _twse_daily(code, months=4):
 
 # ---------------------------------------------------------- public API --
 
-def get_daily(code, days=730):
-    """2y daily OHLCV. Volume unit: shares. Returns {t,o,h,l,c,v,source}."""
-    cached = _cache_get(f"daily_{code}")
+def get_daily(code, days=730, cache=True):
+    """2y daily OHLCV. Volume unit: shares. Returns {t,o,h,l,c,v,source}.
+
+    cache=False skips the daily on-disk cache entirely (read and write) --
+    used by the backtest importer, which pulls a much longer `days` window
+    than the live cache key (f"daily_{code}", no `days` in the key) can
+    safely hold without corrupting what the live UI reads back."""
+    cached = _cache_get(f"daily_{code}") if cache else None
     if cached:
         return cached
 
@@ -268,7 +273,8 @@ def get_daily(code, days=730):
         hist = _twse_daily(code)
         hist["source"] = "twse"
 
-    _cache_put(f"daily_{code}", hist)
+    if cache:
+        _cache_put(f"daily_{code}", hist)
     return hist
 
 
@@ -381,12 +387,12 @@ def tick_tier_available(probe_code="2330"):
     return _tick_tier_ok
 
 
-def get_institutional(code, days=40):
+def get_institutional(code, days=40, cache=True):
     """Recent institutional investors net buy/sell per day (FinMind, free).
 
     Returns list of {date, foreign, trust} in shares, oldest first, or None.
-    """
-    cached = _cache_get(f"inst_{code}")
+    cache=False skips the on-disk cache (see get_daily()'s docstring)."""
+    cached = _cache_get(f"inst_{code}") if cache else None
     if cached is not None:
         return cached or None
     result = None
@@ -407,15 +413,17 @@ def get_institutional(code, days=40):
             result = [by_date[d] for d in sorted(by_date)]
     except (SourceError, requests.RequestException, ValueError, KeyError):
         result = None
-    _cache_put(f"inst_{code}", result or [])
+    if cache:
+        _cache_put(f"inst_{code}", result or [])
     return result
 
 
-def get_margin(code, days=40):
+def get_margin(code, days=40, cache=True):
     """Margin purchase / short sale balances via TaiwanStockMarginPurchaseShortSale.
     Returns [{date, margin_balance, margin_delta, short_balance, short_delta}] in shares
-    (source unit is lots; multiply by 1000), oldest first, or None on failure."""
-    cached = _cache_get(f"margin_{code}")
+    (source unit is lots; multiply by 1000), oldest first, or None on failure.
+    cache=False skips the on-disk cache (see get_daily()'s docstring)."""
+    cached = _cache_get(f"margin_{code}") if cache else None
     if cached is not None:
         return cached or None
     result = None
@@ -442,14 +450,16 @@ def get_margin(code, days=40):
             result = [by_date[d] for d in sorted(by_date)]
     except (SourceError, requests.RequestException, ValueError, KeyError):
         result = None
-    _cache_put(f"margin_{code}", result or [])
+    if cache:
+        _cache_put(f"margin_{code}", result or [])
     return result
 
 
-def get_shareholding(code, days=40):
+def get_shareholding(code, days=40, cache=True):
     """Foreign shareholding via TaiwanStockShareholding.
-    Returns [{date, foreign_ratio, foreign_shares}] (ratio in %), oldest first, or None."""
-    cached = _cache_get(f"sh_{code}")
+    Returns [{date, foreign_ratio, foreign_shares}] (ratio in %), oldest first, or None.
+    cache=False skips the on-disk cache (see get_daily()'s docstring)."""
+    cached = _cache_get(f"sh_{code}") if cache else None
     if cached is not None:
         return cached or None
     result = None
@@ -470,15 +480,17 @@ def get_shareholding(code, days=40):
             result = [by_date[d] for d in sorted(by_date)]
     except (SourceError, requests.RequestException, ValueError, KeyError):
         result = None
-    _cache_put(f"sh_{code}", result or [])
+    if cache:
+        _cache_put(f"sh_{code}", result or [])
     return result
 
 
-def get_sbl(code, days=40):
+def get_sbl(code, days=40, cache=True):
     """SBL short sale balances via TaiwanDailyShortSaleBalances.
     Returns [{date, sbl_balance, sbl_sales, sbl_returns}] in shares (source is already
-    in shares — do NOT multiply by 1000), oldest first, or None."""
-    cached = _cache_get(f"sbl_{code}")
+    in shares — do NOT multiply by 1000), oldest first, or None.
+    cache=False skips the on-disk cache (see get_daily()'s docstring)."""
+    cached = _cache_get(f"sbl_{code}") if cache else None
     if cached is not None:
         return cached or None
     result = None
@@ -500,5 +512,6 @@ def get_sbl(code, days=40):
             result = [by_date[d] for d in sorted(by_date)]
     except (SourceError, requests.RequestException, ValueError, KeyError):
         result = None
-    _cache_put(f"sbl_{code}", result or [])
+    if cache:
+        _cache_put(f"sbl_{code}", result or [])
     return result
