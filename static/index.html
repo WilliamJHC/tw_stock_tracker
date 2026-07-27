@@ -66,6 +66,18 @@ tbody tr:hover td { background: var(--color-background-secondary); }
 .score-ss { background: #D5F0E4; color: #1E7A5E; }
 .of-pos { color: #B03A2E; font-weight: 600; }
 .of-neg { color: #1E7A5E; font-weight: 600; }
+/* Confidence (Phase 5/6 backtest engine) is a "how much historical evidence"
+   scale, not a bull/bear one -- deliberately NOT reusing score-badge's
+   red=bull/green=bear tones (would misread a high-confidence SELL as
+   bullish). #1F618D/#92600A/#666666/#999999 are colors already used
+   elsewhere in this file (OF delta line, action-watch, score-n, dc-nochange). */
+.conf-high { background: #D6E8F5; color: #1F618D; }
+.conf-mid  { background: #FCEACB; color: #92600A; }
+.conf-low  { background: #eaeaea; color: #666666; }
+.conf-none { background: #eaeaea; color: #999999; }
+.backtest-status-stale { color: #B03A2E; font-weight: 600; }
+.backtest-status-missing { color: var(--color-text-secondary); }
+body.static-mode #backtestStatus, body.static-mode #backtestDisclaimerLines { display: none; }
 .decision-panel { border: 1px solid var(--color-border-tertiary); border-radius: var(--border-radius-lg); padding: 14px 16px; margin-bottom: 1.5rem; }
 .decision-card { display: flex; align-items: center; gap: 10px; padding: 10px 6px; border-bottom: 1px solid var(--color-border-tertiary); cursor: pointer; flex-wrap: wrap; }
 .decision-card:last-of-type { border-bottom: none; }
@@ -165,6 +177,7 @@ body.static-mode .add-bar, body.static-mode .del-btn { display: none; }
     <div>
       <div class="title">台灣股市追蹤器 v2</div>
       <div class="subtitle">FinMind → yfinance → TWSE・Volume Profile・Order Flow・技術評分</div>
+      <div class="subtitle" id="backtestStatus"></div>
     </div>
     <button class="refresh-btn" onclick="refreshAll()">重新整理全部</button>
   </div>
@@ -227,7 +240,12 @@ body.static-mode .add-bar, body.static-mode .del-btn { display: none; }
   <div style="margin-top:1rem; font-size:12px; color:var(--color-text-secondary); line-height:1.6;">
     資料來源優先度：FinMind → yfinance → TWSE（每檔標示實際來源）。報價：證交所 MIS（盤中）／yfinance。<br>
     ※ Order Flow「分鐘K推估」以 tick rule 由 5 分鐘 K 推估主動買賣方向，非真實逐筆內外盤；填入 FinMind 付費 token 後自動切換精確模式。<br>
-    ※ 免責聲明：技術評分、訊號、回測勝率與推估區間均為歷史統計整理，屬機率傾向而非預測，僅供參考，不構成投資建議。
+    ※ 免責聲明：技術評分、訊號、回測勝率與推估區間均為歷史統計整理，屬機率傾向而非預測，僅供參考，不構成投資建議。<br>
+    <span id="backtestDisclaimerLines">
+    ※ 回測未包含 Order Flow（佔綜合評分權重 15/100）：2 年前的逐筆／分鐘資料無法重建，回測分數系統性地不含此項貢獻。<br>
+    ※ 追蹤清單為現時名單，回測「過去兩年」以現在還留在清單上的股票為對象，存在倖存者偏誤，非嚴謹的歷史選股回測。<br>
+    ※ 策略回測已扣除 0.6% 來回交易成本（手續費＋證交稅），買進持有報酬亦以同一基準扣除，才是公平對照。
+    </span>
   </div>
 </div>
 
@@ -239,6 +257,11 @@ let loadingSet = new Set();
 let expandedCode = null;
 let sortKey = 'priority', sortAsc = false;
 let tickTier = false;
+let suggestions = {};    // code -> /api/suggestions item (Phase 5) -- live mode only, {} in static mode
+let lastRunAt = null;    // meta.last_run_at from /api/suggestions, or null (never run / static mode)
+let backtestDetail = {}; // code -> /api/backtest/{code} payload, lazy-loaded when a row expands
+let backtestLoading = new Set();
+const CONF_BANDS = [65, 40]; // >=65 high, >=40 mid, else low -- confidence is a 0-100 win-rate-like scale, not CFG.score_bands
 let CFG = { score_bands: [60, 20, -20, -60], score_labels: ["強多", "偏多", "中性", "偏空", "強空"],
             action_thresholds: { composite: 40, priority_act: 50, priority_watch: 25 },
             chip_weights: { institutional: 40, margin: 20, shareholding: 20, sbl: 20 } };
@@ -253,12 +276,17 @@ const scoreClass = score => {
   const b = CFG.score_bands;
   return score >= b[0] ? 'score-sb' : score >= b[1] ? 'score-b' : score > b[2] ? 'score-n' : score > b[3] ? 'score-s' : 'score-ss';
 };
+// confidence is a 0-100 win-rate-like scale (not directional bull/bear), so
+// it uses its own 3-tier CONF_BANDS threshold, not CFG.score_bands.
+const confClass = c => c == null ? 'conf-none' : c >= CONF_BANDS[0] ? 'conf-high' : c >= CONF_BANDS[1] ? 'conf-mid' : 'conf-low';
+const fmtPct = v => v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(1) + '%';
 
 // ---- data access helpers for sorting/cells ----
 function rowView(s) {
   const d = data[s.code];
   const a = d && d.analysis;
   const att = d && d.attention;
+  const sug = suggestions[s.code];
   return {
     code: s.code,
     name: (s.name || (d && d.name) || s.code),
@@ -277,6 +305,8 @@ function rowView(s) {
     reason: att ? att.reason : null,
     vol: d && d.quote ? d.quote.vol_lots : null,
     updated: d ? d.last_date : null,
+    confidence: sug && !sug.error ? sug.confidence : null,
+    sampleN: sug && !sug.error ? sug.sample_n : null,
   };
 }
 
@@ -368,6 +398,40 @@ async function init() {
   }
 }
 
+function renderBacktestStatus() {
+  const el = document.getElementById('backtestStatus');
+  if (!el || staticMode) return;   // static mode: hidden via CSS, no need to fill text
+  if (!lastRunAt) {
+    el.textContent = '尚未執行回測，請跑 run_backtest.py';
+    el.className = 'subtitle backtest-status-missing';
+    return;
+  }
+  const runDate = new Date(lastRunAt);
+  const daysAgo = Math.floor((Date.now() - runDate.getTime()) / 86400000);
+  const dateStr = `${runDate.getFullYear()}-${String(runDate.getMonth() + 1).padStart(2, '0')}-${String(runDate.getDate()).padStart(2, '0')}`;
+  el.textContent = `回測資料更新於 ${dateStr}（${daysAgo} 天前）`;
+  el.className = 'subtitle' + (daysAgo > 7 ? ' backtest-status-stale' : '');
+}
+
+async function loadSuggestions() {
+  // Called AFTER the per-code loadStock() loop on purpose: build_suggestions()
+  // re-fetches the same daily/chip data internally, and data_sources.py caches
+  // those same-day, so by this point almost everything it needs is a cache
+  // hit -- only the (uncached-by-design) live quote re-fetches per code, not
+  // a second full FinMind sweep.
+  try {
+    const sr = await fetch('/api/suggestions');
+    if (sr.ok) {
+      const sj = await sr.json();
+      suggestions = {};
+      for (const s of sj.suggestions) suggestions[s.code] = s;
+      lastRunAt = sj.last_run_at;
+    }
+  } catch (e) { /* backtest DB may not exist yet -- badges just show "樣本不足" */ }
+  renderBacktestStatus();
+  updateStats(); renderTable();
+}
+
 async function initLive() {
   try {
     const cr = await fetch('/api/config');
@@ -380,6 +444,7 @@ async function initLive() {
   updateStats(); renderTable();
   for (const s of watchlist) await loadStock(s.code);   // sequential: gentle on rate limits
   document.getElementById('lastUpdate').textContent = '最後更新：' + new Date().toLocaleTimeString('zh-TW');
+  await loadSuggestions();
 }
 
 async function refreshAll() {
@@ -393,6 +458,7 @@ async function refreshAll() {
   data = {}; failed = {};
   for (const s of watchlist) await loadStock(s.code);
   document.getElementById('lastUpdate').textContent = '最後更新：' + new Date().toLocaleTimeString('zh-TW');
+  await loadSuggestions();
 }
 
 async function addStock() {
@@ -418,9 +484,21 @@ async function removeStock(code) {
   updateStats(); renderTable();
 }
 
-function toggleDetail(code) {
+async function toggleDetail(code) {
   expandedCode = expandedCode === code ? null : code;
   renderTable();
+  // Lazy-load the full signal win-rate table (11 signals x 3 horizons) the
+  // first time a row expands -- /api/suggestions only carries the filtered
+  // "evidence" subset, not the full table, so this is a separate fetch.
+  if (expandedCode === code && !staticMode && !backtestDetail[code] && !backtestLoading.has(code)) {
+    backtestLoading.add(code);
+    try {
+      const r = await fetch(`/api/backtest/${code}`);
+      if (r.ok) backtestDetail[code] = await r.json();
+    } catch (e) { /* 回測績效 section just stays hidden for this code */ }
+    backtestLoading.delete(code);
+    renderTable();
+  }
 }
 
 function sortBy(key) {
@@ -465,13 +543,20 @@ function renderDecisionPanel(views) {
       ? `<span class="score-badge ${scoreClass(v.chipScore)}" title="籌碼分（${v.chipCoverage}/4 項資料）">籌碼 ${v.chipScore > 0 ? '+' : ''}${v.chipScore}</span>`
       : '<span class="score-badge score-n">籌碼 —</span>';
     const techBadge = `<span class="score-badge ${scoreClass(v.score)}">技術 ${v.score > 0 ? '+' : ''}${v.score}</span>`;
+    // Confidence badge (Phase 5/6): backtest-only feature, hidden entirely in
+    // static-snapshot mode (see docs/backtest_plan.md Phase 6 point 1).
+    const confBadge = staticMode ? '' : (
+      v.confidence != null
+        ? `<span class="score-badge ${confClass(v.confidence)}" title="樣本數加權的歷史勝率（n=${v.sampleN}）">信心 ${Math.round(v.confidence)}% (n=${v.sampleN})</span>`
+        : '<span class="score-badge conf-none" title="今日觸發的訊號中，沒有任何一個累積到足夠的歷史樣本">樣本不足</span>'
+    );
     return `<div class="decision-card" onclick="focusStock('${v.code}')">
       <span class="action-badge ${cls}">${v.action}</span>
       <span class="dc-code">${v.code}</span>
       <span class="dc-name">${v.name}</span>
       <span class="dc-priority" title="行動優先級">P${v.priority}</span>
       <span class="dc-reason">${v.reason || ''}</span>
-      <span class="dc-badges">${techBadge}${chipBadge}</span>
+      <span class="dc-badges">${techBadge}${chipBadge}${confBadge}</span>
     </div>`;
   };
 
@@ -680,10 +765,66 @@ function buildDetailRow(code) {
         <ul class="signal-list">${sigHtml}</ul>
         <div class="detail-section-title">量化摘要</div>
         ${fc}
+        ${buildBacktestSection(code)}
         <div class="disclaimer">※ 機率傾向僅供參考，非預測、非投資建議。回測樣本有限，過去型態不保證重演。</div>
       </div>
     </div>
   </td></tr>`;
+}
+
+// docs/backtest_plan.md Phase 6 point 3: strategy summary + signal win-rate
+// table for the expanded row. Entirely absent in static-snapshot mode (the
+// backtest DB isn't part of the snapshot -- see point 1).
+function buildBacktestSection(code) {
+  if (staticMode) return '';
+  if (backtestLoading.has(code)) {
+    return `<div class="detail-section-title">回測績效</div>
+      <div style="font-size:13px; color:var(--color-text-secondary); margin-bottom:10px;"><span class="loading"></span> 載入中...</div>`;
+  }
+  const bt = backtestDetail[code];
+  if (!bt) return '';   // not yet requested (shouldn't normally happen once expanded -- toggleDetail() kicks off the fetch)
+  if (!bt.data_as_of) {
+    return `<div class="detail-section-title">回測績效</div>
+      <div style="font-size:13px; color:var(--color-text-secondary); margin-bottom:10px;">尚未執行回測，請跑 run_backtest.py</div>`;
+  }
+
+  let html = `<div class="detail-section-title">回測績效</div>`;
+  const s = bt.strategy;
+  if (s) {
+    const row = (label, value, bold) => `<tr><td style="padding:3px 10px 3px 0; color:var(--color-text-secondary);">${label}</td>
+      <td style="text-align:right; padding:3px 0; ${bold ? 'font-weight:600;' : ''}">${value}</td></tr>`;
+    html += `<table style="width:100%; font-size:12px; border-collapse:collapse; margin-bottom:12px;">
+      ${row('總報酬（2年，複利）', fmtPct(s.total_return), true)}
+      ${row('買進持有報酬（同期間）', fmtPct(s.buy_hold_return))}
+      ${row('勝率', s.win_rate != null ? s.win_rate.toFixed(0) + '%' : '—')}
+      ${row('最大回撤', fmtPct(s.max_drawdown))}
+      ${row('交易次數', s.n_trades)}
+    </table>`;
+  } else {
+    html += `<div style="font-size:13px; color:var(--color-text-secondary); margin-bottom:12px;">此檔尚無策略回測結果（可能樣本不足或尚未納入 --refresh-data 匯入）</div>`;
+  }
+
+  const liveSignals = (data[code] && data[code].analysis && data[code].analysis.signals) || [];
+  const triggeredToday = new Set(liveSignals.filter(sg => sg.bt).map(sg => sg.bt));
+  const rows20 = (bt.signal_stats || []).filter(r => r.horizon === 20)
+    .sort((x, y) => (y.win_rate ?? -1) - (x.win_rate ?? -1));
+  if (rows20.length) {
+    html += `<table style="width:100%; font-size:12px; border-collapse:collapse;">
+      <thead><tr style="color:var(--color-text-secondary);">
+        <th style="text-align:left; font-weight:500; padding:3px 6px 3px 0;">訊號</th>
+        <th style="text-align:right; font-weight:500; padding:3px 4px;">樣本數</th>
+        <th style="text-align:right; font-weight:500; padding:3px 4px;">勝率</th>
+        <th style="text-align:right; font-weight:500; padding:3px 0 3px 4px;">平均報酬（20日）</th>
+      </tr></thead>
+      <tbody>${rows20.map(r => `<tr${triggeredToday.has(r.signal) ? ' style="background:#EAF1F7;"' : ''}>
+        <td style="padding:3px 6px 3px 0;">${r.signal}${triggeredToday.has(r.signal) ? ' <span style="color:#1F618D; font-size:10px;">●今日觸發</span>' : ''}</td>
+        <td style="text-align:right; padding:3px 4px;">${r.n}</td>
+        <td style="text-align:right; padding:3px 4px;">${r.n > 0 ? r.win_rate.toFixed(0) + '%' : '—'}</td>
+        <td style="text-align:right; padding:3px 0 3px 4px;">${r.n > 0 ? fmtPct(r.avg_ret) : '—'}</td>
+      </tr>`).join('')}</tbody>
+    </table>`;
+  }
+  return html;
 }
 
 const isMobile = () => window.matchMedia('(max-width: 768px)').matches;

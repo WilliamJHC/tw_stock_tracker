@@ -71,6 +71,8 @@ GitHub Actions（排程）
 
 網址難猜＋`_headers` 帶 `X-Robots-Tag: noindex`＋頁面 `<meta name="robots">`，不需要密碼。手機端**純讀**：新增/刪除按鈕在靜態模式下自動隱藏，watchlist 只能回 PC 改，或用手機 GitHub App／網頁編輯 `watchlist.json`。
 
+**範圍外**：回測資料庫（`data/backtest.db`）已 `.gitignore`，`snapshot.py` 產生的靜態快照裡沒有它，所以決策面板的信心度徽章、展開列的「回測績效」區塊、頁首的回測更新時間，在手機雲端版一律不顯示——這些只在本機 `app.py` 即時模式下可用。
+
 ### 排程表（`.github/workflows/snapshot.yml`）
 
 | cron（UTC） | 台北時間 | 模式 |
