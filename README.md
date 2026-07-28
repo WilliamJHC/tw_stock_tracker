@@ -1,8 +1,5 @@
 # 台股追蹤器 v2（本地 Python 版）
 
-前身是單檔 HTML 版（`legacy/taiwan_stock_tracker.html`，保留於此當參考）。
-v2 改為 Python 後端＋網頁 UI：資料抓取與指標計算全部在 Python，瀏覽器只負責顯示。
-
 ## 功能
 
 - **今日決策面板**：開首頁最上方，按行動優先級排序告訴你今天該看哪幾檔、為什麼、建議動作（見下方「決策面板與籌碼分」）
@@ -20,7 +17,8 @@ v2 改為 Python 後端＋網頁 UI：資料抓取與指標計算全部在 Pytho
 
 ```powershell
 cd C:\Users\william.chen\claude\stock_tracker
-python -m venv .venv                       # 第一次
+python -m venv .venv
+.venv\Scripts\Activate.ps1
 .venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python -m uvicorn app:app --port 8932
 ```
