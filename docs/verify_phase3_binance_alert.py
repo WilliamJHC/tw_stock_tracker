@@ -7,6 +7,12 @@ record_trade/record_depth + run_once() + alerts.send_telegram(), runs for
 This glue does not exist in monitor.py itself yet (documented there as a
 known simplification -- main() only drives the synchronous MIS/TW path).
 This script is a throwaway verification harness, not a permanent feature.
+
+Kept as the record of the live acceptance run (2026-07-21, 78 alerts
+delivered -- see docs/spike_phase3_verify_log.txt), and as the way to re-run
+it against real Binance + real Telegram. The wiring logic itself is now
+covered offline by tests/test_push_wiring.py, so routine regression checking
+does not need this script.
 """
 import asyncio
 import datetime
