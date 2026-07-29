@@ -6,10 +6,7 @@ wiring in build_stock_payload(). No real network calls or real filesystem
 outside tmp_path (data_sources.CACHE_DIR is monkeypatched).
 """
 import json
-import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 

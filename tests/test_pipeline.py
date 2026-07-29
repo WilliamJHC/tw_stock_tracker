@@ -5,10 +5,7 @@ and feeds it back into each stock's build_stock_payload() call. No real
 network calls: data_sources.get_daily and pipeline.build_stock_payload are
 monkeypatched.
 """
-import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import data_sources as ds
 import pipeline as pl

@@ -13,5 +13,5 @@ echo.
 echo   （手機連不上時請看 README 的「手機存取」疑難排解）
 echo   按 Ctrl+C 停止伺服器
 echo ============================================
-.venv\Scripts\python.exe -m uvicorn app:app --host 0.0.0.0 --port 8932
+.venv\Scripts\python.exe -m uvicorn app:app --app-dir src --host 0.0.0.0 --port 8932
 pause

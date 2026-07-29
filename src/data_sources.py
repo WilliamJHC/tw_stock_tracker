@@ -15,7 +15,9 @@ import requests
 
 import env_utils
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Data files (cache/, static/, watchlist.json, .env) live at the repo root,
+# one level up from src/.
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 UA = {"User-Agent": "Mozilla/5.0 (stock-tracker local app)"}

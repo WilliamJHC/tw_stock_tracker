@@ -6,9 +6,7 @@ style in tests/test_realtime.py and tests/test_data_sources.py)."""
 import datetime as dt
 import json
 import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 

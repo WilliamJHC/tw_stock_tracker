@@ -1,11 +1,7 @@
 # -*- coding: utf-8 -*-
 """Unit tests for snapshot.py's pure merge_light function."""
-import os
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import json
+import sys
 
 import snapshot as snap
 

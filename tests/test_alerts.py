@@ -4,9 +4,7 @@ No real network calls: requests.post is patched. Mirrors the mock style in
 tests/test_data_sources.py (_fake_response(), no live HTTP)."""
 import datetime as dt
 import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from unittest.mock import patch
 

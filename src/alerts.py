@@ -16,7 +16,9 @@ import requests
 
 import env_utils
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Data files (cache/, static/, watchlist.json, .env) live at the repo root,
+# one level up from src/.
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Thresholds/points centralised here, mirroring intraday.py's
 # INTRADAY_THRESHOLDS pattern. All values are product judgment calls, not

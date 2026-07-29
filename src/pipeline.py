@@ -12,7 +12,9 @@ import analysis as an
 import data_sources as ds
 import intraday_feedback as ifb
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Data files (cache/, static/, watchlist.json, .env) live at the repo root,
+# one level up from src/.
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WATCHLIST_PATH = os.path.join(BASE_DIR, "watchlist.json")
 DEFAULT_WATCHLIST = [
     {"code": "2330", "name": "台積電"},

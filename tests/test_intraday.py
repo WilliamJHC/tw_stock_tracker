@@ -2,10 +2,7 @@
 """Unit tests with hand-computed fixtures (no network)."""
 import datetime as dt
 import math
-import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import intraday as it
 

@@ -67,7 +67,7 @@ jobs:
           else
             echo "mode=full" >> "$GITHUB_OUTPUT"
           fi
-      - run: python snapshot.py --mode "${{ steps.mode.outputs.mode }}" --out dist --base-url "https://${CF_PAGES_PROJECT}.pages.dev"
+      - run: python src/snapshot.py --mode "${{ steps.mode.outputs.mode }}" --out dist --base-url "https://${CF_PAGES_PROJECT}.pages.dev"
       - uses: actions/setup-node@v5
         with:
           node-version: 20

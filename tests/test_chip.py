@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 """Unit tests for chip_analysis()/compute_attention()/label_for() with hand-computed fixtures."""
-import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import analysis as an
 

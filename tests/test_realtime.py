@@ -3,10 +3,7 @@
 _yf_history are patched for MISSource; BinanceSource is tested at the
 message-parsing / backoff level (no live socket, no pytest-asyncio dep)."""
 import datetime as dt
-import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from unittest.mock import patch
 

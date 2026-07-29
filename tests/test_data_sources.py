@@ -1,10 +1,7 @@
 # -*- coding: utf-8 -*-
 """Unit tests for data_sources.py FinMind helpers. No real network calls:
 requests.get is patched, and a side_effect guards against unexpected use."""
-import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from unittest.mock import patch
 

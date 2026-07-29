@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 """Unit tests with hand-computed fixtures (no network)."""
-import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import analysis as an
 

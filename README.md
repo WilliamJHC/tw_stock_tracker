@@ -20,12 +20,31 @@ cd C:\Users\william.chen\claude\stock_tracker
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 .venv\Scripts\pip install -r requirements.txt
-.venv\Scripts\python -m uvicorn app:app --port 8932
+.venv\Scripts\python -m uvicorn app:app --app-dir src --port 8932
 ```
 
 瀏覽器開 http://localhost:8932
 
 日常使用直接雙擊 `start_server.bat` 即可（會顯示手機用的網址並以區網模式啟動）。
+
+## 目錄結構
+
+```
+stock_tracker/
+├─ src/              應用程式碼（app / analysis / data_sources / monitor / snapshot …）
+│  └─ realtime/      即時報價來源（MIS、KGI、Binance）
+├─ tests/            pytest（conftest.py 負責把 src/ 掛上 sys.path）
+├─ scripts/          一次性驗證／spike 腳本，不進 pytest
+├─ docs/             設計文件與 spike 紀錄（只放 .md/.txt）
+├─ static/           前端（index.html、icon、manifest）
+├─ cache/            資料快取，可整個刪（gitignored）
+├─ dist/             snapshot.py 產出的靜態站（gitignored）
+├─ legacy/           舊版單檔 HTML，保留參考
+└─ watchlist.json    追蹤清單
+```
+
+`src/` 內的模組用 `BASE_DIR`（＝repo 根目錄）定位 `cache/`、`static/`、`watchlist.json`、`.env`，
+所以指令一律**從 repo 根目錄執行**（`python src/snapshot.py`、`uvicorn app:app --app-dir src`）。
 
 ## 手機存取（同一 Wi-Fi）
 
@@ -61,7 +80,7 @@ netsh advfirewall firewall add rule name="stock-tracker-8932" dir=in action=allo
 
 ```
 GitHub Actions（排程）
-  └─ snapshot.py --mode full|light ──▶ dist/（index.html + data.json + _headers）
+  └─ src/snapshot.py --mode full|light ──▶ dist/（index.html + data.json + _headers）
        └─ npx wrangler pages deploy dist ──▶ https://<專案名>.pages.dev
                                                   ▲
                                           手機瀏覽器（純讀，加入主畫面當 App）
@@ -138,7 +157,7 @@ GitHub Actions（排程）
   沒填也能跑（FinMind 匿名額度較低或自動退到 yfinance），填了升到 600 次/hr。
   填完後用這行驗證 token 有生效、且能正常打 API：
   ```powershell
-  .venv\Scripts\python -c "import data_sources as ds; print(ds.FINMIND_TOKEN[:8] or 'NO TOKEN'); print(len(ds._finmind('TaiwanStockPrice','2330','2026-07-01')), 'rows')"
+  .venv\Scripts\python -c "import sys; sys.path.insert(0,'src'); import data_sources as ds; print(ds.FINMIND_TOKEN[:8] or 'NO TOKEN'); print(len(ds._finmind('TaiwanStockPrice','2330','2026-07-01')), 'rows')"
   ```
 - `watchlist.json`：追蹤清單，可直接編輯，格式 `[{"code": "2330", "name": "台積電"}, ...]`。
   上櫃股票直接填代碼即可（FinMind/TWSE 原生支援，yfinance 備援會自動嘗試 .TWO）。
@@ -152,7 +171,7 @@ GitHub Actions（排程）
 
 ```powershell
 cd C:\Users\william.chen\claude\stock_tracker
-.venv\Scripts\python monitor.py
+.venv\Scripts\python src\monitor.py
 ```
 
 不帶參數執行 `monitor.py` 的 `main()`：追蹤清單抓自 `watchlist.json`（與網頁 UI 共用），台股盤中時間內（08:30–13:30，含試撮）每 30 秒輪詢一次，永久跑到手動關閉（Ctrl+C）為止。若要寫腳本自訂追蹤清單、輪詢間隔或跑固定輪數（例如測試用），改成 `import monitor` 後呼叫 `monitor.main(codes=[...], sleep_seconds=..., max_iterations=...)`；細節見 `monitor.py` 檔頭 docstring。

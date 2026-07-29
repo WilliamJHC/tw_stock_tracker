@@ -2,6 +2,7 @@
 cache/
 __pycache__/
 .pytest_cache/
+.benchmarks/
 .env
 desktop.ini
 dist/
