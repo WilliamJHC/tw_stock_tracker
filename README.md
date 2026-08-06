@@ -15,20 +15,45 @@
 
 ## 安裝與啟動
 
-先解除限制（僅影響目前這個終端機視窗，不會更改系統全域設定）：
-Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
+**全程用完整路徑（`.venv\Scripts\python`），不要打裸 `python`／`pip`**：本機 PATH 上還有另一個專案（`report_generator`）的 venv 排在前面，裸 `python` 會跑到那個環境去，裝套件、建 venv 都會用錯環境。
 
 ```powershell
 cd C:\Users\william.chen\claude\stock_tracker
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+
+# 第一次：用系統內建的 base Python 建 venv（不要用 .venv 自己的 python.exe 重建自己，
+# 也不要用裸 python——理由見上一段與下方「疑難排解」）
+& "C:\Users\william.chen\AppData\Local\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\python.exe" -m venv .venv
+# 上面那個路徑不存在的話（Store 版 Python 版本號會變），改用：
+# & "C:\Users\william.chen\AppData\Local\Microsoft\WindowsApps\python.exe" -m venv .venv
+
+.venv\Scripts\python -m pip install --upgrade pip
+.venv\Scripts\python -m pip install -r requirements.txt
 .venv\Scripts\python -m uvicorn app:app --app-dir src --port 8932
 ```
 
 瀏覽器開 http://localhost:8932
 
-日常使用直接雙擊 `start_server.bat` 即可（會顯示手機用的網址並以區網模式啟動）。
+日常使用直接雙擊 `start_server.bat` 即可（會顯示手機用的網址並以區網模式啟動，且已經是用完整路徑，不受上述 PATH 問題影響）。
+
+### 跑測試
+
+```powershell
+$env:PYTHONIOENCODING='utf-8'
+.venv\Scripts\python -m pytest tests\ -q
+```
+
+全部離線（monkeypatch，不打網路），跑起來應該幾秒內完成。中文輸出如果變亂碼，就是沒設 `PYTHONIOENCODING`。
+
+### 疑難排解
+
+**新開的 PowerShell 視窗裝不了/啟動不了，但上一個視窗明明可以？** 三個獨立成因，可能同時發生：
+
+1. **`.venv` 裡的套件被清空或損毀**（`site-packages` 只剩 `pip`，`.venv\Scripts` 沒有 `uvicorn.exe`/`pytest.exe`）：整個 `.venv` 目錄砍掉重建（`Remove-Item -Recurse -Force .venv`），不要只補 `pip install`——半殘的套件目錄會遮蔽之後重裝的真套件。重建時**不要**用 `.venv\Scripts\python.exe -m venv .venv`（自己重建自己），要用系統內建的 base Python（見上方安裝指令）。
+2. **PowerShell ExecutionPolicy 擋 `Activate.ps1`**：這台機器的 Machine/User/CurrentUser policy 都是 `Undefined`，新開的視窗會落在 `Restricted`，`.venv\Scripts\Activate.ps1` 會被拒絕執行（錯誤訊息通常提到「未經數位簽章」或「已停用」）。**本專案不需要 activate**——上面所有指令都直接用完整路徑 `.venv\Scripts\python`，跳過這個問題。若你仍想用 `Activate.ps1`（例如想要 shell prompt 顯示 `(.venv)`），有兩條不改系統設定的路：
+   - 改用 `.venv\Scripts\activate.bat`（cmd 版不受 PowerShell 的 ExecutionPolicy 限制）
+   - 該次開視窗時用 `powershell -ExecutionPolicy Bypass` 啟動
+   - **不要**跑 `Set-ExecutionPolicy` 改系統設定
+3. **PATH 上有別的專案的 venv 排更前面**：`where python` 第一個結果如果不是這個專案的 `.venv\Scripts\python.exe`，裸 `python`／`pip` 指令就會默默用錯環境（包括建 venv 本身）。解法同上：一律用完整路徑。
 
 ## 目錄結構
 
@@ -90,6 +115,8 @@ GitHub Actions（排程）
 ```
 
 網址難猜＋`_headers` 帶 `X-Robots-Tag: noindex`＋頁面 `<meta name="robots">`，不需要密碼。手機端**純讀**：新增/刪除按鈕在靜態模式下自動隱藏，watchlist 只能回 PC 改，或用手機 GitHub App／網頁編輯 `watchlist.json`。
+
+**範圍外**：回測資料庫（`data/backtest.db`）已 `.gitignore`，`snapshot.py` 產生的靜態快照裡沒有它，所以決策面板的信心度徽章、展開列的「回測績效」區塊、頁首的回測更新時間，在手機雲端版一律不顯示——這些只在本機 `app.py` 即時模式下可用。
 
 ### 排程表（`.github/workflows/snapshot.yml`）
 
@@ -153,6 +180,49 @@ GitHub Actions（排程）
 - `analysis.py` 的 `CHIP_WEIGHTS`：四個籌碼組件的權重
 - `analysis.py` 的 `ACTION_THRESHOLDS`：行動優先級的 40/50/25 門檻
 - `analysis.py` 的 `compute_attention()` 函式內：各事件加分的分值與各組件滿分刻度（法人 10%、融資 5%、外資持股 1pp、借券 5%）寫在 `chip_analysis()` 內
+
+## 回測與建議
+
+`run_backtest.py` 建立/更新一個獨立的 SQLite 回測資料庫（`data/backtest.db`，已 `.gitignore`，不會進版控），提供決策面板的信心度徽章與展開列的回測績效區塊。**這是離線批次工具，不會在啟動 `app.py` 或每次分析時自動執行**——資料是手動跑出來的一份快照，過期了要自己重跑。
+
+### CLI 用法
+
+```powershell
+# 只讀現有 DB（不打 FinMind），印出各代碼目前有幾筆日線，並重算訊號勝率統計
+.venv\Scripts\python src\run_backtest.py
+
+# 完整重建：向 FinMind 重抓日線＋籌碼、重算訊號勝率、逐 bar 重算分數、跑策略回測
+.venv\Scripts\python src\run_backtest.py --refresh-data
+
+# 只處理指定代碼（逗號分隔），預設是完整 watchlist.json
+.venv\Scripts\python src\run_backtest.py --codes 2330,0050 --refresh-data
+```
+
+沒有 `--codes` 時處理完整追蹤清單（19 檔），`--refresh-data` 時每檔要打 5 次 FinMind（日線 + 4 種籌碼），19 檔 ≈ 95 次，遠低於 FinMind 600 次/hr 上限；不加 `--refresh-data` 則完全不連網，只用 DB 裡既有的日線重算訊號勝率／分數／策略。實測 19 檔完整重算（不含資料匯入）約 1 分鐘。
+
+### 資料庫內容（`data/backtest.db`，schema 見 `db.py`）
+
+| 表 | 內容 | 由誰產生 |
+|---|---|---|
+| `daily_bars` | 日線 OHLCV（約 1000 天，含 warmup 緩衝） | 匯入階段 |
+| `chip_daily` | 法人／融資融券／外資持股／借券賣出餘額（合併寬表，約 730 天） | 匯入階段 |
+| `score_history` | 逐日重算的技術分／籌碼分／綜合分／優先級／行動／當日訊號 | 分數重算（`backtest.replay_scores()`） |
+| `signal_stats` | 11 個訊號 × 3 個持有天期（5/10/20日）的歷史勝率與平均報酬 | 訊號統計（`backtest.signal_win_rates()`） |
+| `strategy_runs` | 單方策略回測摘要（總報酬／買進持有／勝率／最大回撤／交易次數） | 策略回測（`backtest.simulate()`） |
+| `trades` | 策略回測的逐筆交易明細 | 策略回測 |
+| `meta` | `last_run_at`／`last_run_id`／`params_json`／`of_excluded` | 每次完整跑完後更新 |
+
+`GET /api/suggestions`（決策面板信心度）與 `GET /api/backtest/{code}`（該檔完整回測明細）讀這個 DB；DB 不存在或空表時兩者都優雅降級（`confidence`/`data_as_of` 回 `null`），不會出錯，只是代表還沒跑過 `run_backtest.py`。
+
+### 三項已知限制（務必理解後再看信心度數字）
+
+1. **回測不含 Order Flow**：OF 佔綜合評分權重 15/100，但 2 年前的逐筆／分鐘資料無法重建（yfinance 只給近 60 天 5 分 K，FinMind tick 是付費層且一次只能抓一天）。`replay_scores()` 重算歷史分數時 OF 一律當作貢獻 0，`meta.of_excluded=1` 記錄這件事。這代表回測分數比即時分數更容易落在中性區間，兩者不能直接比較誰「更準」。
+2. **倖存者偏誤**：`watchlist.json` 是現在這份名單，回測「過去兩年」用的是「現在還留在清單上」的股票，不是「兩年前實際存在的候選池」。曾經在清單上但已刪除的股票不會出現在回測裡，實際勝率可能被高估。
+3. **靜態快照模式不支援回測**：手機雲端版（見上方「手機雲端版」一節）用 GitHub Actions 產生的靜態快照沒有 `data/backtest.db`（已 gitignore，乾淨 checkout 裡不存在），所以決策面板的信心度徽章、展開列的回測績效區塊、頁首的回測更新時間，在靜態快照模式一律不顯示，只有本機 `app.py` 即時模式才有。
+
+### 多久該重跑一次
+
+決策面板頁首會顯示「回測資料更新於 X（N 天前）」，超過 7 天會變成警示色。籌碼資料（法人／融資券／外資持股／借券）每個交易日都有新的一筆，建議收盤後（約 21:00 之後，待三大法人與融資券資料入庫）跑一次 `--refresh-data`；純粹想更新訊號勝率／策略回測、不想重打 FinMind，可以不加 `--refresh-data` 直接跑（用 DB 既有日線重算）。
 
 ## 設定
 

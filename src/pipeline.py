@@ -9,7 +9,9 @@ import json
 import os
 
 import analysis as an
+import backtest as bt
 import data_sources as ds
+import db
 import intraday_feedback as ifb
 
 # Data files (cache/, static/, watchlist.json, .env) live at the repo root,
@@ -179,4 +181,71 @@ def build_watchlist_payloads(codes=None):
             # broad by design: matches snapshot.py's prior per-code try/except
             # (one bad stock must not abort the whole watchlist batch)
             out[code] = {"error": str(e)}
+    return out
+
+
+def build_suggestions(codes=None):
+    """Rank-list of today's live decisions with backtest-backed confidence
+    (docs/backtest_plan.md Phase 5): for each code, today's action/priority
+    (from build_watchlist_payloads(), so RS ranking is included) plus this
+    code's signal_stats/strategy_runs from the backtest DB, blended into a
+    confidence score by backtest.compute_confidence().
+
+    Degrades gracefully when the backtest DB hasn't been built yet (fresh
+    db.connect()+init_db() just creates empty tables, no exception) --
+    every code's confidence/expected_ret come back None with sample_n=0
+    rather than raising, and data_as_of is None. A per-code live-fetch
+    failure is surfaced as an "error" entry, matching
+    build_watchlist_payloads()'s convention.
+
+    Returns a list of {code, name, action, priority, confidence,
+    expected_ret, sample_n, strategy, evidence, data_as_of} dicts (or
+    {code, name, error} for codes whose live fetch failed).
+    """
+    if codes is None:
+        codes = [s["code"] for s in load_watchlist()]
+
+    conn = db.connect()
+    db.init_db(conn)
+    last_run_at = db.get_meta(conn, "last_run_at")
+
+    payloads = build_watchlist_payloads(codes)
+
+    out = []
+    for code in codes:
+        payload = payloads.get(code, {})
+        if "error" in payload:
+            out.append({"code": code, "name": code, "error": payload["error"]})
+            continue
+
+        attention = payload["attention"]
+        signals = payload["analysis"].get("signals") or []
+        signal_stats = db.query_signal_stats(conn, code)
+        conf = bt.compute_confidence(signals, signal_stats)
+
+        strategy_run = db.query_strategy_run(conn, code)
+        strategy = None
+        if strategy_run:
+            strategy = {
+                "total_return": strategy_run["total_return"],
+                "buy_hold_return": strategy_run["buy_hold_return"],
+                "win_rate": strategy_run["win_rate"],
+                "max_drawdown": strategy_run["max_drawdown"],
+                "n_trades": strategy_run["n_trades"],
+            }
+
+        out.append({
+            "code": code,
+            "name": payload["name"],
+            "action": attention["action"],
+            "priority": attention["priority"],
+            "confidence": conf["confidence"],
+            "expected_ret": conf["expected_ret"],
+            "sample_n": conf["sample_n"],
+            "strategy": strategy,
+            "evidence": conf["evidence"],
+            "data_as_of": last_run_at,
+        })
+
+    conn.close()
     return out

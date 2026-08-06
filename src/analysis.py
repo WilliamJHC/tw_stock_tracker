@@ -533,6 +533,24 @@ BACKTEST_SIGNALS = {
 }
 
 
+def build_backtest_ctx(daily):
+    """Build the ctx dict BACKTEST_SIGNALS/backtest_signal() need to evaluate
+    a signal at any historical daily index. Shared by analyze() (today's
+    signals) and backtest.py (historical win-rate stats over the same
+    series) so both read identical ma5/ma20/ma60/vol20/quadrant series --
+    the only way backtest.py can reuse this without duplicating the logic.
+    """
+    closes, vols, opens = daily["c"], daily["v"], daily["o"]
+    n = len(closes)
+    ma5 = ma_series(closes, 5)
+    ma20 = ma_series(closes, 20)
+    ma60 = ma_series(closes, 60)
+    vol20 = ma_series(vols, 20)
+    quadrant = [quadrant_at(closes, vols, vol20, i) for i in range(n)]
+    return {"closes": closes, "vols": vols, "opens": opens, "ma5": ma5, "ma20": ma20,
+            "ma60": ma60, "vol20": vol20, "quadrant": quadrant}
+
+
 def backtest_signal(ctx, fn, horizon=20, gap=5):
     """Win rate of a signal over history: forward `horizon`-day return,
     sampling at most once per `gap` days to avoid overlapping samples."""
@@ -664,7 +682,10 @@ def chip_analysis(inst, margin, shareholding, sbl, vol20_last):
 def compute_attention(tech_score, chip, result):
     """Today's action priority, blending technical + chip scores with event triggers.
 
-    Returns {"priority": 0..100, "action": str, "reason": str, "triggers": [str]}.
+    Returns {"priority": 0..100, "action": str, "reason": str, "triggers": [str],
+    "composite": float}. `composite` is exposed (not just used internally) so
+    callers replaying historical scores (docs/backtest_plan.md Phase 4) can
+    persist it without recomputing the tech/chip blend themselves.
     Weights/thresholds below (0.6/0.4 blend, 40/50/25 action cutoffs, per-trigger
     points) are a product judgment call, not derived — tune here if needed.
     """
@@ -737,14 +758,14 @@ def compute_attention(tech_score, chip, result):
         reason = strongest["text"] if strongest else "無明顯訊號"
 
     return {"priority": priority, "action": action, "reason": reason,
-            "triggers": [t for _, t in triggers]}
+            "triggers": [t for _, t in triggers], "composite": composite}
 
 
 # ------------------------------------------------------------ analyze ----
 
 
 def analyze(daily, minute=None, tick_days=None, inst=None,
-            margin=None, shareholding=None, sbl=None, rs_info=None):
+            margin=None, shareholding=None, sbl=None, rs_info=None, with_backtest=True):
     """Full analysis of one stock.
 
     daily: {t,o,h,l,c,v} 2y daily bars (shares).
@@ -756,19 +777,20 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
         (single-stock analyze() has no cross-stock visibility -- see
         pipeline.build_watchlist_payloads()). None if unavailable (e.g. a
         single-stock live lookup with no batch context).
+    with_backtest: when False, skip recomputing backtest_signal() for
+        today's triggered signals (result["backtest"] is left {}). Each
+        backtest_signal() call rescans the full history, so a caller
+        replaying scores bar-by-bar over hundreds of days (see
+        docs/backtest_plan.md Phase 4) must turn this off to avoid O(n^2).
     """
     closes, highs, lows, vols, opens, times = (
         daily["c"], daily["h"], daily["l"], daily["v"], daily["o"], daily["t"])
     n = len(closes)
     if n < 5:
         return None
-    ma5 = ma_series(closes, 5)
-    ma20 = ma_series(closes, 20)
-    ma60 = ma_series(closes, 60)
-    vol20 = ma_series(vols, 20)
-    quadrant = [quadrant_at(closes, vols, vol20, i) for i in range(n)]
-    ctx = {"closes": closes, "vols": vols, "opens": opens, "ma5": ma5, "ma20": ma20,
-           "ma60": ma60, "vol20": vol20, "quadrant": quadrant}
+    ctx = build_backtest_ctx(daily)
+    ma5, ma20, ma60, vol20, quadrant = (
+        ctx["ma5"], ctx["ma20"], ctx["ma60"], ctx["vol20"], ctx["quadrant"])
     last = n - 1
     price = closes[last]
     w = SCORE_WEIGHTS
@@ -926,10 +948,11 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
     label = label_for(score)
 
     backtest = {}
-    for sig in signals:
-        key = sig.get("bt")
-        if key and key in BACKTEST_SIGNALS and key not in backtest:
-            backtest[key] = backtest_signal(ctx, BACKTEST_SIGNALS[key])
+    if with_backtest:
+        for sig in signals:
+            key = sig.get("bt")
+            if key and key in BACKTEST_SIGNALS and key not in backtest:
+                backtest[key] = backtest_signal(ctx, BACKTEST_SIGNALS[key])
 
     chip = chip_analysis(inst, margin, shareholding, sbl, vol20[last])
 
