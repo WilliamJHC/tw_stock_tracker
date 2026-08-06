@@ -15,11 +15,14 @@
 
 ## 安裝與啟動
 
+先解除限制（僅影響目前這個終端機視窗，不會更改系統全域設定）：
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
+
 ```powershell
 cd C:\Users\william.chen\claude\stock_tracker
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-.venv\Scripts\pip install -r requirements.txt
+pip install -r requirements.txt
 .venv\Scripts\python -m uvicorn app:app --app-dir src --port 8932
 ```
 
