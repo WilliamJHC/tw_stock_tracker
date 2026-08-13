@@ -131,6 +131,28 @@ def _ts_to_dt(ts):
     return dt.datetime.fromtimestamp(ts) if ts else dt.datetime.now()
 
 
+def _cumulative_to_incremental(cum_vols):
+    """Converts a monotonic session-cumulative volume series (MIS's `v`
+    field, a running total since session open -- see
+    realtime/mis_source.py's docstring) into per-tick deltas, which is what
+    vwap_bands()/realtime_cvd() actually expect as a weight per data point
+    (each is a straight `sum(vols)`/`vols[i]` accumulator, not a diff). Using
+    the raw cumulative readings there would double-count every earlier
+    poll's total on each subsequent tick and skew both toward the
+    session's later/larger cumulative readings.
+
+    The first reading has no prior poll to diff against, so it is used
+    as-is (the volume traded between session open and the first poll); a
+    reading that does not increase (two consecutive polls with no new
+    trade, or a glitch) clamps to 0 rather than going negative."""
+    incremental = []
+    prev = None
+    for v in cum_vols:
+        incremental.append(v if prev is None else max(0, v - prev))
+        prev = v
+    return incremental
+
+
 # ------------------------------------------------------------ indicators ----
 
 def _compute_indicators(hist):
@@ -150,10 +172,11 @@ def _compute_indicators(hist):
     if hist["ticks"]:
         session_ticks = [t for t in hist["ticks"] if not t["is_pretrade"]]
         prices = [t["price"] for t in session_ticks]
-        vols = [t["vol"] for t in session_ticks]
+        cum_vols = [t["vol"] for t in session_ticks]
+        vols = _cumulative_to_incremental(cum_vols)  # vwap_bands/realtime_cvd need per-tick, not cumulative
         ts_list = [t["ts"] for t in session_ticks]
         cvd = realtime_cvd(prices, vols, method="tick_rule")
-        cum_vol = session_ticks[-1]["vol"] if session_ticks else None
+        cum_vol = cum_vols[-1] if cum_vols else None
     else:
         prices = [t["price"] for t in hist["trade_ticks"]]
         vols = [t["qty"] for t in hist["trade_ticks"]]

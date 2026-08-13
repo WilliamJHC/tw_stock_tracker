@@ -86,6 +86,26 @@ def test_record_trade_and_record_depth():
 
 # ------------------------------------------------------- _compute_indicators --
 
+def test_cumulative_to_incremental_diffs_and_clamps_negative():
+    assert monitor._cumulative_to_incremental([10, 20, 20, 15, 25]) == [10, 10, 0, 0, 10]
+
+
+def test_compute_indicators_tw_vwap_uses_incremental_volume_not_cumulative():
+    """Regression: vwap_bands()/realtime_cvd() must weight each tick by how
+    much volume traded AT that tick, not by MIS's running cumulative total
+    (vol_lots). Two ticks with the SAME cumulative reading (no new trade
+    between polls) must contribute zero weight on the second tick -- so
+    VWAP stays anchored to the first tick's price, not pulled toward a
+    50/50 blend the way summing raw cumulative values would."""
+    state = monitor.new_state()
+    monitor.record_quote(state, Quote(code="2330", price=100.0, prev_close=99.0, change=1.0,
+                                       change_pct=1.0, vol_lots=100, ts=1000.0))
+    monitor.record_quote(state, Quote(code="2330", price=200.0, prev_close=99.0, change=1.0,
+                                       change_pct=1.0, vol_lots=100, ts=1001.0))  # cumulative unchanged -> 0 new volume
+    indicators = monitor._compute_indicators(state["history"]["2330"])
+    assert indicators["vwap"]["vwap"] == pytest.approx(100.0)  # not 150.0 (the buggy 50/50 blend)
+
+
 def test_compute_indicators_tw_cum_vol_is_last_tick_vol_not_summed():
     """MIS's vol_lots is already a session-cumulative running total (see
     realtime/mis_source.py), so cum_vol must be the LAST tick's vol, not a
@@ -177,20 +197,23 @@ def test_run_once_replay_triggers_vwap_and_orb_alerts_and_persists_cache():
     now0 = dt.datetime(2026, 7, 20, 9, 0, 0)
     session_open_ts = now0.timestamp()
 
-    # First round: quiet opening-range ticks close to 100, moderate volume.
+    # First round: quiet opening-range ticks close to 100, moderate volume
+    # (10 lots per tick). vol_lots is MIS's session-cumulative running total
+    # (see realtime/mis_source.py), so "10 lots per tick" over 4 ticks is
+    # the increasing sequence 10/20/30/40 -- NOT the same value repeated.
     round1 = [
         _tw_quote("2330", 100.0, 10, session_open_ts + 60),
-        _tw_quote("2330", 100.2, 10, session_open_ts + 120),
-        _tw_quote("2330", 99.8, 10, session_open_ts + 180),
-        _tw_quote("2330", 100.1, 10, session_open_ts + 200),
+        _tw_quote("2330", 100.2, 20, session_open_ts + 120),
+        _tw_quote("2330", 99.8, 30, session_open_ts + 180),
+        _tw_quote("2330", 100.1, 40, session_open_ts + 200),
     ]
     # Second round: still inside the 15-min opening-range window but a
     # sharp spike far above the range high and the VWAP -- triggers both
-    # orb_breakout_up and vwap_breakout_up. Volume is deliberately tiny
-    # (a fast single tick ahead of confirming volume) so it doesn't drag
-    # the volume-weighted VWAP/bands up to meet it.
+    # orb_breakout_up and vwap_breakout_up. Volume is deliberately tiny (the
+    # cumulative total ticks up by just 1 lot from round1's 40 -> 41) so it
+    # doesn't drag the volume-weighted VWAP/bands up to meet it.
     round2 = [
-        _tw_quote("2330", 108.0, 1, session_open_ts + 20 * 60),
+        _tw_quote("2330", 108.0, 41, session_open_ts + 20 * 60),
     ]
 
     state = monitor.new_state()
@@ -237,11 +260,15 @@ def test_run_once_replay_depth_wall_imbalance():
 def test_run_once_dedupes_repeat_alert_within_cooldown():
     now0 = dt.datetime(2026, 7, 20, 9, 0, 0)
     ts0 = now0.timestamp()
-    spike = _tw_quote("2330", 108.0, 1, ts0)
+    # vol_lots is MIS's session-cumulative running total, so "100 lots per
+    # tick" over 5 warm-up ticks is 100/200/300/400/500, and the spike's
+    # own tiny 1-lot contribution continues that total to 501 -- not the
+    # same value repeated across every tick.
+    spike = _tw_quote("2330", 108.0, 501, ts0)
     state = monitor.new_state()
     # Pre-seed history so vwap band is already tight around 100, then feed
     # the same breakout quote twice in a row.
-    warm = [_tw_quote("2330", 100.0 + i * 0.01, 100, ts0 - 100 + i) for i in range(5)]
+    warm = [_tw_quote("2330", 100.0 + i * 0.01, 100 * (i + 1), ts0 - 100 + i) for i in range(5)]
     source = _FakeSource([warm, [spike], [spike]])
     sender = _SendRecorder()
 
