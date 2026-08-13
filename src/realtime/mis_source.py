@@ -21,9 +21,23 @@ Field mapping (verified against a live getStockInfo.jsp response):
     g = bid volumes, '_'-joined, aligned with `b`
     t / '%' = time string "HH:MM:SS"
 
-On request failure (RequestException, timeout, or unparsable body) the whole
-batch degrades to yfinance via data_sources._yf_history -- imported, never
-copied, so data_sources.py stays untouched.
+KNOWN GAP, confirmed live 2026-08-13 13:00-13:04 Taipei time (continuous
+session, not pre-open): z and pz can both come back "-" for many consecutive
+polls on a liquid, actively-trading stock (2330/2317/0050 all reproduced it)
+even though v/t and the full bid/ask depth keep advancing normally each poll
+-- ruled out both throttling (still happens at a clean 15s-spaced cadence)
+and the tse+otc batch pairing (still happens querying a single tse_ code
+alone). Root cause unconfirmed (undocumented endpoint, no official spec to
+check against), but it is not a code bug in this module and not new. _parse_item()
+falls back to the best bid/ask midpoint when z/pz are both unavailable
+(source="twse-mis-midpoint") rather than letting the whole poll round degrade
+to yfinance's delayed close just because one field is missing -- see its
+docstring. If z/pz recover, revisit whether this fallback is still needed.
+
+On request failure (RequestException, timeout, or unparsable body), or when
+not even a bid/ask midpoint is available, the whole batch degrades to
+yfinance via data_sources._yf_history -- imported, never copied, so
+data_sources.py stays untouched.
 """
 import datetime as dt
 from typing import Callable, List, Optional
@@ -97,14 +111,31 @@ class MISSource(RealtimeSource):
 
     def _parse_item(self, item: dict) -> Optional[Quote]:
         prev = _num(item, "y")
+        bid_prices, bid_vols = _split_levels(item, "b", "g")
+        ask_prices, ask_vols = _split_levels(item, "a", "f")
+
         price = _num(item, "z")
         if price is None:
             price = _num(item, "pz")
+        source = "twse-mis"
+        if price is None:
+            # z/pz can both be "-" even on a live, actively-trading snapshot
+            # (see module docstring's KNOWN GAP) while the order book stays
+            # populated -- fall back to the best bid/ask midpoint rather than
+            # dropping this quote and forcing the whole poll to degrade to
+            # yfinance's delayed close over one missing field.
+            if bid_prices and ask_prices:
+                price = (bid_prices[0] + ask_prices[0]) / 2
+            elif bid_prices:
+                price = bid_prices[0]
+            elif ask_prices:
+                price = ask_prices[0]
+            if price is not None:
+                source = "twse-mis-midpoint"
         if price is None:
             return None
+
         change = price - prev if prev else None
-        bid_prices, bid_vols = _split_levels(item, "b", "g")
-        ask_prices, ask_vols = _split_levels(item, "a", "f")
         now = self._now_fn()
         code = (item.get("c") or "").strip()
         return Quote(
@@ -119,7 +150,7 @@ class MISSource(RealtimeSource):
             ask_prices=ask_prices,
             ask_vols=ask_vols,
             name=item.get("n") or code,
-            source="twse-mis",
+            source=source,
             ts=now.timestamp(),
             is_pretrade=_is_pretrade(now),
         )

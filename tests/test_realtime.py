@@ -101,6 +101,52 @@ def test_mis_poll_once_not_pretrade_before_0830_or_after_0900():
         assert quotes[0].is_pretrade is False
 
 
+def test_mis_poll_once_falls_back_to_bid_ask_midpoint_when_z_and_pz_both_blank():
+    """Live 2026-08-13: z/pz can both come back "-" on an actively-trading
+    stock while the order book stays populated and v/t keep advancing (see
+    mis_source.py's module docstring KNOWN GAP). Must not drop the quote and
+    force a yfinance degrade just because one field is missing."""
+    body = {"msgArray": [_mis_item(z="-", pz="-")]}  # bid best=999.0, ask best=1000.0
+    src = MISSource(now_fn=lambda: dt.datetime(2026, 7, 20, 10, 0, 0))
+    src.subscribe(["2330"])
+
+    with patch("realtime.mis_source.requests.get", return_value=_fake_json_response(body)):
+        quotes = src.poll_once()
+
+    assert len(quotes) == 1
+    assert quotes[0].price == pytest.approx(999.5)  # (999.0 + 1000.0) / 2
+    assert quotes[0].source == "twse-mis-midpoint"
+    assert quotes[0].vol_lots == 12345  # unaffected: v is independent of z/pz
+
+
+def test_mis_poll_once_midpoint_fallback_uses_whichever_side_is_available():
+    src = MISSource(now_fn=lambda: dt.datetime(2026, 7, 20, 10, 0, 0))
+    src.subscribe(["2330"])
+
+    body_bid_only = {"msgArray": [_mis_item(z="-", pz="-", a="", f="")]}
+    with patch("realtime.mis_source.requests.get", return_value=_fake_json_response(body_bid_only)):
+        quotes = src.poll_once()
+    assert quotes[0].price == 999.0  # best bid only
+    assert quotes[0].source == "twse-mis-midpoint"
+
+    body_ask_only = {"msgArray": [_mis_item(z="-", pz="-", b="", g="")]}
+    with patch("realtime.mis_source.requests.get", return_value=_fake_json_response(body_ask_only)):
+        quotes = src.poll_once()
+    assert quotes[0].price == 1000.0  # best ask only
+    assert quotes[0].source == "twse-mis-midpoint"
+
+
+def test_mis_parse_item_returns_none_when_no_price_and_no_depth_at_all():
+    """Unit-level (not poll_once()): nothing usable at all must drop the
+    quote, not fabricate a price. Tested against _parse_item() directly so
+    this doesn't also exercise poll_once()'s yfinance-degrade fallback,
+    which needs its own network mock (see
+    test_mis_poll_once_degrades_to_yfinance_on_request_exception)."""
+    src = MISSource(now_fn=lambda: dt.datetime(2026, 7, 20, 10, 0, 0))
+    item = _mis_item(z="-", pz="-", a="", f="", b="", g="")
+    assert src._parse_item(item) is None
+
+
 def test_mis_poll_once_degrades_to_yfinance_on_request_exception():
     import requests as real_requests
 
