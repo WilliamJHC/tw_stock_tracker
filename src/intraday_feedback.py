@@ -13,23 +13,17 @@ two modules would import each other. This module has no dependency on monitor.py
 (it only reads the JSON cache file monitor.py happens to write), so both
 monitor.py and pipeline.py can depend on it without a cycle.
 
-KNOWN DATA GAP (read before trusting the output): monitor._persist_snapshot()
-records price/vwap/orb/cvd/depth per poll, but its "volume" field is always
-None -- monitor._compute_indicators()'s docstring says the real per-slot volume
-baseline needed for that is Phase 4/5 territory and isn't computed yet. In other
-words, the intraday cache has no reliable per-tick or per-minute traded-volume
-figure to resample here. resample_records_to_minutes() below therefore uses the
-COUNT of snapshots falling in each minute as an activity-level proxy for volume
--- this is an APPROXIMATION, not real traded volume, and is documented as such
-on the return value. Any CVD estimate analysis.of_from_minutes() computes from
-this source inherits that lower confidence versus the get_minute() (yfinance)
-path, which carries real share volume.
-
-TODO (future work, not done in this pass): extend monitor.record_quote() /
-_persist_snapshot() to additionally capture per-tick volume (e.g. the delta of
-quote.vol_lots between successive quotes, or cumulative session volume) so a
-future version of resample_records_to_minutes() can compute real per-minute
-volume instead of the snapshot-count proxy.
+VOLUME (real, with a graceful-degrade fallback): monitor._persist_snapshot()
+records a "cum_vol" field -- session-cumulative traded volume as of that poll
+(TW: MIS's own running total; crypto: summed Binance aggTrade qty; see
+monitor._compute_indicators()). resample_records_to_minutes() below diffs
+consecutive cum_vol readings across minute buckets to get REAL per-minute
+volume. Older cache records (written before this field existed) or any minute
+with no usable cum_vol reading fall back to the COUNT of snapshots in that
+minute as an activity-level proxy -- an approximation, not real volume -- so a
+day file mixing old/new records still degrades gracefully instead of raising.
+The "volume" field (distinct from "cum_vol") is unrelated: that one is always
+None, reserved for volume_anomaly()'s multi-day baseline, not this module.
 """
 import datetime as dt
 import json
@@ -73,9 +67,13 @@ def resample_records_to_minutes(records):
       c -> "price" of the LAST record whose ts falls in that minute (records
            are appended in chronological order by _persist_snapshot(), so a
            simple last-write-wins per bucket gives the minute's close)
-      v -> COUNT of records falling in that minute -- an activity-level
-           PROXY, NOT real traded volume. See this module's docstring for
-           why (monitor.py does not currently persist per-tick volume).
+      v -> REAL per-minute traded volume: the bucket's last "cum_vol" reading
+           minus the previous bucket's last "cum_vol" reading (both are
+           session-cumulative running totals, see this module's docstring).
+           A bucket with no usable cum_vol reading (older cache format, or a
+           gap) falls back to the COUNT of snapshots in that bucket instead
+           -- an activity-level PROXY, not real volume -- and does not reset
+           the running cum_vol baseline used to diff the next bucket.
 
     Records missing a usable "price" or "ts", or with an unparsable "ts",
     are skipped rather than raising, since a corrupt record should not sink
@@ -83,7 +81,7 @@ def resample_records_to_minutes(records):
     (caller should treat that the same as "no cache available" and fall
     back). Output is sorted oldest-first, matching get_minute()'s convention.
     """
-    buckets = {}  # minute-start unix ts -> {"c": last_price, "v": count}
+    buckets = {}  # minute-start unix ts -> {"c": last_price, "count": n, "cum_vol": last reading or None}
     for rec in records:
         price = rec.get("price")
         ts_str = rec.get("ts")
@@ -95,16 +93,33 @@ def resample_records_to_minutes(records):
             continue
         minute_start = ts.replace(second=0, microsecond=0)
         minute_ts = int(minute_start.timestamp())
-        bucket = buckets.setdefault(minute_ts, {"c": price, "v": 0})
+        bucket = buckets.setdefault(minute_ts, {"c": price, "count": 0, "cum_vol": None})
         bucket["c"] = price  # chronological input order -> last assignment wins
-        bucket["v"] += 1
+        bucket["count"] += 1
+        cum_vol = rec.get("cum_vol")
+        if cum_vol is not None:
+            bucket["cum_vol"] = cum_vol  # last-write-wins, same as price
     if not buckets:
         return None
     keys = sorted(buckets)
+
+    volumes = []
+    prev_cum_vol = None
+    for k in keys:
+        cum_vol = buckets[k]["cum_vol"]
+        if cum_vol is not None and prev_cum_vol is not None:
+            volumes.append(max(0.0, cum_vol - prev_cum_vol))  # clamp: a glitchy/reset reading must not go negative
+        elif cum_vol is not None:
+            volumes.append(cum_vol)  # first reading of the day: nothing to diff against yet
+        else:
+            volumes.append(buckets[k]["count"])  # no cum_vol this minute -- fall back to the count proxy
+        if cum_vol is not None:
+            prev_cum_vol = cum_vol
+
     return {
         "t": keys,
         "c": [buckets[k]["c"] for k in keys],
-        "v": [buckets[k]["v"] for k in keys],
+        "v": volumes,
     }
 
 

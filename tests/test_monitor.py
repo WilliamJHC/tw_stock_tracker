@@ -84,6 +84,36 @@ def test_record_trade_and_record_depth():
     assert hist["depth"]["bid_prices"] == [64999.0]
 
 
+# ------------------------------------------------------- _compute_indicators --
+
+def test_compute_indicators_tw_cum_vol_is_last_tick_vol_not_summed():
+    """MIS's vol_lots is already a session-cumulative running total (see
+    realtime/mis_source.py), so cum_vol must be the LAST tick's vol, not a
+    sum across ticks -- summing would double-count every earlier reading."""
+    state = monitor.new_state()
+    for i, v in enumerate([100, 250, 400]):  # each reading is the running total so far
+        monitor.record_quote(state, Quote(code="2330", price=100.0 + i, prev_close=99.0,
+                                           change=1.0, change_pct=1.0, vol_lots=v, ts=1000.0 + i))
+    indicators = monitor._compute_indicators(state["history"]["2330"])
+    assert indicators["cum_vol"] == 400
+
+
+def test_compute_indicators_crypto_cum_vol_is_sum_of_trade_qty():
+    """Binance aggTrade qty is per-trade (not cumulative), so cum_vol here
+    must sum every trade recorded so far."""
+    state = monitor.new_state()
+    for qty in (0.1, 0.2, 0.05):
+        monitor.record_trade(state, Trade(code="BTCUSDT", price=65000.0, qty=qty, side="buy", ts=1000.0))
+    indicators = monitor._compute_indicators(state["history"]["BTCUSDT"])
+    assert indicators["cum_vol"] == pytest.approx(0.35)
+
+
+def test_compute_indicators_cum_vol_none_when_no_data_yet():
+    state = monitor.new_state()
+    hist = monitor._ensure_history(state, "2330")
+    assert monitor._compute_indicators(hist)["cum_vol"] is None
+
+
 # -------------------------------------------------------------- run_once --
 
 class _FakeSource:

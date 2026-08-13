@@ -139,17 +139,27 @@ def _compute_indicators(hist):
     back to crypto trade ticks. Pre-open call-auction ticks (is_pretrade)
     are excluded from every continuous-session accumulator, per
     intraday.py's module docstring."""
+    # cum_vol: session-cumulative traded volume as of this poll, used by
+    # intraday_feedback.resample_records_to_minutes() to derive real
+    # per-minute volume (diff of consecutive cum_vol readings) instead of a
+    # snapshot-count proxy. TW: MIS's `v` field is already a running session
+    # total (see realtime/mis_source.py), so the last tick's vol IS that
+    # total -- do not sum it, summing session_ticks' vol would double count.
+    # Crypto: Binance aggTrade qty is per-trade (not cumulative), so it must
+    # be summed here to produce a comparable running total.
     if hist["ticks"]:
         session_ticks = [t for t in hist["ticks"] if not t["is_pretrade"]]
         prices = [t["price"] for t in session_ticks]
         vols = [t["vol"] for t in session_ticks]
         ts_list = [t["ts"] for t in session_ticks]
         cvd = realtime_cvd(prices, vols, method="tick_rule")
+        cum_vol = session_ticks[-1]["vol"] if session_ticks else None
     else:
         prices = [t["price"] for t in hist["trade_ticks"]]
         vols = [t["qty"] for t in hist["trade_ticks"]]
         ts_list = [t["ts"] for t in hist["trade_ticks"]]
         cvd = realtime_cvd(None, vols, method="true_side", sides=hist["sides"])
+        cum_vol = sum(vols) if vols else None
 
     vwap = vwap_bands(prices, vols)
 
@@ -172,7 +182,8 @@ def _compute_indicators(hist):
     # territory -- computing it requires historical minute-bucket data this
     # module doesn't fetch yet); left None here so evaluate_alerts() simply
     # skips the volume_anomaly rule until a caller supplies one.
-    return {"price": price, "vwap": vwap, "orb": orb, "cvd": cvd, "depth": depth_result, "volume": None}
+    return {"price": price, "vwap": vwap, "orb": orb, "cvd": cvd, "depth": depth_result,
+            "volume": None, "cum_vol": cum_vol}
 
 
 # --------------------------------------------------------------- cache ----
@@ -201,6 +212,7 @@ def _persist_snapshot(code, market, now, indicators):
         "orb": indicators.get("orb"),
         "cvd": indicators.get("cvd"),
         "depth": indicators.get("depth"),
+        "cum_vol": indicators.get("cum_vol"),
         "volume": indicators.get("volume"),
     })
     with open(path, "w", encoding="utf-8") as f:

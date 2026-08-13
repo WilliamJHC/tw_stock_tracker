@@ -61,6 +61,45 @@ def test_resample_records_to_minutes_empty_input_returns_none():
     assert ifb.resample_records_to_minutes([]) is None
 
 
+def test_resample_records_to_minutes_uses_cum_vol_diff_as_real_volume():
+    """cum_vol present on every record -> per-minute volume is the diff of
+    consecutive cumulative readings, not the count-of-snapshots proxy."""
+    records = [
+        {"ts": "2026-07-20T09:00:05", "price": 100.0, "cum_vol": 500},
+        {"ts": "2026-07-20T09:00:35", "price": 100.5, "cum_vol": 620},  # same minute
+        {"ts": "2026-07-20T09:01:10", "price": 101.0, "cum_vol": 900},
+    ]
+    out = ifb.resample_records_to_minutes(records)
+    # first minute has nothing to diff against yet -> raw cumulative reading
+    # second minute -> 900 - 620 (the minute's LAST cum_vol reading, i.e. 620, not 500)
+    assert out["v"] == [620, 280]
+
+
+def test_resample_records_to_minutes_clamps_negative_diff_to_zero():
+    """A glitchy/reset cum_vol reading (e.g. source restarted mid-session)
+    must not produce a negative volume."""
+    records = [
+        {"ts": "2026-07-20T09:00:05", "price": 100.0, "cum_vol": 900},
+        {"ts": "2026-07-20T09:01:10", "price": 101.0, "cum_vol": 100},
+    ]
+    out = ifb.resample_records_to_minutes(records)
+    assert out["v"] == [900, 0]
+
+
+def test_resample_records_to_minutes_falls_back_to_count_per_bucket_missing_cum_vol():
+    """A day file mixing old-format records (no cum_vol) with new ones: the
+    minute lacking cum_vol falls back to its snapshot count, and does not
+    corrupt the running baseline used to diff the next minute that has one."""
+    records = [
+        {"ts": "2026-07-20T09:00:05", "price": 100.0, "cum_vol": 500},
+        {"ts": "2026-07-20T09:01:05", "price": 100.2},   # old format: no cum_vol
+        {"ts": "2026-07-20T09:01:35", "price": 100.4},   # same minute, still no cum_vol
+        {"ts": "2026-07-20T09:02:05", "price": 101.0, "cum_vol": 650},
+    ]
+    out = ifb.resample_records_to_minutes(records)
+    assert out["v"] == [500, 2, 150]  # 500 (first reading), 2 (count fallback), 650-500 (baseline carried forward)
+
+
 # ------------------------------------------------------- load_intraday_cache --
 
 def test_load_intraday_cache_missing_file_returns_none():
