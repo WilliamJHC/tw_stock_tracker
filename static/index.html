@@ -925,7 +925,7 @@ function mountChart(code) {
               panes: { separatorColor: '#e8e8e8', separatorHoverColor: '#dddddd' } },
     grid: { vertLines: { color: '#f5f5f5' }, horzLines: { color: '#f0f0f0' } },
     rightPriceScale: { borderColor: '#e0e0e0' },
-    timeScale: { borderColor: '#e0e0e0', rightOffset: 2 },
+    timeScale: { borderColor: '#e0e0e0', rightOffset: 4 },
     crosshair: { mode: LWC.CrosshairMode.Normal },
   });
 
@@ -939,32 +939,42 @@ function mountChart(code) {
     time: toChartDate(ch.t[i]), open: ch.o[i], high: ch.h[i], low: ch.l[i], close: c,
   })));
 
-  const addMA = (arr, color, title) => {
+  // No `title` on MA lines: it renders as a floating label INSIDE the pane
+  // (at the line's last-value height), which is exactly what used to cover
+  // the candles. Color alone identifies each MA -- the legend above the
+  // chart already spells out which color is MA5/20/60.
+  const addMA = (arr, color) => {
     const pts = [];
     for (let i = 0; i < arr.length; i++) {
       if (arr[i] != null) pts.push({ time: toChartDate(ch.t[i]), value: arr[i] });
     }
     if (pts.length < 2) return;
     const s = chart.addSeries(LWC.LineSeries, {
-      color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, title,
+      color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
     }, 0);
     s.setData(pts);
   };
-  addMA(ch.ma5, '#E67E22', 'MA5');
-  addMA(ch.ma20, '#2980B9', 'MA20');
-  addMA(ch.ma60, '#8E44AD', 'MA60');
+  addMA(ch.ma5, '#E67E22');
+  addMA(ch.ma20, '#2980B9');
+  addMA(ch.ma60, '#8E44AD');
 
-  const priceLine = (price, color, title, dashed) => candle.createPriceLine({
-    price, color, title, lineWidth: 1,
+  // Likewise no `title` here: axisLabelVisible alone puts the price on the
+  // Y axis (a separate canvas from the pane, so it can never overlap a
+  // candle), which is exactly where the user wants these -- the axis, next
+  // to their corresponding price. `title` would additionally float an
+  // in-pane text label at that price's height, which is what covered the
+  // candles before.
+  const priceLine = (price, color, dashed) => candle.createPriceLine({
+    price, color, lineWidth: 1,
     lineStyle: dashed ? LWC.LineStyle.Dashed : LWC.LineStyle.Solid,
     axisLabelVisible: true,
   });
-  a.sr.resistances.forEach(p => priceLine(p, '#C0392B', '壓力', true));
-  a.sr.supports.forEach(p => priceLine(p, '#1E8E5A', '支撐', true));
+  a.sr.resistances.forEach(p => priceLine(p, '#C0392B', true));
+  a.sr.supports.forEach(p => priceLine(p, '#1E8E5A', true));
   if (a.vp) {
-    priceLine(a.vp.poc, '#B03A2E', 'POC', false);
-    priceLine(a.vp.vah, '#2980B9', 'VAH', true);
-    priceLine(a.vp.val, '#2980B9', 'VAL', true);
+    priceLine(a.vp.poc, '#B03A2E', false);
+    priceLine(a.vp.vah, '#2980B9', true);
+    priceLine(a.vp.val, '#2980B9', true);
     candle.attachPrimitive(new VolumeProfilePrimitive(a.vp));
   }
 
