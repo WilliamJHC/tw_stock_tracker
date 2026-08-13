@@ -4,7 +4,7 @@
 
 - **今日決策面板**：開首頁最上方，按行動優先級排序告訴你今天該看哪幾檔、為什麼、建議動作（見下方「決策面板與籌碼分」）
 - 追蹤清單（`watchlist.json` 持久化）、即時報價、本益比
-- K 線圖＋ MA5/20/60 ＋支撐壓力
+- K 線圖＋ MA5/20/60 ＋支撐壓力（用 TradingView 開源的 [Lightweight Charts](https://github.com/tradingview/lightweight-charts) 繪製，函式庫檔案放在 `static/vendor/`，離線可用不打 CDN）
 - **Volume Profile**：POC／Value Area（70%）／HVN･LVN，直方圖疊在 K 線旁
 - **Order Flow**：內外盤 delta 與累積 delta
   - FinMind 付費級 token → 逐筆 tick 精確計算
@@ -65,6 +65,8 @@ stock_tracker/
 ├─ scripts/          一次性驗證／spike 腳本，不進 pytest
 ├─ docs/             設計文件與 spike 紀錄（只放 .md/.txt）
 ├─ static/           前端（index.html、icon、manifest）
+│  └─ vendor/        第三方前端函式庫（Lightweight Charts），進版控以保離線可用
+├─ worker/           Cloudflare Worker：TradingView 警報轉發 Telegram
 ├─ cache/            資料快取，可整個刪（gitignored）
 ├─ dist/             snapshot.py 產出的靜態站（gitignored）
 ├─ legacy/           舊版單檔 HTML，保留參考
@@ -270,7 +272,56 @@ cd C:\Users\william.chen\claude\stock_tracker
 - 台股 CVD／Order Flow 皆為**估算級**，不是真逐筆內外盤：盤中即時走 tick-rule 推估（`intraday.py`），盤後走 `analysis.py` 的 `of_from_minutes()`（yfinance 5 分 K 的 tick-rule 推估）或 `of_from_ticks()`（FinMind 付費 tick，僅付費 token 可用）。
 - `pipeline.py` 現在會優先讀當日 `cache/intraday_{code}_{date}.json`（`intraday_feedback.py` 轉換）取代 yfinance 分鐘 K，但這個快取目前**沒有真實成交量欄位**（`monitor.py` 的 `_persist_snapshot()` 尚未記錄逐筆量），只能用「每分鐘快照筆數」當活躍度代理值，比真實量更粗略；沒有當日快取（例如監控沒開過、非交易日）時自動退回 yfinance。
 - KGI SUPER PY（券商 API）尚未串接——需要使用者完成簽約後才會排入開發。
-- TradingView webhook 尚未實作——計畫書列為可選項，目前優先度較低，暫緩。
+- TradingView webhook 已實作，見下方「TradingView 警報轉發」一節（跑在 Cloudflare Worker 上，與 `monitor.py` 各自獨立）。
+
+## TradingView 警報轉發（Cloudflare Worker）
+
+把 TradingView 的警報轉進跟盤中監控同一個 Telegram 聊天室。做成 Worker 而不是 `app.py` 的
+endpoint，是因為 Worker 24 小時常駐，PC 關機時警報照樣會到；Cloudflare 免費方案每天 10 萬次
+請求，這個用量（一天最多幾十則警報）完全在免費額度內。
+
+程式碼在 `worker/tv-webhook.js`，部署設定在 `worker/wrangler.toml`。
+
+### 第一次部署
+
+1. **建一個 Workers 專用的 Cloudflare API Token**（跟現有那個 Pages 部署用的分開，權限最小化）：
+   Cloudflare dashboard → My Profile → API Tokens → Create Token → 權限選 `Account / Workers Scripts / Edit`
+2. **設一個難猜的共享密鑰**（TradingView 要用它證明身分，例如用 `python -c "import secrets; print(secrets.token_urlsafe(32))"` 產生）
+3. 到 GitHub repo → Settings → Environments → **Cloudflare**（跟 snapshot 用同一個環境）新增 3 個 secret：
+
+   | Secret | 內容 |
+   |---|---|
+   | `CLOUDFLARE_WORKER_API_TOKEN` | 步驟 1 建的 token |
+   | `TV_WEBHOOK_SECRET` | 步驟 2 的共享密鑰 |
+   | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | 跟 `.env` 裡同一組（Worker 端要自己有一份） |
+
+   （`CLOUDFLARE_ACCOUNT_ID` 沿用現有那個，不用重設。）
+4. GitHub → Actions → **deploy-tv-webhook** → Run workflow。成功後 Worker 網址是
+   `https://tv-webhook.<你的帳號子網域>.workers.dev`，實際網址會印在該次 run 的 log 裡。
+
+### TradingView 端設定
+
+建警報時把 Webhook URL 填成 Worker 網址，訊息二選一：
+
+- **JSON**（密鑰放 body，網址不用帶參數）：
+  ```json
+  {"secret": "你的TV_WEBHOOK_SECRET", "message": "{{ticker}} 突破 {{close}}"}
+  ```
+- **純文字**（密鑰放網址）：URL 填 `https://tv-webhook.xxx.workers.dev/?token=你的TV_WEBHOOK_SECRET`，
+  訊息欄隨意打字即可。
+
+TradingView 的警報介面不能自訂 HTTP header，所以密鑰只能走 body 或查詢字串——兩種都支援。
+轉到 Telegram 的訊息會加上 `[TV]` 前綴，跟 `monitor.py` 自己發的警報區分。
+
+### 部署後驗證
+
+```powershell
+# 401：沒帶密鑰應該被擋
+curl -X POST https://tv-webhook.xxx.workers.dev/ -d "hello"
+
+# 200：帶對密鑰，手機上應該收到一則 [TV] 開頭的 Telegram 訊息
+curl -X POST "https://tv-webhook.xxx.workers.dev/?token=你的密鑰" -d "測試訊息"
+```
 
 ## 免責
 

@@ -60,6 +60,13 @@ def assemble_site(out_dir):
     os.makedirs(dist_static, exist_ok=True)
     for name in ("manifest.json", "icon.png"):
         shutil.copy2(os.path.join(BASE_DIR, "static", name), os.path.join(dist_static, name))
+    # Lightweight Charts is vendored locally (not a CDN link) so the snapshot
+    # stays self-contained -- index.html loads it from /static/vendor/.
+    shutil.copytree(
+        os.path.join(BASE_DIR, "static", "vendor"),
+        os.path.join(dist_static, "vendor"),
+        dirs_exist_ok=True,
+    )
     with open(os.path.join(out_dir, "_headers"), "w", encoding="utf-8") as f:
         f.write(HEADERS_CONTENT)
 

@@ -1,6 +1,6 @@
 # stock_tracker 盤中 Day Trading ＋ 盤後技術分析 開發計畫書
 
-> **狀態（2026-08-13 補註）**：Phase 1-4（realtime/ 資料層、intraday.py 指標、alerts.py 警報、盤後短中線指標）對應模組已存在且有測試通過；Phase 5 的「Binance WebSocket 常駐迴圈接上 `monitor.main()`」已完成（`main(crypto_codes=[...])` 會啟動背景 Binance 任務，與 MIS 輪詢並行，不需 API key，並以真實 Binance 連線驗證過）。Phase 5 其餘可選項（TradingView webhook、KGI SUPER PY adapter）仍未做，優先度較低、暫緩。實際狀態以 `git log` 與 `pytest tests/` 為準，勿把未完成項目當已完成。
+> **狀態（2026-08-13 補註）**：Phase 1-4（realtime/ 資料層、intraday.py 指標、alerts.py 警報、盤後短中線指標）對應模組已存在且有測試通過；Phase 5 的「Binance WebSocket 常駐迴圈接上 `monitor.main()`」已完成（`main(crypto_codes=[...])` 會啟動背景 Binance 任務，與 MIS 輪詢並行，不需 API key，並以真實 Binance 連線驗證過）。Phase 5 的 TradingView webhook 也已實作，但**做法與本計畫書原本的規劃不同**：不是加在 `app.py` 的 `/webhook/tv` endpoint，而是獨立成一支 Cloudflare Worker（`worker/tv-webhook.js`），理由是 Worker 常駐、PC 關機時警報照樣會到，且免費額度綽綽有餘；細節見 README「TradingView 警報轉發」。**尚未部署驗證**（需要使用者先建 Workers 專用 API token）。KGI SUPER PY adapter 仍未做（等簽約）。實際狀態以 `git log` 與 `pytest tests/` 為準，勿把未完成項目當已完成。
 
 > 版本：v1.0（2026-07-20 定稿，經使用者核准）
 > 執行者：Sonnet 5 (medium)。本文件自成一體，執行前不需要其他對話脈絡。

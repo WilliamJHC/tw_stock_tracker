@@ -1,0 +1,7 @@
+name = "tv-webhook"
+main = "tv-webhook.js"
+compatibility_date = "2026-08-13"
+
+# No [vars] here on purpose: TV_WEBHOOK_SECRET / TELEGRAM_BOT_TOKEN /
+# TELEGRAM_CHAT_ID are secrets, set with `wrangler secret put <NAME>` (or via
+# the Cloudflare dashboard) so they never land in version control.

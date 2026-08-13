@@ -167,7 +167,10 @@ body.static-mode .add-bar, body.static-mode .del-btn { display: none; }
   .kline-legend { font-size: 10px; }
   .kline-info { font-size: 11px; }
 }
+.lwchart { width: 100%; height: 460px; }
+@media (max-width: 768px) { .lwchart { height: 360px; } }
 </style>
+<script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
 
@@ -265,8 +268,8 @@ const CONF_BANDS = [65, 40]; // >=65 high, >=40 mid, else low -- confidence is a
 let CFG = { score_bands: [60, 20, -20, -60], score_labels: ["強多", "偏多", "中性", "偏空", "強空"],
             action_thresholds: { composite: 40, priority_act: 50, priority_watch: 25 },
             chip_weights: { institutional: 40, margin: 20, shareholding: 20, sbl: 20 } };
-const klineMeta = {};
-const ACTION_CLASS = { '準備進場': 'action-buy', '減碼警示': 'action-sell', '今日關注': 'action-watch', '觀察': 'action-observe' };
+const lwCharts = {};  // code -> {chart, dispose} for the mounted Lightweight Charts instance
+const ACTION_CLASS ={ '準備進場': 'action-buy', '減碼警示': 'action-sell', '今日關注': 'action-watch', '觀察': 'action-observe' };
 
 const fmtP = p => p == null ? '—' : (p >= 500 ? p.toFixed(0) : p >= 100 ? p.toFixed(1) : p.toFixed(2));
 const fmtLots = v => { const l = v / 1000; return l >= 10000 ? (l / 1000).toFixed(1) + 'K張' : Math.round(l).toLocaleString() + '張'; };
@@ -593,6 +596,10 @@ function renderTable() {
     return sortAsc ? (a > b ? 1 : -1) : (a < b ? 1 : -1);
   });
 
+  // 每次重繪都先銷毀既有 chart：下面的 innerHTML 會把它們的容器整個換掉，
+  // 不先 remove() 的話 Lightweight Charts 實例會連同 ResizeObserver 留下來洩漏。
+  disposeAllCharts();
+
   if (!rows.length) {
     tbody.innerHTML = `<tr class="plain-row"><td colspan="14" class="empty">${watchlist.length ? '沒有符合條件的個股' : '尚未新增個股'}</td></tr>`;
     return;
@@ -658,6 +665,12 @@ function renderTable() {
     </tr>`;
     return row + (isOpen ? buildDetailRow(v.code) : '');
   }).join('');
+
+  // Lightweight Charts 需要真實的 DOM 節點才能建立，所以一定要等 innerHTML
+  // 寫完之後才掛（不像先前的 SVG 可以直接組字串塞進去）。
+  if (expandedCode && !loadingSet.has(expandedCode) && data[expandedCode]) {
+    mountChart(expandedCode);
+  }
 }
 
 // ================= detail panel =================
@@ -758,7 +771,7 @@ function buildDetailRow(code) {
           ｜右側灰色橫條＝Volume Profile（<span style="color:#B03A2E;">━ POC</span>、<span style="color:#2980B9;">┄ VA</span>）
           ${srStr ? '｜' + srStr : ''}</div>
         <div class="kline-info" id="kinfo-${code}"></div>
-        ${buildChartSVG(code)}
+        <div class="lwchart" id="lwchart-${code}"></div>
       </div>
       <div>
         <div class="detail-section-title">技術訊號（綜合評分 ${a.score > 0 ? '+' : ''}${a.score} ${a.label}）</div>
@@ -829,158 +842,185 @@ function buildBacktestSection(code) {
 
 const isMobile = () => window.matchMedia('(max-width: 768px)').matches;
 
-function buildChartSVG(code) {
-  const d = data[code], a = d.analysis;
+// ================= K 線圖（TradingView Lightweight Charts v5） =================
+// 取代先前手刻的 SVG 圖表。函式庫是離線的本地檔（static/vendor/），Apache 2.0
+// 授權，不打任何外部網路——靜態快照版（Cloudflare Pages）與本機 app.py 都能用。
+
+const UP_COLOR = '#C0392B', DOWN_COLOR = '#1E8E5A';   // 台股慣例：紅漲綠跌
+
+// Volume Profile 橫向直方圖。Lightweight Charts 沒有內建這個圖種，用 series
+// primitive 直接畫在主窗格的 canvas 上（靠右對齊，與價格軸共用 y 座標）。
+class VolumeProfilePrimitive {
+  constructor(vp) {
+    this._vp = vp;
+    this._series = null;
+    this._paneView = { zOrder: 'bottom', renderer: { draw: t => this._draw(t) } };
+  }
+  attached(params) { this._series = params.series; }
+  detached() { this._series = null; }
+  updateAllViews() {}
+  paneViews() { return [this._paneView]; }
+  _draw(target) {
+    const series = this._series, vp = this._vp;
+    if (!series || !vp || !vp.bins || !vp.bins.length) return;
+    target.useBitmapCoordinateSpace(scope => {
+      const ctx = scope.context;
+      const { bitmapSize, verticalPixelRatio } = scope;
+      const bMax = Math.max(...vp.bins.map(b => b.v), 1);
+      const maxW = bitmapSize.width * 0.18;
+      ctx.fillStyle = 'rgba(185, 196, 207, 0.45)';
+      for (const b of vp.bins) {
+        if (b.v <= 0) continue;
+        const yTop = series.priceToCoordinate(b.p + vp.bin_width / 2);
+        const yBot = series.priceToCoordinate(b.p - vp.bin_width / 2);
+        if (yTop == null || yBot == null) continue;
+        const w = b.v / bMax * maxW;
+        const y = yTop * verticalPixelRatio;
+        const h = Math.max(1, (yBot - yTop) * verticalPixelRatio);
+        ctx.fillRect(bitmapSize.width - w, y, w, h);
+      }
+    });
+  }
+}
+
+// chart 的 time 軸統一用 UTC 日期字串，與 analysis.of.days[].date 的格式一致，
+// 這樣累積 Delta 才對得上日線的 x 軸（沿用先前 SVG 版的對應方式）。
+const toChartDate = ts => new Date(ts * 1000).toISOString().slice(0, 10);
+
+function disposeChart(code) {
+  const entry = lwCharts[code];
+  if (!entry) return;
+  try { entry.chart.remove(); } catch (_) { /* 容器已被 innerHTML 重建時忽略 */ }
+  delete lwCharts[code];
+}
+
+function disposeAllCharts() {
+  Object.keys(lwCharts).forEach(disposeChart);
+}
+
+function mountChart(code) {
+  const el = document.getElementById('lwchart-' + code);
+  const d = data[code];
+  if (!el || !d || !window.LightweightCharts) return;
+  const LWC = window.LightweightCharts;
+  const a = d.analysis;
   const mobile = isMobile();
   let ch = d.chart;
-  if (mobile) {   // 手機：只畫近60根，viewBox 縮半、字級放大，維持可讀
+  if (mobile) {   // 手機只畫近 60 根，維持可讀
     const s = Math.max(0, ch.c.length - 60);
     const sl = arr => arr.slice(s);
     ch = { t: sl(ch.t), o: sl(ch.o), h: sl(ch.h), l: sl(ch.l), c: sl(ch.c), v: sl(ch.v),
            ma5: sl(ch.ma5), ma20: sl(ch.ma20), ma60: sl(ch.ma60), vol20: sl(ch.vol20) };
   }
-  const N = ch.c.length;
-  const W = mobile ? 480 : 960, PAD_L = mobile ? 6 : 10, PAD_R = mobile ? 46 : 58;
-  const FS = mobile ? 14 : 10;              // SVG 標註字級（手機 viewBox 縮放後仍 ≥9px 實際大小）
-  const GRID = mobile ? 3 : 4;
-  const plotW = W - PAD_L - PAD_R;
-  const step = plotW / N;
-  const x = i => PAD_L + i * step + step / 2;
-  const MAIN_T = 12, MAIN_H = mobile ? 200 : 258;
-  const VOL_T = MAIN_T + MAIN_H + 22, VOL_H = mobile ? 50 : 66;
-  const OF_T = VOL_T + VOL_H + 22, OF_H = mobile ? 54 : 70;
-  const H = OF_T + OF_H + 26;
 
-  let pMin = Math.min(...ch.l), pMax = Math.max(...ch.h);
-  (a.sr.supports.concat(a.sr.resistances)).forEach(p => { pMin = Math.min(pMin, p); pMax = Math.max(pMax, p); });
-  if (a.vp) { pMin = Math.min(pMin, a.vp.val); pMax = Math.max(pMax, a.vp.vah); }
-  const pad = (pMax - pMin) * 0.04 || pMax * 0.02;
-  pMin -= pad; pMax += pad;
-  const yP = p => MAIN_T + (pMax - p) / (pMax - pMin) * MAIN_H;
-  const vMax = Math.max(...ch.v, 1);
-  const yV = v => VOL_T + VOL_H - v / vMax * VOL_H;
-  const UP = '#C0392B', DOWN = '#1E8E5A', FLAT = '#888888';
-  const el = [];
-
-  for (let g = 0; g <= GRID; g++) {
-    const p = pMax - (pMax - pMin) * g / GRID, gy = yP(p);
-    el.push(`<line x1="${PAD_L}" y1="${gy}" x2="${W - PAD_R}" y2="${gy}" stroke="#eeeeee"/>`);
-    el.push(`<text x="${W - PAD_R + 4}" y="${gy + 4}" font-size="${FS}" fill="#999">${fmtP(p)}</text>`);
-  }
-
-  // Volume Profile histogram (right-anchored horizontal bars over main pane)
-  if (a.vp) {
-    const bMax = Math.max(...a.vp.bins.map(b => b.v), 1);
-    const maxW = plotW * 0.18;
-    a.vp.bins.forEach(b => {
-      if (b.v <= 0) return;
-      const bw = b.v / bMax * maxW;
-      const y0 = yP(b.p + a.vp.bin_width / 2), y1 = yP(b.p - a.vp.bin_width / 2);
-      el.push(`<rect x="${W - PAD_R - bw}" y="${y0}" width="${bw}" height="${Math.max(1, y1 - y0)}" fill="#b9c4cf" opacity="0.45"/>`);
-    });
-    el.push(`<line x1="${PAD_L}" y1="${yP(a.vp.poc)}" x2="${W - PAD_R}" y2="${yP(a.vp.poc)}" stroke="#B03A2E" stroke-width="1.2" opacity="0.8"/>`);
-    el.push(`<text x="${W - PAD_R - 4}" y="${yP(a.vp.poc) - 3}" font-size="${FS}" fill="#B03A2E" text-anchor="end">POC ${fmtP(a.vp.poc)}</text>`);
-    [a.vp.vah, a.vp.val].forEach(p => {
-      el.push(`<line x1="${PAD_L}" y1="${yP(p)}" x2="${W - PAD_R}" y2="${yP(p)}" stroke="#2980B9" stroke-width="1" stroke-dasharray="5,4" opacity="0.6"/>`);
-    });
-    el.push(`<text x="${W - PAD_R - 4}" y="${yP(a.vp.vah) - 3}" font-size="${FS}" fill="#2980B9" text-anchor="end">VAH</text>`);
-    el.push(`<text x="${W - PAD_R - 4}" y="${yP(a.vp.val) + 11}" font-size="${FS}" fill="#2980B9" text-anchor="end">VAL</text>`);
-  }
-
-  // candles
-  const cw = Math.max(1, step * 0.6);
-  for (let i = 0; i < N; i++) {
-    const o = ch.o[i], c = ch.c[i], col = c > o ? UP : c < o ? DOWN : FLAT;
-    el.push(`<line x1="${x(i)}" y1="${yP(ch.h[i])}" x2="${x(i)}" y2="${yP(ch.l[i])}" stroke="${col}" stroke-width="1"/>`);
-    el.push(`<rect x="${x(i) - cw / 2}" y="${yP(Math.max(o, c))}" width="${cw}" height="${Math.max(1, Math.abs(yP(o) - yP(c)))}" fill="${col}"/>`);
-  }
-
-  // MA overlays
-  const maLine = (arr, color) => {
-    const pts = [];
-    for (let i = 0; i < N; i++) if (arr[i] != null) pts.push(`${x(i)},${yP(arr[i])}`);
-    if (pts.length > 1) el.push(`<polyline points="${pts.join(' ')}" fill="none" stroke="${color}" stroke-width="1.2" opacity="0.9"/>`);
-  };
-  maLine(ch.ma5, '#E67E22'); maLine(ch.ma20, '#2980B9'); maLine(ch.ma60, '#8E44AD');
-
-  // support / resistance
-  a.sr.resistances.forEach(p => {
-    el.push(`<line x1="${PAD_L}" y1="${yP(p)}" x2="${W - PAD_R}" y2="${yP(p)}" stroke="#C0392B" stroke-width="1" stroke-dasharray="5,4" opacity="0.5"/>`);
-    el.push(`<text x="${PAD_L + 2}" y="${yP(p) - 3}" font-size="${FS}" fill="#C0392B">壓力 ${fmtP(p)}</text>`);
-  });
-  a.sr.supports.forEach(p => {
-    el.push(`<line x1="${PAD_L}" y1="${yP(p)}" x2="${W - PAD_R}" y2="${yP(p)}" stroke="#1E8E5A" stroke-width="1" stroke-dasharray="5,4" opacity="0.5"/>`);
-    el.push(`<text x="${PAD_L + 2}" y="${yP(p) + 11}" font-size="${FS}" fill="#1E8E5A">支撐 ${fmtP(p)}</text>`);
+  disposeChart(code);
+  const chart = LWC.createChart(el, {
+    autoSize: true,
+    layout: { background: { color: '#ffffff' }, textColor: '#666666', fontSize: mobile ? 10 : 11,
+              panes: { separatorColor: '#e8e8e8', separatorHoverColor: '#dddddd' } },
+    grid: { vertLines: { color: '#f5f5f5' }, horzLines: { color: '#f0f0f0' } },
+    rightPriceScale: { borderColor: '#e0e0e0' },
+    timeScale: { borderColor: '#e0e0e0', rightOffset: 2 },
+    crosshair: { mode: LWC.CrosshairMode.Normal },
   });
 
-  // volume subplot
-  for (let i = 0; i < N; i++) {
-    const col = i > 0 && ch.c[i] >= ch.c[i - 1] ? UP : DOWN;
-    el.push(`<rect x="${x(i) - cw / 2}" y="${yV(ch.v[i])}" width="${cw}" height="${VOL_T + VOL_H - yV(ch.v[i])}" fill="${col}" opacity="0.5"/>`);
-  }
-  const v20pts = [];
-  for (let i = 0; i < N; i++) if (ch.vol20[i] != null) v20pts.push(`${x(i)},${yV(ch.vol20[i])}`);
-  if (v20pts.length > 1) el.push(`<polyline points="${v20pts.join(' ')}" fill="none" stroke="#555" stroke-width="1" opacity="0.7"/>`);
-  el.push(`<text x="${PAD_L + 2}" y="${VOL_T + 10}" font-size="${FS}" fill="#999">成交量（黑線：20日均量）</text>`);
+  // --- 主窗格：K 線 + MA + 支撐壓力 + Volume Profile ---
+  const candle = chart.addSeries(LWC.CandlestickSeries, {
+    upColor: UP_COLOR, downColor: DOWN_COLOR,
+    borderUpColor: UP_COLOR, borderDownColor: DOWN_COLOR,
+    wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
+  }, 0);
+  candle.setData(ch.c.map((c, i) => ({
+    time: toChartDate(ch.t[i]), open: ch.o[i], high: ch.h[i], low: ch.l[i], close: c,
+  })));
 
-  // cumulative delta subplot (dates mapped onto the daily-bar x axis)
-  if (a.of && a.of.days.length > 1) {
-    const dateToIdx = {};
-    for (let i = 0; i < N; i++) dateToIdx[new Date(ch.t[i] * 1000).toISOString().slice(0, 10)] = i;
+  const addMA = (arr, color, title) => {
     const pts = [];
-    let cMin = Math.min(...a.of.cum, 0), cMax = Math.max(...a.of.cum, 0);
-    if (cMax === cMin) cMax = cMin + 1;
-    const yO = v => OF_T + (cMax - v) / (cMax - cMin) * OF_H;
-    a.of.days.forEach((day, i) => {
-      const idx = dateToIdx[day.date];
-      if (idx != null) pts.push({ x: x(idx), y: yO(a.of.cum[i]) });
-    });
-    el.push(`<line x1="${PAD_L}" y1="${yO(0)}" x2="${W - PAD_R}" y2="${yO(0)}" stroke="#dddddd" stroke-dasharray="4,3"/>`);
-    if (pts.length > 1) {
-      el.push(`<polyline points="${pts.map(p => `${p.x},${p.y}`).join(' ')}" fill="none" stroke="#1F618D" stroke-width="1.5"/>`);
-      const lastPt = pts[pts.length - 1];
-      el.push(`<circle cx="${lastPt.x}" cy="${lastPt.y}" r="2.5" fill="#1F618D"/>`);
+    for (let i = 0; i < arr.length; i++) {
+      if (arr[i] != null) pts.push({ time: toChartDate(ch.t[i]), value: arr[i] });
     }
-    el.push(`<text x="${PAD_L + 2}" y="${OF_T + 10}" font-size="${FS}" fill="#999">累積 Delta（${a.of_mode === 'tick' ? '逐筆' : '推估'}，覆蓋近${a.of.days.length}日）</text>`);
-  } else {
-    el.push(`<text x="${PAD_L + 2}" y="${OF_T + 10}" font-size="${FS}" fill="#999">累積 Delta：無分鐘/逐筆資料</text>`);
+    if (pts.length < 2) return;
+    const s = chart.addSeries(LWC.LineSeries, {
+      color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, title,
+    }, 0);
+    s.setData(pts);
+  };
+  addMA(ch.ma5, '#E67E22', 'MA5');
+  addMA(ch.ma20, '#2980B9', 'MA20');
+  addMA(ch.ma60, '#8E44AD', 'MA60');
+
+  const priceLine = (price, color, title, dashed) => candle.createPriceLine({
+    price, color, title, lineWidth: 1,
+    lineStyle: dashed ? LWC.LineStyle.Dashed : LWC.LineStyle.Solid,
+    axisLabelVisible: true,
+  });
+  a.sr.resistances.forEach(p => priceLine(p, '#C0392B', '壓力', true));
+  a.sr.supports.forEach(p => priceLine(p, '#1E8E5A', '支撐', true));
+  if (a.vp) {
+    priceLine(a.vp.poc, '#B03A2E', 'POC', false);
+    priceLine(a.vp.vah, '#2980B9', 'VAH', true);
+    priceLine(a.vp.val, '#2980B9', 'VAL', true);
+    candle.attachPrimitive(new VolumeProfilePrimitive(a.vp));
   }
 
-  const tickEvery = Math.max(1, Math.round(N / (mobile ? 4 : 6)));
-  for (let i = 0; i < N; i += tickEvery) {
-    el.push(`<text x="${x(i)}" y="${H - 6}" font-size="${FS}" fill="#999" text-anchor="middle">${fmtDate(ch.t[i])}</text>`);
+  // --- 第二窗格：成交量 + 20 日均量 ---
+  const vol = chart.addSeries(LWC.HistogramSeries, {
+    priceFormat: { type: 'volume' }, priceLineVisible: false, lastValueVisible: false,
+  }, 1);
+  vol.setData(ch.v.map((v, i) => ({
+    time: toChartDate(ch.t[i]), value: v,
+    color: (i > 0 && ch.c[i] >= ch.c[i - 1] ? UP_COLOR : DOWN_COLOR) + '80',
+  })));
+  const vol20pts = [];
+  for (let i = 0; i < ch.vol20.length; i++) {
+    if (ch.vol20[i] != null) vol20pts.push({ time: toChartDate(ch.t[i]), value: ch.vol20[i] });
+  }
+  if (vol20pts.length > 1) {
+    chart.addSeries(LWC.LineSeries, {
+      color: '#555555', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, title: '20日均量',
+    }, 1).setData(vol20pts);
   }
 
-  el.push(`<line id="kx-${code}" x1="-10" y1="${MAIN_T}" x2="-10" y2="${OF_T + OF_H}" stroke="#aaa" stroke-width="1" stroke-dasharray="3,3"/>`);
-  el.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="transparent" onmousemove="klineMove(event,'${code}')" onmouseleave="klineLeave('${code}')" ontouchstart="klineMove(event,'${code}')" ontouchmove="klineMove(event,'${code}')"/>`);
-  klineMeta[code] = { W, PAD_L, step, N, offset: d.chart.c.length - N };
-  return `<svg id="kchart-${code}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="width:100%; height:auto; display:block;">${el.join('')}</svg>`;
-}
+  // --- 第三窗格：累積 Delta（有分鐘/逐筆資料時才畫） ---
+  const hasOF = a.of && a.of.days && a.of.days.length > 1;
+  if (hasOF) {
+    // 只取日線時間軸上真的存在的日期：OF 的覆蓋區間跟日線不一定一致，
+    // 塞進主圖沒有的日期會讓時間軸多出憑空的刻度（先前 SVG 版也是這樣過濾）。
+    const chartDays = new Set(ch.t.map(toChartDate));
+    const ofPts = [];
+    a.of.days.forEach((day, i) => {
+      if (a.of.cum[i] != null && chartDays.has(day.date)) ofPts.push({ time: day.date, value: a.of.cum[i] });
+    });
+    if (ofPts.length > 1) {
+      chart.addSeries(LWC.LineSeries, {
+        color: '#1F618D', lineWidth: 2, priceLineVisible: false,
+        title: `累積Delta（${a.of_mode === 'tick' ? '逐筆' : '推估'}）`,
+      }, 2).setData(ofPts);
+    }
+  }
 
-function klineMove(evt, code) {
-  const meta = klineMeta[code], d = data[code];
-  const svg = document.getElementById('kchart-' + code);
+  // 窗格高度：主圖最大，成交量與 Delta 各佔一小條
+  const panes = chart.panes();
+  const totalH = mobile ? 360 : 460;
+  if (panes[1]) panes[1].setHeight(Math.round(totalH * 0.16));
+  if (panes[2]) panes[2].setHeight(Math.round(totalH * 0.16));
+
+  // 十字線移動時把當日 OHLC 寫進上方的 kline-info（沿用先前 SVG 版的資訊列）
   const info = document.getElementById('kinfo-' + code);
-  const cross = document.getElementById('kx-' + code);
-  if (!meta || !d || !svg || !info || !cross) return;
-  const r = svg.getBoundingClientRect();
-  const clientX = evt.touches ? evt.touches[0].clientX : evt.clientX;   // 滑鼠與觸控共用
-  const xr = (clientX - r.left) * (meta.W / r.width);
-  let i = Math.floor((xr - meta.PAD_L) / meta.step);
-  i = Math.max(0, Math.min(meta.N - 1, i));
-  const ch = d.chart;
-  const j = meta.offset + i;              // 手機切片後對應回完整 chart 索引
-  const cx = meta.PAD_L + i * meta.step + meta.step / 2;
-  cross.setAttribute('x1', cx); cross.setAttribute('x2', cx);
-  const chg = j > 0 ? (ch.c[j] / ch.c[j - 1] - 1) * 100 : null;
-  info.textContent = `${fmtDate(ch.t[j])}  開 ${fmtP(ch.o[j])}  高 ${fmtP(ch.h[j])}  低 ${fmtP(ch.l[j])}  收 ${fmtP(ch.c[j])}` +
-    (chg != null ? `（${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%）` : '') + `  量 ${fmtLots(ch.v[j])}`;
-}
-function klineLeave(code) {
-  const cross = document.getElementById('kx-' + code);
-  const info = document.getElementById('kinfo-' + code);
-  if (cross) { cross.setAttribute('x1', '-10'); cross.setAttribute('x2', '-10'); }
-  if (info) info.textContent = '';
+  const byTime = {};
+  ch.t.forEach((t, i) => { byTime[toChartDate(t)] = i; });
+  chart.subscribeCrosshairMove(param => {
+    if (!info) return;
+    if (!param || !param.time) { info.textContent = ''; return; }
+    const i = byTime[param.time];
+    if (i == null) { info.textContent = ''; return; }
+    const chg = i > 0 ? (ch.c[i] / ch.c[i - 1] - 1) * 100 : null;
+    info.textContent = `${fmtDate(ch.t[i])}  開 ${fmtP(ch.o[i])}  高 ${fmtP(ch.h[i])}  低 ${fmtP(ch.l[i])}  收 ${fmtP(ch.c[i])}` +
+      (chg != null ? `（${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%）` : '') + `  量 ${fmtLots(ch.v[i])}`;
+  });
+
+  chart.timeScale().fitContent();
+  lwCharts[code] = { chart };
 }
 
 // 斷點跨越（手機轉橫屏、視窗縮放）時重繪，讓圖表切換桌面/手機模式
