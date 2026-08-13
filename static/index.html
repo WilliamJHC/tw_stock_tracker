@@ -894,25 +894,53 @@ class VolumeProfilePrimitive {
 // text()/coordinate()/textColor()/backColor()（必要，bundle 內部直接呼叫、
 // 沒有 ?. 保護，缺一個就會噴例外）與 visible()（選填，預設 true）。驗證見
 // bundle 內 `function Nt(t){return{ri:t.text(),Bi:t.coordinate(),...}}`。
-// 多個 label 擠在相近價位時，軸本身就有防重疊排版（原生 createPriceLine 的
-// axisLabelVisible 用的是同一套機制，先前純數字版本已驗證過不會互疊），
-// 不需要自己再刻一次 collision-avoidance。這樣畫也順便不會再跟
-// VolumeProfilePrimitive 搶盤面內的像素——兩者現在完全不共用畫布。
+//
+// 校正過的假設：軸本身完全沒有防重疊排版（搜過 bundle，collision/overlap/
+// avoidLabel 相關字串一個都沒有）。多個 label 擠在相近價位（例如支撐剛好
+// 貼著 MA5、或盤整期 VAL 跟 POC 靠很近）就會疊字看不清楚，得自己處理：
+// priceAxisViews() 每次都用當下的 y 座標重新分組，同一組內垂直距離小於
+// LABEL_MIN_GAP_PX 的直接合併成一個標籤（"價格 文字 / 價格 文字"），而不是
+// 放任它們疊在同一列。分組邏輯直接寫在 priceAxisViews() 裡（不依賴
+// updateAllViews() 的呼叫時機保證），每次都是全新算，不會有狀態不同步的問題。
+const LABEL_MIN_GAP_PX = 16;
+
 class PriceAxisLabelsPrimitive {
   constructor(entries) {
+    this._entries = entries;  // [{price, color, title}]
     this._series = null;
-    this._views = entries.map(e => ({
-      coordinate: () => this._series ? this._series.priceToCoordinate(e.price) : null,
-      text: () => `${e.price.toFixed(2)}  ${e.title}`,
-      textColor: () => '#ffffff',
-      backColor: () => e.color,
-      visible: () => !!this._series && this._series.priceToCoordinate(e.price) != null,
-    }));
   }
   attached(params) { this._series = params.series; }
   detached() { this._series = null; }
   updateAllViews() {}
-  priceAxisViews() { return this._views; }
+  priceAxisViews() {
+    const series = this._series;
+    if (!series || !this._entries.length) return [];
+    const items = this._entries
+      .map(e => ({ ...e, y: series.priceToCoordinate(e.price) }))
+      .filter(e => e.y != null)
+      .sort((a, b) => a.y - b.y);
+    if (!items.length) return [];
+
+    const groups = [];
+    for (const it of items) {
+      const last = groups[groups.length - 1];
+      if (last && it.y - last.y < LABEL_MIN_GAP_PX) last.members.push(it);
+      else groups.push({ y: it.y, members: [it] });
+    }
+
+    return groups.map(g => {
+      const text = g.members.length === 1
+        ? `${fmtP(g.members[0].price)}  ${g.members[0].title}`
+        : g.members.map(m => `${fmtP(m.price)} ${m.title}`).join(' / ');
+      return {
+        coordinate: () => g.y,
+        text: () => text,
+        textColor: () => '#ffffff',
+        backColor: () => g.members[0].color,
+        visible: () => true,
+      };
+    });
+  }
 }
 
 // chart 的 time 軸統一用 UTC 日期字串，與 analysis.of.days[].date 的格式一致，
@@ -961,6 +989,13 @@ function mountChart(code) {
     upColor: UP_COLOR, downColor: DOWN_COLOR,
     borderUpColor: UP_COLOR, borderDownColor: DOWN_COLOR,
     wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
+    // lastValueVisible defaults to true and draws its own current-price axis
+    // label through a completely separate mechanism from
+    // PriceAxisLabelsPrimitive -- with no coordination between the two, it
+    // can land on the same row as a support/resistance/MA/POC label whenever
+    // price sits near one of them (common, since those are all derived from
+    // recent price action). Off, same as every other series on this chart.
+    lastValueVisible: false,
   }, 0);
   candle.setData(ch.c.map((c, i) => ({
     time: toChartDate(ch.t[i]), open: ch.o[i], high: ch.h[i], low: ch.l[i], close: c,
