@@ -851,8 +851,12 @@ const UP_COLOR = '#C0392B', DOWN_COLOR = '#1E8E5A';   // 台股慣例：紅漲�
 // Volume Profile 橫向直方圖。Lightweight Charts 沒有內建這個圖種，用 series
 // primitive 直接畫在主窗格的 canvas 上（靠右對齊，與價格軸共用 y 座標）。
 class VolumeProfilePrimitive {
-  constructor(vp) {
+  // rightMarginPx (CSS px, not scaled): width PriceLabelsPrimitive's labels
+  // need at the pane's right edge. VP's bars stop before that zone instead
+  // of both primitives independently right-anchoring to the same pixels.
+  constructor(vp, rightMarginPx = 0) {
     this._vp = vp;
+    this._rightMarginPx = rightMarginPx;
     this._series = null;
     // zOrder AND renderer must both be METHODS, not plain properties -- v5.2.1's
     // internals call paneView.zOrder() and paneView.renderer() (see class Bt in
@@ -870,7 +874,8 @@ class VolumeProfilePrimitive {
     if (!series || !vp || !vp.bins || !vp.bins.length) return;
     target.useBitmapCoordinateSpace(scope => {
       const ctx = scope.context;
-      const { bitmapSize, verticalPixelRatio } = scope;
+      const { bitmapSize, verticalPixelRatio, horizontalPixelRatio } = scope;
+      const rightEdge = bitmapSize.width - this._rightMarginPx * horizontalPixelRatio;
       const bMax = Math.max(...vp.bins.map(b => b.v), 1);
       const maxW = bitmapSize.width * 0.18;
       ctx.fillStyle = 'rgba(185, 196, 207, 0.45)';
@@ -882,7 +887,7 @@ class VolumeProfilePrimitive {
         const w = b.v / bMax * maxW;
         const y = yTop * verticalPixelRatio;
         const h = Math.max(1, (yBot - yTop) * verticalPixelRatio);
-        ctx.fillRect(bitmapSize.width - w, y, w, h);
+        ctx.fillRect(rightEdge - w, y, w, h);
       }
     });
   }
@@ -894,6 +899,27 @@ class VolumeProfilePrimitive {
 // 塞太多條价格線時彼此還會與蠟燭重疊。這裡自己畫：靠 pane 最右側對齊、依
 // y 座標排序後互相推開避免重疊，只要 rightOffset 留的空白夠寬，就保證不會
 // 蓋到任何蠟燭（水平方向本來就沒有K棒可畫）。
+//
+// Primitives can only draw inside their own pane's canvas -- there is no way
+// to draw past the real price-axis line into its separate canvas/DOM strip.
+// "Move it right of the axis" is therefore approximated as: draw flush
+// against the pane's right edge (as close to the axis as a primitive can
+// get), and make VolumeProfilePrimitive leave that same width clear (see
+// measureLabelZoneWidth() and its rightMarginPx param) so VP's bars don't
+// compete for the same pixels and get covered by these labels.
+const LABEL_FONT_PX = 10;  // CSS px; scaled by verticalPixelRatio at draw time
+
+function measureLabelZoneWidth(entries) {
+  if (!entries.length) return 0;
+  const ctx = document.createElement('canvas').getContext('2d');
+  ctx.font = `${LABEL_FONT_PX}px sans-serif`;
+  let maxTextW = 0;
+  for (const e of entries) {
+    maxTextW = Math.max(maxTextW, ctx.measureText(`${e.price.toFixed(2)}  ${e.title}`).width);
+  }
+  return maxTextW + 12;  // + box padding/right margin, CSS px (mirrors _draw's own padding below)
+}
+
 class PriceLabelsPrimitive {
   constructor(entries) {
     this._entries = entries;  // [{price, color, title}]
@@ -911,7 +937,7 @@ class PriceLabelsPrimitive {
     target.useBitmapCoordinateSpace(scope => {
       const ctx = scope.context;
       const { bitmapSize, verticalPixelRatio, horizontalPixelRatio } = scope;
-      const fontPx = Math.round(10 * verticalPixelRatio);
+      const fontPx = Math.round(LABEL_FONT_PX * verticalPixelRatio);
       ctx.font = `${fontPx}px sans-serif`;
       ctx.textBaseline = 'middle';
       ctx.textAlign = 'left';
@@ -1035,7 +1061,10 @@ function mountChart(code) {
     labelEntries.push({ price: a.vp.poc, color: '#B03A2E', title: 'POC' });
     labelEntries.push({ price: a.vp.vah, color: '#2980B9', title: 'VAH' });
     labelEntries.push({ price: a.vp.val, color: '#2980B9', title: 'VAL' });
-    candle.attachPrimitive(new VolumeProfilePrimitive(a.vp));
+    // VP's bars must stop before PriceLabelsPrimitive's zone, not compete for
+    // the same rightmost pixels -- measure the widest label so VP knows
+    // exactly how much to leave clear.
+    candle.attachPrimitive(new VolumeProfilePrimitive(a.vp, measureLabelZoneWidth(labelEntries)));
   }
   candle.attachPrimitive(new PriceLabelsPrimitive(labelEntries));
 
