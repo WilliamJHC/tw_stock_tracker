@@ -854,6 +854,10 @@ class VolumeProfilePrimitive {
   constructor(vp) {
     this._vp = vp;
     this._series = null;
+    // vp.bins is fixed for this primitive's lifetime (set once, never
+    // mutated), so the histogram's tallest bar is invariant -- computed once
+    // here instead of every _draw() call (every pan/zoom/crosshair-move).
+    this._bMax = vp?.bins?.length ? Math.max(...vp.bins.map(b => b.v), 1) : 1;
     // zOrder AND renderer must both be METHODS, not plain properties -- v5.2.1's
     // internals call paneView.zOrder() and paneView.renderer() (see class Bt in
     // the bundle: "this.Yh.renderer()", "this.Yh.zOrder?.()"). Plain values throw
@@ -871,7 +875,7 @@ class VolumeProfilePrimitive {
     target.useBitmapCoordinateSpace(scope => {
       const ctx = scope.context;
       const { bitmapSize, verticalPixelRatio } = scope;
-      const bMax = Math.max(...vp.bins.map(b => b.v), 1);
+      const bMax = this._bMax;
       const maxW = bitmapSize.width * 0.18;
       ctx.fillStyle = 'rgba(185, 196, 207, 0.45)';
       for (const b of vp.bins) {
@@ -888,25 +892,39 @@ class VolumeProfilePrimitive {
   }
 }
 
+// Generic axis-label collision avoidance: given items already sorted
+// ascending by `y`, merges any that land within `minGapPx` of the previous
+// item into the same group. Pure and chart-library-agnostic -- the actual
+// price/label logic lives in the caller -- so it's reusable if another
+// primitive on this chart ever needs to share axis space with others.
+function groupByProximity(itemsSortedByY, minGapPx) {
+  const groups = [];
+  for (const it of itemsSortedByY) {
+    const last = groups[groups.length - 1];
+    if (last && it.y - last.y < minGapPx) last.members.push(it);
+    else groups.push({ y: it.y, members: [it] });
+  }
+  return groups;
+}
+
 // 支撐/壓力/POC/VAH/VAL/MA5/20/60 的合併標籤（"價格  文字"，文字在價格右邊），
 // 畫在真正的價格軸上（不是盤面內部）。用的是 series primitive 的
 // priceAxisViews() -- 跟 paneViews() 平行的另一組介面，回傳的每個 view 要實作
 // text()/coordinate()/textColor()/backColor()（必要，bundle 內部直接呼叫、
-// 沒有 ?. 保護，缺一個就會噴例外）與 visible()（選填，預設 true）。驗證見
-// bundle 內 `function Nt(t){return{ri:t.text(),Bi:t.coordinate(),...}}`。
+// 沒有 ?. 保護，缺一個就會噴例外）；visible() 選填，省略時 bundle 內部預設
+// true（見 `It:t.visible?.()??!0`），不用另外宣告一個永遠回傳 true 的版本。
 //
 // 校正過的假設：軸本身完全沒有防重疊排版（搜過 bundle，collision/overlap/
 // avoidLabel 相關字串一個都沒有）。多個 label 擠在相近價位（例如支撐剛好
-// 貼著 MA5、或盤整期 VAL 跟 POC 靠很近）就會疊字看不清楚，得自己處理：
-// priceAxisViews() 每次都用當下的 y 座標重新分組，同一組內垂直距離小於
-// LABEL_MIN_GAP_PX 的直接合併成一個標籤（"價格 文字 / 價格 文字"），而不是
-// 放任它們疊在同一列。分組邏輯直接寫在 priceAxisViews() 裡（不依賴
-// updateAllViews() 的呼叫時機保證），每次都是全新算，不會有狀態不同步的問題。
-const LABEL_MIN_GAP_PX = 16;
-
+// 貼著 MA5、或盤整期 VAL 跟 POC 靠很近）就會疊字看不清楚，得自己處理，見
+// groupByProximity()。
 class PriceAxisLabelsPrimitive {
-  constructor(entries) {
-    this._entries = entries;  // [{price, color, title}]
+  // entries 必須已經按價格排序（mountChart() 負責），這樣 y 座標保證單調
+  // （本圖表價格軸從不反轉），priceAxisViews() 就不用每次重繪都重新排序。
+  // minGapPx 由呼叫端依圖表實際字級換算，不寫死常數。
+  constructor(entries, minGapPx) {
+    this._entries = entries;  // [{price, color, title}], 已依價格排序
+    this._minGapPx = minGapPx;
     this._series = null;
   }
   attached(params) { this._series = params.series; }
@@ -915,29 +933,22 @@ class PriceAxisLabelsPrimitive {
   priceAxisViews() {
     const series = this._series;
     if (!series || !this._entries.length) return [];
+    // {ref, y} 而非展開整個 entry -- price/color/title 每次重繪都不變，
+    // 沒必要複製一份新物件，只有 y 是每次都要重算的。
     const items = this._entries
-      .map(e => ({ ...e, y: series.priceToCoordinate(e.price) }))
-      .filter(e => e.y != null)
-      .sort((a, b) => a.y - b.y);
+      .map(e => ({ ref: e, y: series.priceToCoordinate(e.price) }))
+      .filter(it => it.y != null);
     if (!items.length) return [];
 
-    const groups = [];
-    for (const it of items) {
-      const last = groups[groups.length - 1];
-      if (last && it.y - last.y < LABEL_MIN_GAP_PX) last.members.push(it);
-      else groups.push({ y: it.y, members: [it] });
-    }
-
-    return groups.map(g => {
+    return groupByProximity(items, this._minGapPx).map(g => {
       const text = g.members.length === 1
-        ? `${fmtP(g.members[0].price)}  ${g.members[0].title}`
-        : g.members.map(m => `${fmtP(m.price)} ${m.title}`).join(' / ');
+        ? `${fmtP(g.members[0].ref.price)}  ${g.members[0].ref.title}`
+        : g.members.map(m => `${fmtP(m.ref.price)} ${m.ref.title}`).join(' / ');
       return {
         coordinate: () => g.y,
         text: () => text,
         textColor: () => '#ffffff',
-        backColor: () => g.members[0].color,
-        visible: () => true,
+        backColor: () => g.members[0].ref.color,
       };
     });
   }
@@ -974,9 +985,10 @@ function mountChart(code) {
   }
 
   disposeChart(code);
+  const fontSize = mobile ? 10 : 11;
   const chart = LWC.createChart(el, {
     autoSize: true,
-    layout: { background: { color: '#ffffff' }, textColor: '#666666', fontSize: mobile ? 10 : 11,
+    layout: { background: { color: '#ffffff' }, textColor: '#666666', fontSize,
               panes: { separatorColor: '#e8e8e8', separatorHoverColor: '#dddddd' } },
     grid: { vertLines: { color: '#f5f5f5' }, horzLines: { color: '#f0f0f0' } },
     rightPriceScale: { borderColor: '#e0e0e0' },
@@ -1024,23 +1036,28 @@ function mountChart(code) {
   addMA(ch.ma20, '#2980B9', 'MA20');
   addMA(ch.ma60, '#8E44AD', 'MA60');
 
-  const priceLine = (price, color, dashed) => candle.createPriceLine({
-    price, color, lineWidth: 1,
-    lineStyle: dashed ? LWC.LineStyle.Dashed : LWC.LineStyle.Solid,
-    axisLabelVisible: false,
-  });
-  a.sr.resistances.forEach(p => { priceLine(p, '#C0392B', true); labelEntries.push({ price: p, color: '#C0392B', title: '壓力' }); });
-  a.sr.supports.forEach(p => { priceLine(p, '#1E8E5A', true); labelEntries.push({ price: p, color: '#1E8E5A', title: '支撐' }); });
+  // 一次做完畫線＋登記標籤，price/color/title 只寫一次（不用像 priceLine 跟
+  // labelEntries.push 分開呼叫那樣，同一組值在兩個地方各打一次、要手動同步）。
+  const addLine = (price, color, title, dashed) => {
+    candle.createPriceLine({
+      price, color, lineWidth: 1,
+      lineStyle: dashed ? LWC.LineStyle.Dashed : LWC.LineStyle.Solid,
+      axisLabelVisible: false,
+    });
+    labelEntries.push({ price, color, title });
+  };
+  a.sr.resistances.forEach(p => addLine(p, '#C0392B', '壓力', true));
+  a.sr.supports.forEach(p => addLine(p, '#1E8E5A', '支撐', true));
   if (a.vp) {
-    priceLine(a.vp.poc, '#B03A2E', false);
-    priceLine(a.vp.vah, '#2980B9', true);
-    priceLine(a.vp.val, '#2980B9', true);
-    labelEntries.push({ price: a.vp.poc, color: '#B03A2E', title: 'POC' });
-    labelEntries.push({ price: a.vp.vah, color: '#2980B9', title: 'VAH' });
-    labelEntries.push({ price: a.vp.val, color: '#2980B9', title: 'VAL' });
+    addLine(a.vp.poc, '#B03A2E', 'POC', false);
+    addLine(a.vp.vah, '#2980B9', 'VAH', true);
+    addLine(a.vp.val, '#2980B9', 'VAL', true);
     candle.attachPrimitive(new VolumeProfilePrimitive(a.vp));
   }
-  candle.attachPrimitive(new PriceAxisLabelsPrimitive(labelEntries));
+  // 依價格排序一次，讓 PriceAxisLabelsPrimitive 不用每次重繪都重新排序
+  // （見該類別建構子註解：本圖表價格軸從不反轉，價格降序＝y 座標升序）。
+  labelEntries.sort((x, y) => y.price - x.price);
+  candle.attachPrimitive(new PriceAxisLabelsPrimitive(labelEntries, fontSize + 6));
 
   // --- 第二窗格：成交量 + 20 日均量 ---
   const vol = chart.addSeries(LWC.HistogramSeries, {
