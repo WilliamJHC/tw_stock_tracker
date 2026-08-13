@@ -33,22 +33,26 @@ evaluate whatever has accumulated. This is also what makes the "replay"
 tests possible: build the ticks/trades directly (or via a fake source with
 poll_once()) and feed them into run_once() without any real network I/O.
 
-KNOWN SIMPLIFICATION (documented, not fixed in this pass): main() below
-only drives the synchronous MIS/TW path end-to-end. Wiring a live
-BinanceSource (async, push-based) into the same loop needs an asyncio task
-running source.run() concurrently with the sleep loop -- record_trade/
-record_depth are ready to be used as its callbacks, but main() does not
-start that task in this Phase 3 slice. Left for Phase 5 integration.
+Phase 5: main() drives both tracks concurrently under one asyncio.run().
+The TW/MIS side stays the synchronous poll_once()-based path from Phase 3,
+just pushed onto a worker thread each round (asyncio.to_thread) so its
+blocking `requests` call can't stall the event loop the Binance task needs.
+The crypto side runs a live BinanceSource.run() as a background task
+(public aggTrade + depth WebSocket streams -- no API key needed); its
+on_trade/on_depth callbacks are wired straight to record_trade/record_depth
+so `state` fills continuously between evaluation rounds, exactly as
+tests/test_push_wiring.py pins the contract. See main()/`_main_loop()`.
 """
+import asyncio
 import datetime as dt
 import json
 import os
-import time
 
 import data_sources as ds
 import pipeline
 from alerts import dedupe_and_cooldown, evaluate_alerts, send_telegram
 from intraday import depth_imbalance, opening_range, realtime_cvd, vwap_bands
+from realtime.binance_source import BinanceSource
 from realtime.mis_source import MISSource
 
 TW_OPEN = dt.time(8, 30)
@@ -254,34 +258,67 @@ def run_once(codes, market, state, source=None, send_fn=send_telegram, now=None,
 
 
 def main(codes=None, crypto_codes=None, max_iterations=None, sleep_seconds=30,
-         mis_source=None, send_fn=send_telegram, state=None):
+         mis_source=None, binance_source=None, send_fn=send_telegram, state=None):
     """Standing loop: watchlist.json drives the TW/MIS track (via
     pipeline.load_watchlist(), same convention as app.py/snapshot.py);
-    crypto_codes is an explicit opt-in list (empty by default -- see the
-    module docstring's KNOWN SIMPLIFICATION: this Phase 3 slice does not
-    start a live BinanceSource task). `max_iterations` bounds the loop for
-    tests/manual runs; None (default) means run forever.
+    crypto_codes is an explicit opt-in list (empty by default) that, when
+    non-empty, starts a live BinanceSource WebSocket task alongside the TW
+    polling round -- public streams, no API key required. `binance_source`
+    lets callers/tests inject a fake adapter instead of a real BinanceSource
+    (mirrors the existing `mis_source` injection point). `max_iterations`
+    bounds the loop for tests/manual runs; None (default) means run forever.
     """
     if codes is None:
         codes = [w["code"] for w in pipeline.load_watchlist()]
     if crypto_codes is None:
         crypto_codes = []
     state = state if state is not None else new_state()
+    return asyncio.run(_main_loop(
+        codes, crypto_codes, max_iterations, sleep_seconds,
+        mis_source, binance_source, send_fn, state,
+    ))
+
+
+async def _main_loop(codes, crypto_codes, max_iterations, sleep_seconds,
+                      mis_source, binance_source, send_fn, state):
     source = mis_source or MISSource()
     if codes:
         source.subscribe(codes)
 
-    iteration = 0
-    while True:
-        now = dt.datetime.now()
-        if codes and is_market_open("tw", now):
-            run_once(codes, "tw", state, source=source, send_fn=send_fn, now=now)
-        if crypto_codes and is_market_open("crypto", now):
-            run_once(crypto_codes, "crypto", state, source=None, send_fn=send_fn, now=now)
-        iteration += 1
-        if max_iterations is not None and iteration >= max_iterations:
-            break
-        time.sleep(sleep_seconds)
+    binance_task = None
+    if crypto_codes:
+        binance = binance_source or BinanceSource()
+        binance.subscribe(crypto_codes)
+        binance.on_trade(lambda t: record_trade(state, t))
+        binance.on_depth(lambda d: record_depth(state, d))
+        binance_task = asyncio.create_task(binance.run())
+
+    try:
+        iteration = 0
+        while True:
+            now = dt.datetime.now()
+            if codes and is_market_open("tw", now):
+                # Worker thread: source.poll_once() is a blocking `requests`
+                # call (up to 15s timeout) and must not stall the event loop
+                # the Binance task depends on to process incoming frames.
+                await asyncio.to_thread(
+                    run_once, codes, "tw", state, source=source, send_fn=send_fn, now=now,
+                )
+            if crypto_codes and is_market_open("crypto", now):
+                # No polling network I/O here (source=None): just evaluates
+                # whatever the Binance callbacks have already accumulated.
+                run_once(crypto_codes, "crypto", state, source=None, send_fn=send_fn, now=now)
+            iteration += 1
+            if max_iterations is not None and iteration >= max_iterations:
+                break
+            await asyncio.sleep(sleep_seconds)
+    finally:
+        if binance_task is not None:
+            binance_task.cancel()
+            try:
+                await binance_task
+            except asyncio.CancelledError:
+                pass
     return state
 
 

@@ -3,6 +3,7 @@
 sleep/wall-clock waiting: `now` is always injected, `source` is always a
 fake/mocked object, and send_telegram is always mocked (following the mock
 style in tests/test_realtime.py and tests/test_data_sources.py)."""
+import asyncio
 import datetime as dt
 import json
 import os
@@ -264,3 +265,83 @@ def test_main_respects_max_iterations_and_uses_injected_source():
     # runs; regardless of the real wall-clock time, main() must stop after
     # exactly 2 iterations without hanging.
     assert calls["n"] <= 2
+
+
+class _FakeBinanceSource:
+    """Stands in for realtime.binance_source.BinanceSource: same
+    subscribe()/on_trade()/on_depth()/run() surface, but run() replays a
+    fixed event list with no internal `await` between emits, so by the time
+    it yields (its own idle `await asyncio.sleep(3600)`) every event has
+    already reached the registered callbacks -- no real socket, no
+    scheduling nondeterminism to guard against in the assertions below."""
+
+    def __init__(self, events):
+        self._events = list(events)
+        self._trade_cbs = []
+        self._depth_cbs = []
+        self.subscribed = None
+        self.saw_cancel = False
+
+    def subscribe(self, codes):
+        self.subscribed = list(codes)
+
+    def on_trade(self, callback):
+        self._trade_cbs.append(callback)
+
+    def on_depth(self, callback):
+        self._depth_cbs.append(callback)
+
+    async def run(self):
+        try:
+            for event in self._events:
+                for cb in self._trade_cbs:
+                    cb(event)
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.saw_cancel = True
+            raise
+
+
+def test_main_wires_binance_task_feeds_state_and_alerts_on_crypto_codes():
+    """crypto_codes non-empty -> main() must start the injected Binance-like
+    source, register record_trade as its on_trade callback so pushed trades
+    land in `state`, and evaluate/alert/persist on the crypto track via the
+    existing source=None run_once() path -- without ever touching the TW/MIS
+    side (codes=[] here)."""
+    ts0 = dt.datetime(2026, 7, 20, 12, 0, 0).timestamp()
+    trades = [Trade(code="BTCUSDT", price=65000.0 + i, qty=10.0, side="buy", ts=ts0 + i)
+              for i in range(5)]
+    trades.append(Trade(code="BTCUSDT", price=70000.0, qty=0.01, side="buy", ts=ts0 + 10))
+    fake_binance = _FakeBinanceSource(trades)
+    sender = _SendRecorder()
+
+    state = monitor.main(
+        codes=[], crypto_codes=["BTCUSDT"], max_iterations=5, sleep_seconds=0,
+        binance_source=fake_binance, send_fn=sender,
+    )
+
+    assert fake_binance.subscribed == ["BTCUSDT"]
+    assert fake_binance.saw_cancel is True  # main()'s finally: cancels the task on exit
+
+    hist = state["history"]["BTCUSDT"]
+    assert len(hist["trade_ticks"]) == 6
+    assert hist["sides"] == ["buy"] * 6
+
+    # The vwap breakout alert this trade sequence produces (same scenario as
+    # tests/test_push_wiring.py) must have been sent and persisted.
+    cache_path = monitor._cache_file("BTCUSDT", dt.date.today().isoformat())
+    assert os.path.exists(cache_path)
+    with open(cache_path, encoding="utf-8") as f:
+        blob = json.load(f)
+    assert blob["market"] == "crypto"
+    assert len(blob["records"]) >= 1
+    assert len(sender.messages) >= 1
+
+
+def test_main_without_crypto_codes_never_starts_binance_task():
+    fake_binance = _FakeBinanceSource([])
+    monitor.main(
+        codes=[], crypto_codes=[], max_iterations=1, sleep_seconds=0,
+        binance_source=fake_binance, send_fn=_SendRecorder(),
+    )
+    assert fake_binance.subscribed is None  # subscribe() never called -> task never started

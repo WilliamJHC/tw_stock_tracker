@@ -7,11 +7,11 @@ docs/spike_phase3_verify_log.txt, 78 alerts delivered) but was never a test.
 
 The wiring it exercised -- source.run() as a concurrent asyncio task,
 on_trade/on_depth registered as monitor.record_trade/record_depth, and a
-periodic run_once() evaluating whatever has accumulated so far -- lives in the
-caller, not in monitor.py: main() still drives only the synchronous MIS/TW path
-(documented simplification in monitor.py's module docstring). These tests pin
-the contract that caller has to satisfy, against a scripted fake source: no
-socket, no Telegram, no wall-clock waiting.
+periodic run_once() evaluating whatever has accumulated so far -- is now also
+what monitor.main() does for its crypto_codes track (Phase 5). These tests
+keep pinning the contract at the low level, against a scripted fake source:
+no socket, no Telegram, no wall-clock waiting. See tests/test_monitor.py's
+main()-level tests for the same contract exercised through the public API.
 
 Async is driven with asyncio.run() inside ordinary sync tests, so this file
 needs no pytest-asyncio dependency -- same reason tests/test_realtime.py tests

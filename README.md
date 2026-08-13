@@ -249,7 +249,7 @@ cd C:\Users\william.chen\claude\stock_tracker
 
 不帶參數執行 `monitor.py` 的 `main()`：追蹤清單抓自 `watchlist.json`（與網頁 UI 共用），台股盤中時間內（08:30–13:30，含試撮）每 30 秒輪詢一次，永久跑到手動關閉（Ctrl+C）為止。若要寫腳本自訂追蹤清單、輪詢間隔或跑固定輪數（例如測試用），改成 `import monitor` 後呼叫 `monitor.main(codes=[...], sleep_seconds=..., max_iterations=...)`；細節見 `monitor.py` 檔頭 docstring。
 
-**加密貨幣（Binance）追蹤**：目前僅接好資料層與指標計算（`realtime/`、`intraday.py`），`main()` 尚未接上即時 WebSocket 推送迴圈（`crypto_codes` 預設空清單）；`monitor.py` 檔頭 docstring 的「KNOWN SIMPLIFICATION」段落有記錄，屬 Phase 5 待補項。
+**加密貨幣（Binance）追蹤**：`main(crypto_codes=[...])` 會啟動一個背景的 Binance WebSocket 任務（公開的 aggTrade＋深度串流，**不需要 API key**），24 小時常駐，與台股 MIS 輪詢並行不互相卡住。`crypto_codes` 預設空清單（不啟用）；要開啟需寫腳本呼叫 `monitor.main(crypto_codes=["BTCUSDT", ...])`，細節見 `monitor.py` 檔頭 docstring 與 `_main_loop()`。
 
 **怎麼調整警報門檻**：
 
