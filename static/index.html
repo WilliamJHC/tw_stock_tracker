@@ -851,12 +851,8 @@ const UP_COLOR = '#C0392B', DOWN_COLOR = '#1E8E5A';   // 台股慣例：紅漲�
 // Volume Profile 橫向直方圖。Lightweight Charts 沒有內建這個圖種，用 series
 // primitive 直接畫在主窗格的 canvas 上（靠右對齊，與價格軸共用 y 座標）。
 class VolumeProfilePrimitive {
-  // rightMarginPx (CSS px, not scaled): width PriceLabelsPrimitive's labels
-  // need at the pane's right edge. VP's bars stop before that zone instead
-  // of both primitives independently right-anchoring to the same pixels.
-  constructor(vp, rightMarginPx = 0) {
+  constructor(vp) {
     this._vp = vp;
-    this._rightMarginPx = rightMarginPx;
     this._series = null;
     // zOrder AND renderer must both be METHODS, not plain properties -- v5.2.1's
     // internals call paneView.zOrder() and paneView.renderer() (see class Bt in
@@ -874,8 +870,7 @@ class VolumeProfilePrimitive {
     if (!series || !vp || !vp.bins || !vp.bins.length) return;
     target.useBitmapCoordinateSpace(scope => {
       const ctx = scope.context;
-      const { bitmapSize, verticalPixelRatio, horizontalPixelRatio } = scope;
-      const rightEdge = bitmapSize.width - this._rightMarginPx * horizontalPixelRatio;
+      const { bitmapSize, verticalPixelRatio } = scope;
       const bMax = Math.max(...vp.bins.map(b => b.v), 1);
       const maxW = bitmapSize.width * 0.18;
       ctx.fillStyle = 'rgba(185, 196, 207, 0.45)';
@@ -887,85 +882,37 @@ class VolumeProfilePrimitive {
         const w = b.v / bMax * maxW;
         const y = yTop * verticalPixelRatio;
         const h = Math.max(1, (yBot - yTop) * verticalPixelRatio);
-        ctx.fillRect(rightEdge - w, y, w, h);
+        ctx.fillRect(bitmapSize.width - w, y, w, h);
       }
     });
   }
 }
 
-// 支撐/壓力/POC/VAH/VAL/MA5/20/60 的合併標籤（"價格  文字"，文字在價格右邊）。
-// Lightweight Charts 原生沒有這種排法：createPriceLine 的 title 是畫在盤面
-// 內部、貼在該價格高度左側的獨立文字（跟軸上數字方向相反，也無法控制順序），
-// 塞太多條价格線時彼此還會與蠟燭重疊。這裡自己畫：靠 pane 最右側對齊、依
-// y 座標排序後互相推開避免重疊，只要 rightOffset 留的空白夠寬，就保證不會
-// 蓋到任何蠟燭（水平方向本來就沒有K棒可畫）。
-//
-// Primitives can only draw inside their own pane's canvas -- there is no way
-// to draw past the real price-axis line into its separate canvas/DOM strip.
-// "Move it right of the axis" is therefore approximated as: draw flush
-// against the pane's right edge (as close to the axis as a primitive can
-// get), and make VolumeProfilePrimitive leave that same width clear (see
-// measureLabelZoneWidth() and its rightMarginPx param) so VP's bars don't
-// compete for the same pixels and get covered by these labels.
-const LABEL_FONT_PX = 10;  // CSS px; scaled by verticalPixelRatio at draw time
-
-function measureLabelZoneWidth(entries) {
-  if (!entries.length) return 0;
-  const ctx = document.createElement('canvas').getContext('2d');
-  ctx.font = `${LABEL_FONT_PX}px sans-serif`;
-  let maxTextW = 0;
-  for (const e of entries) {
-    maxTextW = Math.max(maxTextW, ctx.measureText(`${e.price.toFixed(2)}  ${e.title}`).width);
-  }
-  return maxTextW + 12;  // + box padding/right margin, CSS px (mirrors _draw's own padding below)
-}
-
-class PriceLabelsPrimitive {
+// 支撐/壓力/POC/VAH/VAL/MA5/20/60 的合併標籤（"價格  文字"，文字在價格右邊），
+// 畫在真正的價格軸上（不是盤面內部）。用的是 series primitive 的
+// priceAxisViews() -- 跟 paneViews() 平行的另一組介面，回傳的每個 view 要實作
+// text()/coordinate()/textColor()/backColor()（必要，bundle 內部直接呼叫、
+// 沒有 ?. 保護，缺一個就會噴例外）與 visible()（選填，預設 true）。驗證見
+// bundle 內 `function Nt(t){return{ri:t.text(),Bi:t.coordinate(),...}}`。
+// 多個 label 擠在相近價位時，軸本身就有防重疊排版（原生 createPriceLine 的
+// axisLabelVisible 用的是同一套機制，先前純數字版本已驗證過不會互疊），
+// 不需要自己再刻一次 collision-avoidance。這樣畫也順便不會再跟
+// VolumeProfilePrimitive 搶盤面內的像素——兩者現在完全不共用畫布。
+class PriceAxisLabelsPrimitive {
   constructor(entries) {
-    this._entries = entries;  // [{price, color, title}]
     this._series = null;
-    const renderer = { draw: t => this._draw(t) };
-    this._paneView = { zOrder: () => 'top', renderer: () => renderer };
+    this._views = entries.map(e => ({
+      coordinate: () => this._series ? this._series.priceToCoordinate(e.price) : null,
+      text: () => `${e.price.toFixed(2)}  ${e.title}`,
+      textColor: () => '#ffffff',
+      backColor: () => e.color,
+      visible: () => !!this._series && this._series.priceToCoordinate(e.price) != null,
+    }));
   }
   attached(params) { this._series = params.series; }
   detached() { this._series = null; }
   updateAllViews() {}
-  paneViews() { return [this._paneView]; }
-  _draw(target) {
-    const series = this._series;
-    if (!series || !this._entries.length) return;
-    target.useBitmapCoordinateSpace(scope => {
-      const ctx = scope.context;
-      const { bitmapSize, verticalPixelRatio, horizontalPixelRatio } = scope;
-      const fontPx = Math.round(LABEL_FONT_PX * verticalPixelRatio);
-      ctx.font = `${fontPx}px sans-serif`;
-      ctx.textBaseline = 'middle';
-      ctx.textAlign = 'left';
-      const rowH = fontPx + 6 * verticalPixelRatio;
-
-      const items = this._entries
-        .map(e => ({ ...e, y: series.priceToCoordinate(e.price) }))
-        .filter(e => e.y != null)
-        .map(e => ({ ...e, y: e.y * verticalPixelRatio }))
-        .sort((a, b) => a.y - b.y);
-      if (!items.length) return;
-      for (let i = 1; i < items.length; i++) {
-        if (items[i].y - items[i - 1].y < rowH) items[i].y = items[i - 1].y + rowH;
-      }
-      const overflow = items[items.length - 1].y - (bitmapSize.height - rowH / 2);
-      if (overflow > 0) items.forEach(it => { it.y -= overflow; });
-
-      for (const it of items) {
-        const text = `${it.price.toFixed(2)}  ${it.title}`;
-        const boxW = ctx.measureText(text).width + 8 * horizontalPixelRatio;
-        const x = bitmapSize.width - boxW - 2 * horizontalPixelRatio;
-        ctx.fillStyle = it.color;
-        ctx.fillRect(x, it.y - rowH / 2, boxW, rowH);
-        ctx.fillStyle = '#ffffff';
-        ctx.fillText(text, x + 4 * horizontalPixelRatio, it.y);
-      }
-    });
-  }
+  priceAxisViews() { return this._views; }
 }
 
 // chart 的 time 軸統一用 UTC 日期字串，與 analysis.of.days[].date 的格式一致，
@@ -1005,11 +952,7 @@ function mountChart(code) {
               panes: { separatorColor: '#e8e8e8', separatorHoverColor: '#dddddd' } },
     grid: { vertLines: { color: '#f5f5f5' }, horzLines: { color: '#f0f0f0' } },
     rightPriceScale: { borderColor: '#e0e0e0' },
-    // rightOffset leaves candle-free space on the right for PriceLabelsPrimitive
-    // to draw into -- it always right-anchors within the pane, so as long as
-    // this margin is wider than the longest label, overlap is geometrically
-    // impossible regardless of price/height.
-    timeScale: { borderColor: '#e0e0e0', rightOffset: 30 },
+    timeScale: { borderColor: '#e0e0e0', rightOffset: 4 },
     crosshair: { mode: LWC.CrosshairMode.Normal },
   });
 
@@ -1024,12 +967,11 @@ function mountChart(code) {
   })));
 
   // Neither MA lines nor price lines use the native `title`/axisLabelVisible
-  // label mechanisms -- title floats an in-pane text label at that price's
-  // height (left of the axis, wrong side, and prone to overlapping candles),
-  // while axisLabelVisible only shows a bare number with no room for text.
-  // All of it is collected into `labelEntries` and drawn once as combined
-  // "price  text" labels by PriceLabelsPrimitive (title to the right of the
-  // price, as requested), which right-anchors inside rightOffset's margin.
+  // label mechanisms -- title floats an in-pane text label (wrong side, no
+  // room for the price number), axisLabelVisible shows only a bare number.
+  // All of it is collected into `labelEntries` and drawn once, combined as
+  // "price  text", by PriceAxisLabelsPrimitive's priceAxisViews() -- the
+  // real price axis, past the pane entirely.
   const labelEntries = [];
   const addMA = (arr, color, title) => {
     const pts = [];
@@ -1061,12 +1003,9 @@ function mountChart(code) {
     labelEntries.push({ price: a.vp.poc, color: '#B03A2E', title: 'POC' });
     labelEntries.push({ price: a.vp.vah, color: '#2980B9', title: 'VAH' });
     labelEntries.push({ price: a.vp.val, color: '#2980B9', title: 'VAL' });
-    // VP's bars must stop before PriceLabelsPrimitive's zone, not compete for
-    // the same rightmost pixels -- measure the widest label so VP knows
-    // exactly how much to leave clear.
-    candle.attachPrimitive(new VolumeProfilePrimitive(a.vp, measureLabelZoneWidth(labelEntries)));
+    candle.attachPrimitive(new VolumeProfilePrimitive(a.vp));
   }
-  candle.attachPrimitive(new PriceLabelsPrimitive(labelEntries));
+  candle.attachPrimitive(new PriceAxisLabelsPrimitive(labelEntries));
 
   // --- 第二窗格：成交量 + 20 日均量 ---
   const vol = chart.addSeries(LWC.HistogramSeries, {
