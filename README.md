@@ -323,6 +323,12 @@ curl -X POST https://tv-webhook.xxx.workers.dev/ -d "hello"
 curl -X POST "https://tv-webhook.xxx.workers.dev/?token=你的密鑰" -d "測試訊息"
 ```
 
+**若回應是 200 但手機沒收到訊息**：不是 Worker 的問題（密鑰驗證那關已經過了），八成是 GitHub secrets 裡的
+`TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID` 跟 `.env` 對不上（手動輸入時漏字、多打空格）。排查方式：先用 `.env`
+裡那組憑證直接呼叫 `https://api.telegram.org/bot<TOKEN>/sendMessage` 確認憑證本身有效、手機收得到，
+確認後再回 GitHub 把這兩個 secret 改成跟 `.env`完全一致（複製貼上，不要手打），重新跑一次
+**deploy-tv-webhook**（部署時會重推 secrets 到 Worker）。2026-08-13 首次部署就踩過這個坑。
+
 ## 免責
 
 技術評分、訊號、回測勝率與推估區間均為歷史統計整理，屬機率傾向而非預測，不構成投資建議。
