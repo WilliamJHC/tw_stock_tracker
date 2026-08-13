@@ -888,6 +888,60 @@ class VolumeProfilePrimitive {
   }
 }
 
+// 支撐/壓力/POC/VAH/VAL/MA5/20/60 的合併標籤（"價格  文字"，文字在價格右邊）。
+// Lightweight Charts 原生沒有這種排法：createPriceLine 的 title 是畫在盤面
+// 內部、貼在該價格高度左側的獨立文字（跟軸上數字方向相反，也無法控制順序），
+// 塞太多條价格線時彼此還會與蠟燭重疊。這裡自己畫：靠 pane 最右側對齊、依
+// y 座標排序後互相推開避免重疊，只要 rightOffset 留的空白夠寬，就保證不會
+// 蓋到任何蠟燭（水平方向本來就沒有K棒可畫）。
+class PriceLabelsPrimitive {
+  constructor(entries) {
+    this._entries = entries;  // [{price, color, title}]
+    this._series = null;
+    const renderer = { draw: t => this._draw(t) };
+    this._paneView = { zOrder: () => 'top', renderer: () => renderer };
+  }
+  attached(params) { this._series = params.series; }
+  detached() { this._series = null; }
+  updateAllViews() {}
+  paneViews() { return [this._paneView]; }
+  _draw(target) {
+    const series = this._series;
+    if (!series || !this._entries.length) return;
+    target.useBitmapCoordinateSpace(scope => {
+      const ctx = scope.context;
+      const { bitmapSize, verticalPixelRatio, horizontalPixelRatio } = scope;
+      const fontPx = Math.round(10 * verticalPixelRatio);
+      ctx.font = `${fontPx}px sans-serif`;
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'left';
+      const rowH = fontPx + 6 * verticalPixelRatio;
+
+      const items = this._entries
+        .map(e => ({ ...e, y: series.priceToCoordinate(e.price) }))
+        .filter(e => e.y != null)
+        .map(e => ({ ...e, y: e.y * verticalPixelRatio }))
+        .sort((a, b) => a.y - b.y);
+      if (!items.length) return;
+      for (let i = 1; i < items.length; i++) {
+        if (items[i].y - items[i - 1].y < rowH) items[i].y = items[i - 1].y + rowH;
+      }
+      const overflow = items[items.length - 1].y - (bitmapSize.height - rowH / 2);
+      if (overflow > 0) items.forEach(it => { it.y -= overflow; });
+
+      for (const it of items) {
+        const text = `${it.price.toFixed(2)}  ${it.title}`;
+        const boxW = ctx.measureText(text).width + 8 * horizontalPixelRatio;
+        const x = bitmapSize.width - boxW - 2 * horizontalPixelRatio;
+        ctx.fillStyle = it.color;
+        ctx.fillRect(x, it.y - rowH / 2, boxW, rowH);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(text, x + 4 * horizontalPixelRatio, it.y);
+      }
+    });
+  }
+}
+
 // chart 的 time 軸統一用 UTC 日期字串，與 analysis.of.days[].date 的格式一致，
 // 這樣累積 Delta 才對得上日線的 x 軸（沿用先前 SVG 版的對應方式）。
 const toChartDate = ts => new Date(ts * 1000).toISOString().slice(0, 10);
@@ -925,7 +979,11 @@ function mountChart(code) {
               panes: { separatorColor: '#e8e8e8', separatorHoverColor: '#dddddd' } },
     grid: { vertLines: { color: '#f5f5f5' }, horzLines: { color: '#f0f0f0' } },
     rightPriceScale: { borderColor: '#e0e0e0' },
-    timeScale: { borderColor: '#e0e0e0', rightOffset: 4 },
+    // rightOffset leaves candle-free space on the right for PriceLabelsPrimitive
+    // to draw into -- it always right-anchors within the pane, so as long as
+    // this margin is wider than the longest label, overlap is geometrically
+    // impossible regardless of price/height.
+    timeScale: { borderColor: '#e0e0e0', rightOffset: 30 },
     crosshair: { mode: LWC.CrosshairMode.Normal },
   });
 
@@ -939,11 +997,15 @@ function mountChart(code) {
     time: toChartDate(ch.t[i]), open: ch.o[i], high: ch.h[i], low: ch.l[i], close: c,
   })));
 
-  // No `title` on MA lines: it renders as a floating label INSIDE the pane
-  // (at the line's last-value height), which is exactly what used to cover
-  // the candles. Color alone identifies each MA -- the legend above the
-  // chart already spells out which color is MA5/20/60.
-  const addMA = (arr, color) => {
+  // Neither MA lines nor price lines use the native `title`/axisLabelVisible
+  // label mechanisms -- title floats an in-pane text label at that price's
+  // height (left of the axis, wrong side, and prone to overlapping candles),
+  // while axisLabelVisible only shows a bare number with no room for text.
+  // All of it is collected into `labelEntries` and drawn once as combined
+  // "price  text" labels by PriceLabelsPrimitive (title to the right of the
+  // price, as requested), which right-anchors inside rightOffset's margin.
+  const labelEntries = [];
+  const addMA = (arr, color, title) => {
     const pts = [];
     for (let i = 0; i < arr.length; i++) {
       if (arr[i] != null) pts.push({ time: toChartDate(ch.t[i]), value: arr[i] });
@@ -953,30 +1015,29 @@ function mountChart(code) {
       color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
     }, 0);
     s.setData(pts);
+    labelEntries.push({ price: pts[pts.length - 1].value, color, title });
   };
-  addMA(ch.ma5, '#E67E22');
-  addMA(ch.ma20, '#2980B9');
-  addMA(ch.ma60, '#8E44AD');
+  addMA(ch.ma5, '#E67E22', 'MA5');
+  addMA(ch.ma20, '#2980B9', 'MA20');
+  addMA(ch.ma60, '#8E44AD', 'MA60');
 
-  // Likewise no `title` here: axisLabelVisible alone puts the price on the
-  // Y axis (a separate canvas from the pane, so it can never overlap a
-  // candle), which is exactly where the user wants these -- the axis, next
-  // to their corresponding price. `title` would additionally float an
-  // in-pane text label at that price's height, which is what covered the
-  // candles before.
   const priceLine = (price, color, dashed) => candle.createPriceLine({
     price, color, lineWidth: 1,
     lineStyle: dashed ? LWC.LineStyle.Dashed : LWC.LineStyle.Solid,
-    axisLabelVisible: true,
+    axisLabelVisible: false,
   });
-  a.sr.resistances.forEach(p => priceLine(p, '#C0392B', true));
-  a.sr.supports.forEach(p => priceLine(p, '#1E8E5A', true));
+  a.sr.resistances.forEach(p => { priceLine(p, '#C0392B', true); labelEntries.push({ price: p, color: '#C0392B', title: '壓力' }); });
+  a.sr.supports.forEach(p => { priceLine(p, '#1E8E5A', true); labelEntries.push({ price: p, color: '#1E8E5A', title: '支撐' }); });
   if (a.vp) {
     priceLine(a.vp.poc, '#B03A2E', false);
     priceLine(a.vp.vah, '#2980B9', true);
     priceLine(a.vp.val, '#2980B9', true);
+    labelEntries.push({ price: a.vp.poc, color: '#B03A2E', title: 'POC' });
+    labelEntries.push({ price: a.vp.vah, color: '#2980B9', title: 'VAH' });
+    labelEntries.push({ price: a.vp.val, color: '#2980B9', title: 'VAL' });
     candle.attachPrimitive(new VolumeProfilePrimitive(a.vp));
   }
+  candle.attachPrimitive(new PriceLabelsPrimitive(labelEntries));
 
   // --- 第二窗格：成交量 + 20 日均量 ---
   const vol = chart.addSeries(LWC.HistogramSeries, {
