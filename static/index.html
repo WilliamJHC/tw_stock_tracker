@@ -854,7 +854,12 @@ class VolumeProfilePrimitive {
   constructor(vp) {
     this._vp = vp;
     this._series = null;
-    this._paneView = { zOrder: 'bottom', renderer: { draw: t => this._draw(t) } };
+    // zOrder AND renderer must both be METHODS, not plain properties -- v5.2.1's
+    // internals call paneView.zOrder() and paneView.renderer() (see class Bt in
+    // the bundle: "this.Yh.renderer()", "this.Yh.zOrder?.()"). Plain values throw
+    // "is not a function" the moment the pane tries to render.
+    const renderer = { draw: t => this._draw(t) };
+    this._paneView = { zOrder: () => 'bottom', renderer: () => renderer };
   }
   attached(params) { this._series = params.series; }
   detached() { this._series = null; }
