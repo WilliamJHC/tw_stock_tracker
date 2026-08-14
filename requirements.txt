@@ -4,3 +4,7 @@ requests>=2.31
 yfinance>=0.2.40
 websockets>=14
 pytest>=8.0
+
+# finlab_strategy.py only -- pulls in pandas/numpy, deliberately isolated
+# from the rest of the app which stays stdlib-only (see docs/optimization_plan.md)
+finlab
