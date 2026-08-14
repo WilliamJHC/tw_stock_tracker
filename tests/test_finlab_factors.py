@@ -20,7 +20,21 @@ def test_revenue_yoy_series_hand_computed():
     rows += [{"date": f"2023-{m:02d}-01", "revenue": 120.0} for m in range(1, 13)]
     out = ff.revenue_yoy_series(rows)
     assert len(out) == 12
-    assert out[0] == {"usable_date": "2023-01-11", "yoy_pct": 20.0}
+    # 2023-01 revenue's usable_date = that month's end (2023-01-31) + 10
+    # days = 2023-02-10, not 2023-01-01 + 10 days -- disclosure deadlines
+    # are measured from month-end, not month-start.
+    assert out[0] == {"usable_date": "2023-02-10", "yoy_pct": 20.0}
+
+
+def test_revenue_yoy_series_matches_by_calendar_year_not_position():
+    # A gap (missing 2022-06) must not shift the i-12 lookup onto the wrong
+    # month -- 2023-06 should be skipped (no exact prior-year match) while
+    # every other 2023 month still matches its real prior-year counterpart.
+    rows = [{"date": f"2022-{m:02d}-01", "revenue": 100.0} for m in range(1, 13) if m != 6]
+    rows += [{"date": f"2023-{m:02d}-01", "revenue": 120.0} for m in range(1, 13)]
+    out = ff.revenue_yoy_series(rows)
+    assert len(out) == 11
+    assert all(row["yoy_pct"] == 20.0 for row in out)
 
 
 def test_revenue_yoy_series_too_short_returns_empty():
@@ -46,6 +60,23 @@ def test_roe_series_ttm_over_latest_equity():
 
 def test_roe_series_too_short_returns_empty():
     rows = [{"date": "2022-12-31", "net_income": 10.0, "equity": 200.0}]
+    assert ff.roe_series(rows) == []
+
+
+def test_roe_series_skips_window_with_non_consecutive_quarter():
+    # A missing quarter (get_financials() drops it when income/equity data
+    # doesn't intersect) must not silently sum 4 non-adjacent rows as TTM:
+    # only the all-2022 window (i=3) is a valid consecutive-quarter window;
+    # the window sliding in the gapped 2023-09 row (i=4) must be skipped.
+    rows = [{"date": f"2022-{q:02d}-28", "net_income": 10.0, "equity": 200.0} for q in (3, 6, 9, 12)]
+    rows += [{"date": "2023-09-28", "net_income": 10.0, "equity": 200.0}]  # gap: skipped 2023-03/06
+    out = ff.roe_series(rows)
+    assert len(out) == 1
+    assert out[0]["usable_date"] == "2023-02-26"  # from the valid 2022-12-28 window only
+
+
+def test_roe_series_skips_non_positive_equity():
+    rows = [{"date": f"2022-{q:02d}-28", "net_income": 10.0, "equity": -50.0} for q in (3, 6, 9, 12)]
     assert ff.roe_series(rows) == []
 
 

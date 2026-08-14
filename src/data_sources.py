@@ -520,9 +520,10 @@ def get_sbl(code, days=40, cache=True):
 
 
 # ------------------------------------------------------- factor backtest --
-# Getters below feed src/finlab_factors.py's multi-factor ranking (see
-# docs/quant_upgrade_plan.md-adjacent work: reproducing finlab.finance's
-# AI-agent guide strategy on FinMind data instead of a FinLab subscription).
+# Getters below feed src/finlab_factors.py's multi-factor ranking --
+# reproducing finlab.finance's AI-agent guide strategy on FinMind data
+# instead of a FinLab subscription (see src/finlab_strategy.py for the
+# FinLab-backed original this was ported from).
 
 def get_universe(cache=True):
     """All TWSE/TPEX-listed 4-digit common stocks: [{code, name, market}]

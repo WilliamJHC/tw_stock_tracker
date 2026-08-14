@@ -18,12 +18,18 @@ stdlib-only.
 import os
 
 import env_utils
+# finlab_factors.py is pure stdlib (no pandas/finlab import), so importing
+# its constants here doesn't add a dependency -- keeps this module and the
+# FinMind-native port in src/finlab_factors.py from drifting apart if a
+# threshold is tuned in one place and not the other.
+from finlab_factors import (
+    LIQUIDITY_MIN_TURNOVER,
+    MOMENTUM_DAYS as RANKING_MOMENTUM_DAYS,
+    RANKING_TOP_N,
+    RANKING_WEIGHTS,
+)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LIQUIDITY_MIN_TURNOVER = 10_000_000  # NTD, 20-day avg trading value floor
-RANKING_WEIGHTS = {"revenue": 0.4, "roe": 0.3, "momentum": 0.3}
-RANKING_TOP_N = 20
-RANKING_MOMENTUM_DAYS = 60
 
 
 def _load_token():

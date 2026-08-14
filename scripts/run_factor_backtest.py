@@ -63,12 +63,19 @@ def _code_cache_path(code):
     return os.path.join(RUN_CACHE_DIR, f"{code}.json")
 
 
-def _load_code_cache(code):
+def _load_code_cache(code, days):
+    """Returns None (cache miss) if the file is missing/corrupt OR if it was
+    fetched under a different --days window -- otherwise a resumed run with
+    a longer/shorter --days would silently reuse bars/fundamentals (or a
+    cached "skip" verdict) computed for the wrong history length."""
     try:
         with open(_code_cache_path(code), encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except (OSError, ValueError):
         return None
+    if data.get("days") != days:
+        return None
+    return data
 
 
 def _save_code_cache(code, data):
@@ -116,7 +123,7 @@ def fetch_universe_data(codes, days, limiter):
     universe_data = {}
     n = len(codes)
     for i, code in enumerate(codes):
-        cached = _load_code_cache(code)
+        cached = _load_code_cache(code, days)
         if cached is not None:
             if cached.get("skip"):
                 continue
@@ -134,13 +141,13 @@ def fetch_universe_data(codes, days, limiter):
             daily = ds.get_daily(code, days=days, cache=False)
         except Exception as e:
             print(f"  daily FAILED: {e}")
-            _save_code_cache(code, {"skip": True})
+            _save_code_cache(code, {"skip": True, "days": days})
             continue
         bars = _daily_to_bars(daily)
 
         if not _passed_liquidity_ever(bars):
             print("  never liquid -- skipping fundamentals fetch")
-            _save_code_cache(code, {"skip": True})
+            _save_code_cache(code, {"skip": True, "days": days})
             continue
 
         limiter.before_request()
@@ -153,10 +160,10 @@ def fetch_universe_data(codes, days, limiter):
         roe_series_ = ff.roe_series(financials_rows or [])
         if not revenue_series or not roe_series_:
             print("  insufficient revenue/financials history -- skipping")
-            _save_code_cache(code, {"skip": True})
+            _save_code_cache(code, {"skip": True, "days": days})
             continue
 
-        _save_code_cache(code, {"bars": bars, "revenue_series": revenue_series, "roe_series": roe_series_})
+        _save_code_cache(code, {"bars": bars, "revenue_series": revenue_series, "roe_series": roe_series_, "days": days})
         universe_data[code] = {
             "bars": bars, "bar_dates": [b["date"] for b in bars],
             "revenue_series": revenue_series, "roe_series": roe_series_,

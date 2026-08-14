@@ -8,8 +8,8 @@ single-position/single-code; this module is the portfolio-level
 counterpart needed for "hold N names at once, rebalance monthly" (the thing
 backtest.py deliberately doesn't do -- see its module docstring).
 
-Simplifications (recorded, not hidden -- see docs/quant_upgrade_plan.md's
-convention of naming every threshold as a product-judgment default):
+Simplifications (recorded, not hidden -- every threshold below is a named
+product-judgment default):
   - Fractional shares. Real trading only fills whole 1000-share lots; this
     engine sizes each name to an equal fraction of portfolio value exactly.
     Mirrors how the FinLab original also backtests on % weights under the
@@ -54,8 +54,21 @@ def _rebalance_dates(calendar):
     return out
 
 
-def _mark_to_market(cash, holdings, prices, date):
-    return cash + sum(shares * prices[code].get(date, 0) for code, shares in holdings.items())
+def _mark_to_market(cash, holdings, prices, bar_dates, date):
+    """Values each holding at its latest price on or before `date`, not at
+    `date` exactly -- a held code with no print today (halt, thin trading)
+    would otherwise be zero-filled, producing a one-day equity crash (and a
+    matching phantom rebound once it prints again) that corrupts
+    daily_returns/Sharpe/max_drawdown, and, on a rebalance date, corrupts
+    port_value/target_value_each sizing for every other name that rebalance
+    too."""
+    value = cash
+    for code, shares in holdings.items():
+        idx = ff._bar_index_on_or_before(bar_dates[code], date)
+        if idx is None:
+            continue
+        value += shares * prices[code][bar_dates[code][idx]]
+    return value
 
 
 def simulate(universe_data, params=None):
@@ -79,6 +92,7 @@ def simulate(universe_data, params=None):
     rebalance_dates = set(_rebalance_dates(calendar))
 
     prices = {code: {b["date"]: b["c"] for b in d["bars"]} for code, d in universe_data.items()}
+    bar_dates = {code: d["bar_dates"] for code, d in universe_data.items()}
 
     cash = p["initial_capital"]
     holdings = {}  # code -> shares (fractional, see module docstring)
@@ -98,7 +112,7 @@ def simulate(universe_data, params=None):
                 trades.append({"date": date, "code": code, "side": "sell", "price": px, "shares": holdings[code]})
                 del holdings[code]
 
-            port_value = _mark_to_market(cash, holdings, prices, date)
+            port_value = _mark_to_market(cash, holdings, prices, bar_dates, date)
             if target_codes:
                 target_value_each = port_value / len(target_codes)
                 # Sorted, not set-order: a plain `for code in target_codes`
@@ -129,7 +143,7 @@ def simulate(universe_data, params=None):
                         holdings[code] = current_shares - sell_shares
                         trades.append({"date": date, "code": code, "side": "sell", "price": px, "shares": sell_shares})
 
-        equity_curve.append({"date": date, "equity": _mark_to_market(cash, holdings, prices, date)})
+        equity_curve.append({"date": date, "equity": _mark_to_market(cash, holdings, prices, bar_dates, date)})
 
     return {
         "equity_curve": equity_curve,
@@ -140,9 +154,9 @@ def simulate(universe_data, params=None):
 
 def _compute_metrics(equity_curve, initial_capital):
     """CAGR / Sharpe / max drawdown off the daily equity curve. Sharpe uses
-    a 0% risk-free rate (see backtest_plan-style rationale in
-    docs/quant_upgrade_plan.md Phase 1: strategy is long-only relative
-    comparison, 0 is a conservative, easily-adjusted default)."""
+    a 0% risk-free rate: strategy is a long-only relative comparison, 0 is
+    a conservative, easily-adjusted default (matches backtest.py's
+    convention)."""
     if len(equity_curve) < 2:
         return {}
     equities = [row["equity"] for row in equity_curve]

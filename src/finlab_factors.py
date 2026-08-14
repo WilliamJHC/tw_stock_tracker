@@ -31,22 +31,40 @@ def _shift_date(date_str, days):
     return d.strftime("%Y-%m-%d")
 
 
+def _month_end_lag_date(month_start_str, lag_days):
+    """month_start_str ("YYYY-MM-01") -> that month's end + lag_days, i.e.
+    the 1st of the following month plus (lag_days - 1). Taiwan's monthly
+    revenue disclosure deadline is measured from month-END, not month-start
+    -- get_monthly_revenue() stores the revenue month's 1st, so shifting
+    from that directly (as an earlier version of this module did) understated
+    the real-world lag by up to a month."""
+    d = dt.datetime.strptime(month_start_str, "%Y-%m-%d")
+    next_month_first = d.replace(year=d.year + 1, month=1) if d.month == 12 else d.replace(month=d.month + 1)
+    return (next_month_first + dt.timedelta(days=lag_days - 1)).strftime("%Y-%m-%d")
+
+
 def revenue_yoy_series(revenue_rows):
     """[{date, revenue}] (ascending, monthly) -> [{usable_date, yoy_pct}].
-    usable_date = revenue month + REVENUE_LAG_DAYS. Needs >=13 months of
-    input to produce a single point (one year of comparison + the point
-    itself); shorter input yields []."""
+    usable_date = revenue month-end + REVENUE_LAG_DAYS. Matches each row
+    against the entry exactly 12 calendar months earlier by date (not by
+    position), so a gap in the input -- get_monthly_revenue() doesn't
+    backfill missing months -- skips that point instead of silently
+    comparing non-adjacent months. Needs >=13 months of input to produce a
+    single point (one year of comparison + the point itself); shorter input
+    yields []."""
     if not revenue_rows or len(revenue_rows) < 13:
         return []
+    by_date = {r["date"]: r["revenue"] for r in revenue_rows}
     out = []
-    for i in range(12, len(revenue_rows)):
-        prev = revenue_rows[i - 12]["revenue"]
-        cur = revenue_rows[i]["revenue"]
+    for r in revenue_rows:
+        cur_dt = dt.datetime.strptime(r["date"], "%Y-%m-%d")
+        prev_key = cur_dt.replace(year=cur_dt.year - 1).strftime("%Y-%m-%d")
+        prev = by_date.get(prev_key)
         if not prev:
             continue
         out.append({
-            "usable_date": _shift_date(revenue_rows[i]["date"], REVENUE_LAG_DAYS),
-            "yoy_pct": (cur - prev) / abs(prev) * 100,
+            "usable_date": _month_end_lag_date(r["date"], REVENUE_LAG_DAYS),
+            "yoy_pct": (r["revenue"] - prev) / abs(prev) * 100,
         })
     return out
 
@@ -55,17 +73,28 @@ def roe_series(financials_rows):
     """[{date, net_income, equity}] (ascending, quarterly) -> [{usable_date,
     roe_pct}]. ROE = trailing-4-quarter net income / latest quarter equity,
     annualized by construction (TTM numerator). usable_date = quarter-end +
-    FINANCIALS_LAG_DAYS. Needs >=4 quarters of input."""
+    FINANCIALS_LAG_DAYS. Needs >=4 quarters of input. get_financials() joins
+    income/equity by date INTERSECTION, so a quarter missing either side is
+    dropped rather than backfilled -- each 4-row window is checked for
+    ~quarterly (80-100 day) consecutive gaps before use, so a dropped
+    quarter skips that point instead of silently summing non-adjacent
+    quarters as if they were TTM. Non-positive equity is also skipped:
+    ROE is undefined (or sign-flipped and misleading) for negative book
+    equity."""
     if not financials_rows or len(financials_rows) < 4:
         return []
     out = []
     for i in range(3, len(financials_rows)):
-        ttm_income = sum(r["net_income"] for r in financials_rows[i - 3:i + 1])
-        equity = financials_rows[i]["equity"]
-        if not equity:
+        window = financials_rows[i - 3:i + 1]
+        window_dates = [dt.datetime.strptime(r["date"], "%Y-%m-%d") for r in window]
+        if any(not (80 <= (window_dates[j + 1] - window_dates[j]).days <= 100) for j in range(3)):
             continue
+        equity = window[-1]["equity"]
+        if not equity or equity <= 0:
+            continue
+        ttm_income = sum(r["net_income"] for r in window)
         out.append({
-            "usable_date": _shift_date(financials_rows[i]["date"], FINANCIALS_LAG_DAYS),
+            "usable_date": _shift_date(window[-1]["date"], FINANCIALS_LAG_DAYS),
             "roe_pct": ttm_income / equity * 100,
         })
     return out

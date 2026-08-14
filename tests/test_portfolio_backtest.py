@@ -53,6 +53,35 @@ def test_simulate_equity_grows_when_selected_names_trend_up():
     assert result["summary"]["cagr_pct"] > 0
 
 
+def test_simulate_carries_forward_price_through_a_halt_day():
+    # B has no bar on day index 2 (simulated halt/no print). Equity that
+    # day must reflect B's last known price, not zero-fill it -- a
+    # zero-fill would crash equity by roughly B's whole position value that
+    # one day, then phantom-recover once B prints again.
+    d0 = dt.date(2022, 1, 1)
+    a_dates = [(d0 + dt.timedelta(days=i)).isoformat() for i in range(5)]
+    b_dates = [(d0 + dt.timedelta(days=i)).isoformat() for i in (0, 1, 3, 4)]  # skip day 2
+    universe = {
+        "A": {
+            "bars": [{"date": d, "c": 100.0, "v": 500_000} for d in a_dates],
+            "bar_dates": a_dates,
+            "revenue_series": [{"usable_date": "2022-01-01", "yoy_pct": 100}],
+            "roe_series": [{"usable_date": "2022-01-01", "roe_pct": 100}],
+        },
+        "B": {
+            "bars": [{"date": d, "c": 100.0, "v": 500_000} for d in b_dates],
+            "bar_dates": b_dates,
+            "revenue_series": [{"usable_date": "2022-01-01", "yoy_pct": 100}],
+            "roe_series": [{"usable_date": "2022-01-01", "roe_pct": 100}],
+        },
+    }
+    result = pb.simulate(universe, params={"top_n": 2})
+    equities = [row["equity"] for row in result["equity_curve"]]
+    # both flat at price 100 throughout -- equity should stay ~flat across
+    # the halt day, not crash toward roughly half its value.
+    assert equities[2] > equities[1] * 0.9
+
+
 def test_simulate_fee_reduces_return_vs_zero_fee():
     universe = {"A": _entry(100, 0.5), "B": _entry(80, 0.4)}
     no_fee = pb.simulate(universe, params={"top_n": 2, "fee_pct": 0.0})
