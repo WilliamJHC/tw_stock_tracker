@@ -200,6 +200,83 @@ def test_get_sbl_no_data_returns_none():
     assert result is None
 
 
+# ----------------------------------------------------------- get_universe --
+
+def test_get_universe_keeps_4digit_twse_tpex_dedupes_by_code():
+    rows = [
+        {"stock_id": "2330", "stock_name": "台積電", "type": "twse", "date": "2020-01-01"},
+        {"stock_id": "2330", "stock_name": "台積電", "type": "twse", "date": "2021-01-01"},  # dup, later date
+        {"stock_id": "5481", "stock_name": "先豐", "type": "tpex", "date": "2020-01-01"},
+        {"stock_id": "00631L", "stock_name": "元大台灣50正2", "type": "twse", "date": "2020-01-01"},  # not 4-digit
+        {"stock_id": "TXFF4", "stock_name": "期貨", "type": "future", "date": "2020-01-01"},  # not twse/tpex
+    ]
+    with patch("data_sources.requests.get", return_value=_fake_response(data=rows)):
+        result = ds.get_universe()
+    assert result == [
+        {"code": "2330", "name": "台積電", "market": "twse"},
+        {"code": "5481", "name": "先豐", "market": "tpex"},
+    ]
+
+
+def test_get_universe_no_data_returns_none():
+    with patch("data_sources.requests.get", return_value=_fake_response(data=[])):
+        result = ds.get_universe()
+    assert result is None
+
+
+# --------------------------------------------------- get_monthly_revenue --
+
+def test_get_monthly_revenue_builds_date_from_year_month_not_raw_date():
+    rows = [
+        {"date": "2024-01-01", "revenue_year": 2023, "revenue_month": 12, "revenue": 176299866000},
+        {"date": "2023-12-01", "revenue_year": 2023, "revenue_month": 11, "revenue": 150000000000},
+    ]
+    with patch("data_sources.requests.get", return_value=_fake_response(data=rows)):
+        result = ds.get_monthly_revenue("2330")
+    assert result == [
+        {"date": "2023-11-01", "revenue": 150000000000.0},
+        {"date": "2023-12-01", "revenue": 176299866000.0},
+    ]
+
+
+def test_get_monthly_revenue_no_data_returns_none():
+    with patch("data_sources.requests.get", return_value=_fake_response(data=[])):
+        result = ds.get_monthly_revenue("2330")
+    assert result is None
+
+
+# -------------------------------------------------------- get_financials --
+
+def test_get_financials_joins_income_and_equity_by_date():
+    income_rows = [
+        {"date": "2023-03-31", "type": "IncomeAfterTaxes", "value": 100.0},
+        {"date": "2023-06-30", "type": "IncomeAfterTaxes", "value": 120.0},
+        {"date": "2023-06-30", "type": "GrossProfit", "value": 999.0},  # other type, ignored
+    ]
+    equity_rows = [
+        {"date": "2023-03-31", "type": "Equity", "value": 1000.0},
+        {"date": "2023-06-30", "type": "Equity", "value": 1100.0},
+    ]
+    with patch("data_sources.requests.get", side_effect=[
+        _fake_response(data=income_rows), _fake_response(data=equity_rows),
+    ]):
+        result = ds.get_financials("2330")
+    assert result == [
+        {"date": "2023-03-31", "net_income": 100.0, "equity": 1000.0},
+        {"date": "2023-06-30", "net_income": 120.0, "equity": 1100.0},
+    ]
+
+
+def test_get_financials_drops_dates_missing_either_side():
+    income_rows = [{"date": "2023-03-31", "type": "IncomeAfterTaxes", "value": 100.0}]
+    equity_rows = []  # no equity at all -> no usable date
+    with patch("data_sources.requests.get", side_effect=[
+        _fake_response(data=income_rows), _fake_response(data=equity_rows),
+    ]):
+        result = ds.get_financials("2330")
+    assert result is None
+
+
 # ------------------------------------------------------------ caching path --
 
 def test_get_margin_uses_same_day_cache_without_second_call():

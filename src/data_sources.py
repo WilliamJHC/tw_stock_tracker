@@ -517,3 +517,100 @@ def get_sbl(code, days=40, cache=True):
     if cache:
         _cache_put(f"sbl_{code}", result or [])
     return result
+
+
+# ------------------------------------------------------- factor backtest --
+# Getters below feed src/finlab_factors.py's multi-factor ranking (see
+# docs/quant_upgrade_plan.md-adjacent work: reproducing finlab.finance's
+# AI-agent guide strategy on FinMind data instead of a FinLab subscription).
+
+def get_universe(cache=True):
+    """All TWSE/TPEX-listed 4-digit common stocks: [{code, name, market}]
+    sorted by code, or None on failure. TaiwanStockInfo returns one row per
+    (stock_id, listing-date-ish 'date'); duplicates collapse to the last
+    seen row per stock_id since name/market don't change across rows."""
+    cached = _cache_get("universe") if cache else None
+    if cached is not None:
+        return cached or None
+    result = None
+    try:
+        rows = _finmind("TaiwanStockInfo")
+        by_code = {}
+        for r in rows:
+            code = r.get("stock_id") or ""
+            market = r.get("type")
+            if len(code) == 4 and code.isdigit() and market in ("twse", "tpex"):
+                by_code[code] = {"code": code, "name": r.get("stock_name"), "market": market}
+        if by_code:
+            result = sorted(by_code.values(), key=lambda x: x["code"])
+    except (SourceError, requests.RequestException, ValueError, KeyError):
+        result = None
+    if cache:
+        _cache_put("universe", result or [])
+    return result
+
+
+def get_monthly_revenue(code, days=760, cache=True):
+    """Monthly revenue history (>=24mo so callers can derive YoY growth).
+    Returns [{date, revenue}] ascending, date = 1st of the revenue month
+    (built from revenue_year/revenue_month, not FinMind's raw 'date' field --
+    that field is an announcement-batch marker, not the revenue period), or
+    None. cache=False skips the on-disk cache (see get_daily()'s docstring)."""
+    cached = _cache_get(f"revenue_{code}") if cache else None
+    if cached is not None:
+        return cached or None
+    result = None
+    try:
+        start = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+        rows = _finmind("TaiwanStockMonthRevenue", code, start)
+        out = []
+        for r in rows:
+            rev, year, month = r.get("revenue"), r.get("revenue_year"), r.get("revenue_month")
+            if rev is None or not year or not month:
+                continue
+            out.append({"date": f"{int(year):04d}-{int(month):02d}-01", "revenue": float(rev)})
+        out.sort(key=lambda x: x["date"])
+        if out:
+            result = out
+    except (SourceError, requests.RequestException, ValueError, KeyError):
+        result = None
+    if cache:
+        _cache_put(f"revenue_{code}", result or [])
+    return result
+
+
+def get_financials(code, days=900, cache=True):
+    """Quarterly net income and total equity for ROE. Returns
+    [{date, net_income, equity}] ascending, date = quarter-end, or None.
+    net_income (FinMind type IncomeAfterTaxes) is the single quarter's
+    figure, not year-to-date cumulative -- spot-checked against 2330's
+    2023 annual report (sum of 4 quarters ~= reported FY net income).
+    cache=False skips the on-disk cache (see get_daily()'s docstring)."""
+    cached = _cache_get(f"financials_{code}") if cache else None
+    if cached is not None:
+        return cached or None
+    result = None
+    try:
+        start = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+        income_rows = _finmind("TaiwanStockFinancialStatements", code, start)
+        equity_rows = _finmind("TaiwanStockBalanceSheet", code, start)
+        income_by_date = {
+            r["date"]: float(r["value"]) for r in income_rows
+            if r.get("type") == "IncomeAfterTaxes" and r.get("value") is not None
+        }
+        equity_by_date = {
+            r["date"]: float(r["value"]) for r in equity_rows
+            if r.get("type") == "Equity" and r.get("value") is not None
+        }
+        dates = sorted(set(income_by_date) & set(equity_by_date))
+        out = [
+            {"date": d, "net_income": income_by_date[d], "equity": equity_by_date[d]}
+            for d in dates
+        ]
+        if out:
+            result = out
+    except (SourceError, requests.RequestException, ValueError, KeyError):
+        result = None
+    if cache:
+        _cache_put(f"financials_{code}", result or [])
+    return result
