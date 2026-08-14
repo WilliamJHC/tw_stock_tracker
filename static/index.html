@@ -1000,12 +1000,14 @@ function mountChart(code) {
     upColor: UP_COLOR, downColor: DOWN_COLOR,
     borderUpColor: UP_COLOR, borderDownColor: DOWN_COLOR,
     wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
-    // lastValueVisible defaults to true and draws its own current-price axis
-    // label through a completely separate mechanism from
+    // lastValueVisible defaults to true and would draw its own current-price
+    // axis label through a mechanism completely separate from
     // PriceAxisLabelsPrimitive -- with no coordination between the two, it
-    // can land on the same row as a support/resistance/MA/POC label whenever
-    // price sits near one of them (common, since those are all derived from
-    // recent price action). Off, same as every other series on this chart.
+    // could land on the same row as a support/resistance/MA/POC label
+    // whenever price sits near one of them (common, since those are all
+    // derived from recent price action). Off, same as every other series on
+    // this chart; the current price is instead pushed into `labelEntries`
+    // below so it participates in the same collision-avoidance grouping.
     lastValueVisible: false,
   }, 0);
   candle.setData(ch.c.map((c, i) => ({
@@ -1053,6 +1055,14 @@ function mountChart(code) {
     addLine(a.vp.val, '#2980B9', 'VAL', true);
     candle.attachPrimitive(new VolumeProfilePrimitive(a.vp));
   }
+  // 現價併入同一套標籤系統（取代原生 lastValueVisible），跟支撐/壓力/
+  // MA/POC/VAH/VAL 一起排序、一起判斷要不要合併，不會再各自佔一行、
+  // 貼近任一技術價位時互相蓋住。顏色跟量能子圖同一套漲跌判斷（比較前一
+  // 根收盤）。
+  const lastIdx = ch.c.length - 1;
+  const lastColor = lastIdx > 0 && ch.c[lastIdx] >= ch.c[lastIdx - 1] ? UP_COLOR : DOWN_COLOR;
+  labelEntries.push({ price: ch.c[lastIdx], color: lastColor, title: '現價' });
+
   // 依價格排序一次，讓 PriceAxisLabelsPrimitive 不用每次重繪都重新排序
   // （見該類別建構子註解：本圖表價格軸從不反轉，價格降序＝y 座標升序）。
   labelEntries.sort((x, y) => y.price - x.price);
