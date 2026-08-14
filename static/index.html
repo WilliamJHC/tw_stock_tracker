@@ -941,9 +941,8 @@ class PriceAxisLabelsPrimitive {
     if (!items.length) return [];
 
     return groupByProximity(items, this._minGapPx).map(g => {
-      const text = g.members.length === 1
-        ? `${fmtP(g.members[0].ref.price)}  ${g.members[0].ref.title}`
-        : g.members.map(m => `${fmtP(m.ref.price)} ${m.ref.title}`).join(' / ');
+      // 單一/合併統一格式：一個 member 時 join 沒有東西可接，直接就是 "價格 標題"。
+      const text = g.members.map(m => `${fmtP(m.ref.price)} ${m.ref.title}`).join(' / ');
       return {
         coordinate: () => g.y,
         text: () => text,
