@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CLI entry point for the 2-year backtest database (docs/backtest_plan.md).
+"""CLI entry point for the backtest database (docs/archive/backtest_plan.md).
 
 Implements Phase 2 (data import), Phase 3 (signal win-rate stats), and
 Phase 4 (score replay + strategy simulation).
@@ -9,6 +9,7 @@ import datetime as dt
 import json
 import time
 
+import adjust
 import backtest as bt
 import data_sources as ds
 import db
@@ -17,7 +18,7 @@ import pipeline as pl
 # 3650 calendar days ~= 10y of bars; analysis needs a 120-bar warmup
 # (ma60 + volume_profile lookback) before it can score a day, so to get a
 # full 10y of *scored* days the raw daily pull has to reach back further.
-# See docs/backtest_plan.md Phase 2 "抓多久".
+# See docs/archive/backtest_plan.md Phase 2 "抓多久".
 DAILY_DAYS = 3900
 CHIP_DAYS = 3650
 
@@ -26,6 +27,23 @@ _CHIP_COLUMNS = (
     "short_balance", "short_delta", "foreign_ratio", "foreign_shares",
     "sbl_balance", "sbl_sales", "sbl_returns",
 )
+
+
+def _adjusted_bars(bars):
+    """db.query_daily_bars()'s raw rows -> split/dividend-adjusted o/h/l/c
+    (docs/archive/backtest_plan.md Phase 1c's downstream rule: momentum/
+    win-rate/strategy simulation compare price *levels* across time, so
+    they must run on the adjusted series, not the raw one that jumps at
+    every split/stock-dividend ex-date). `v` is left untouched -- see
+    adjust.py's module docstring. A NULL adj_factor (build_adj_factors.py
+    hasn't been run for this code yet) falls back to 1.0, i.e. today's
+    unadjusted behavior, so this is a no-op until the offline batch job
+    has populated the column."""
+    factors = [b["adj_factor"] if b.get("adj_factor") is not None else 1.0 for b in bars]
+    return [
+        {**b, "o": b["o_adj"], "h": b["h_adj"], "l": b["l_adj"], "c": b["c_adj"]}
+        for b in adjust.apply_adjustment(bars, factors)
+    ]
 
 
 def _daily_bar_rows(daily):
@@ -42,7 +60,7 @@ def _daily_bar_rows(daily):
 
 def _chip_rows(code):
     """Merge the four chip getters into one wide table keyed by date, per
-    the chip_daily schema (docs/backtest_plan.md Phase 1). A getter
+    the chip_daily schema (docs/archive/backtest_plan.md Phase 1). A getter
     returning None (e.g. 0050 has no institutional/margin data as an ETF --
     see Phase 2) just leaves those columns blank for the dates it would
     have covered; chip_analysis() already handles missing components by
@@ -131,6 +149,7 @@ def compute_signal_stats(conn, codes):
         if not bars:
             print(f"  {code}: 尚無日線資料，略過（先跑 --refresh-data）")
             continue
+        bars = _adjusted_bars(bars)
         daily = {"c": [r["c"] for r in bars], "v": [r["v"] for r in bars],
                   "o": [r["o"] for r in bars]}
         rows = bt.signal_win_rates(daily)
@@ -145,7 +164,7 @@ def run_replay_and_simulate(conn, codes, run_id=None):
     """Phase 4: recompute daily scores bar-by-bar and run the strategy
     simulation for every code, writing score_history/strategy_runs/trades.
     Sets meta.last_run_at/last_run_id/params_json/of_excluded on success --
-    the frontend's sole source for "回測資料更新於 X" (docs/backtest_plan.md
+    the frontend's sole source for "回測資料更新於 X" (docs/archive/backtest_plan.md
     Phase 1), so this only happens once the full pipeline has actually run,
     not after the raw data import in Phase 2."""
     run_id = run_id or dt.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -155,7 +174,7 @@ def run_replay_and_simulate(conn, codes, run_id=None):
     for code in codes:
         bars = db.query_daily_bars(conn, code)
         if bars:
-            bars_by_code[code] = bars
+            bars_by_code[code] = _adjusted_bars(bars)
     rs_by_code_date = bt.compute_rs_by_date(bars_by_code) if len(bars_by_code) >= 2 else {}
     if len(bars_by_code) < 2:
         print("  可用日線資料的股票不足 2 檔，RS 排名略過（其餘照常執行）")
@@ -199,7 +218,7 @@ def run_replay_and_simulate(conn, codes, run_id=None):
     db.set_meta(conn, "last_run_id", run_id)
     db.set_meta(conn, "params_json", json.dumps(bt.STRATEGY_PARAMS, ensure_ascii=False))
     # OF (orderFlow, 15/100 of SCORE_WEIGHTS) can't be reconstructed 2 years
-    # back -- see docs/backtest_plan.md Phase 4's "硬限制" section. Every
+    # back -- see docs/archive/backtest_plan.md Phase 4's "硬限制" section. Every
     # replayed score is scored as if OF contributed 0; build_suggestions()
     # (Phase 5) must check this flag to compare like with like.
     db.set_meta(conn, "of_excluded", "1")
@@ -217,6 +236,7 @@ def main():
 
     conn = db.connect()
     db.init_db(conn)
+    db.migrate(conn)
 
     if args.refresh_data:
         print(f"匯入 {len(codes)} 檔股票的日線（{DAILY_DAYS} 天）與籌碼（{CHIP_DAYS} 天）資料 ...")
@@ -225,6 +245,8 @@ def main():
             print(f"\n{len(failed)}/{len(codes)} 檔匯入失敗: {', '.join(failed)}")
         else:
             print(f"\n{len(codes)} 檔全部匯入成功")
+        print("提醒：--refresh-data 會清空重抓日線的 adj_factor（見 db.upsert_daily_bars "
+              "docstring），記得之後跑一次 scripts/build_adj_factors.py 重建還原因子。")
     else:
         print("未加 --refresh-data，不會呼叫 FinMind。目前 DB 內容：")
         for code in codes:

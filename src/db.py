@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""SQLite data-access layer for the 2-year backtest database.
+"""SQLite data-access layer for the backtest database.
 
 Pure data layer: opens connections, creates tables, and reads/writes rows.
 No analysis logic lives here -- see backtest.py for signal stats / strategy
@@ -8,7 +8,7 @@ these tables.
 
 All writes are idempotent (`INSERT OR REPLACE` on the primary key), so
 re-running an import or a replay is always safe. Uses stdlib `sqlite3` only
--- no new dependency (see docs/backtest_plan.md Phase 1).
+-- no new dependency (see docs/archive/backtest_plan.md Phase 1).
 
 Column note: `foreign` is a SQL reserved word, so the foreign-investor net
 column is named `foreign_net` throughout.
@@ -43,6 +43,18 @@ def init_db(conn):
             l REAL,
             c REAL,
             v REAL,
+            source TEXT,
+            adj_factor REAL,
+            PRIMARY KEY (code, date)
+        );
+
+        CREATE TABLE IF NOT EXISTS corporate_actions (
+            code TEXT NOT NULL,
+            date TEXT NOT NULL,
+            pre_close REAL,
+            ref_price REAL,
+            ratio REAL NOT NULL,
+            kind TEXT,
             source TEXT,
             PRIMARY KEY (code, date)
         );
@@ -128,16 +140,62 @@ def init_db(conn):
     conn.commit()
 
 
+def migrate(conn):
+    """Add columns/tables introduced after a DB was first created, without
+    touching existing rows (docs/archive/backtest_plan.md Phase 1a). Safe to
+    call on every startup, after init_db(): `ALTER TABLE ADD COLUMN` with a
+    NULL default is an O(1) metadata-only change on SQLite -- it does not
+    rewrite existing rows, so this is safe to run against a multi-million-row
+    daily_bars table. corporate_actions is created here too (also covered by
+    init_db's CREATE TABLE IF NOT EXISTS, but listed here so a single
+    migrate() call brings an old DB fully up to date)."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(daily_bars)").fetchall()}
+    if "adj_factor" not in cols:
+        conn.execute("ALTER TABLE daily_bars ADD COLUMN adj_factor REAL")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS corporate_actions (
+            code TEXT NOT NULL,
+            date TEXT NOT NULL,
+            pre_close REAL,
+            ref_price REAL,
+            ratio REAL NOT NULL,
+            kind TEXT,
+            source TEXT,
+            PRIMARY KEY (code, date)
+        )
+        """
+    )
+    conn.commit()
+
+
 # ------------------------------------------------------------ daily_bars --
 
 def upsert_daily_bars(conn, code, rows):
-    """`rows`: iterable of dicts with keys date/o/h/l/c/v/source."""
+    """`rows`: iterable of dicts with keys date/o/h/l/c/v/source.
+
+    Does NOT preserve adj_factor -- INSERT OR REPLACE overwrites the whole
+    row, and adj_factor isn't one of `rows`' keys, so it reverts to NULL for
+    every date touched. Re-running --refresh-data therefore requires
+    re-running scripts/build_adj_factors.py afterwards (see
+    docs/archive/backtest_plan.md Phase 1a)."""
     conn.executemany(
         """
         INSERT OR REPLACE INTO daily_bars (code, date, o, h, l, c, v, source)
         VALUES (:code, :date, :o, :h, :l, :c, :v, :source)
         """,
         ({**r, "code": code} for r in rows),
+    )
+    conn.commit()
+
+
+def update_adj_factors(conn, code, factors_by_date):
+    """`factors_by_date`: {date: adj_factor}. Updates existing daily_bars
+    rows in place -- does not insert new rows (a date with no matching
+    daily_bars row is silently a no-op, same as an UPDATE with no match)."""
+    conn.executemany(
+        "UPDATE daily_bars SET adj_factor = :adj_factor WHERE code = :code AND date = :date",
+        [{"code": code, "date": d, "adj_factor": f} for d, f in factors_by_date.items()],
     )
     conn.commit()
 
@@ -326,6 +384,37 @@ def query_trades(conn, run_id, code):
             ORDER BY entry_date ASC
             """,
             (run_id, code),
+        ).fetchall()
+    ]
+
+
+# -------------------------------------------------------- corporate_actions --
+
+def upsert_corporate_actions(conn, code, rows):
+    """`rows`: iterable of dicts with keys date/pre_close/ref_price/ratio/
+    kind/source (docs/archive/backtest_plan.md Phase 1b). Re-running
+    scripts/build_adj_factors.py for the same code replaces prior rows for
+    dates it recomputes but leaves other dates alone (INSERT OR REPLACE on
+    the (code, date) primary key, not a delete-then-insert)."""
+    conn.executemany(
+        """
+        INSERT OR REPLACE INTO corporate_actions (
+            code, date, pre_close, ref_price, ratio, kind, source
+        ) VALUES (
+            :code, :date, :pre_close, :ref_price, :ratio, :kind, :source
+        )
+        """,
+        ({**r, "code": code} for r in rows),
+    )
+    conn.commit()
+
+
+def query_corporate_actions(conn, code):
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM corporate_actions WHERE code = ? ORDER BY date ASC",
+            (code,),
         ).fetchall()
     ]
 

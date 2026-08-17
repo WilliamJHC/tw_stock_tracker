@@ -156,6 +156,22 @@ def _yf_history(code, period, interval):
     raise SourceError(f"yfinance: no data for {code}(.TW/.TWO)")
 
 
+def _yf_history_since(code, start_date, interval):
+    """Like _yf_history() but for an arbitrary-length window given by a
+    start date instead of yfinance's fixed period buckets ("2y"/"5y"/...) --
+    used by get_daily()'s fallback so a `days` far past 2y (e.g. the 10y
+    backtest import) doesn't silently get truncated to 2y of history."""
+    import yfinance as yf
+    for suffix in (".TW", ".TWO"):
+        try:
+            df = yf.Ticker(code + suffix).history(start=start_date, interval=interval, auto_adjust=False)
+            if df is not None and len(df) > 0:
+                return df
+        except Exception:
+            continue
+    raise SourceError(f"yfinance: no data for {code}(.TW/.TWO)")
+
+
 def _df_to_hist(df):
     hist = {"t": [], "o": [], "h": [], "l": [], "c": [], "v": []}
     for ts, row in df.iterrows():
@@ -230,7 +246,21 @@ def _twse_daily(code, months=4):
 # ---------------------------------------------------------- public API --
 
 def get_daily(code, days=730, cache=True):
-    """2y daily OHLCV. Volume unit: shares. Returns {t,o,h,l,c,v,source}.
+    """`days`-window daily OHLCV (default ~2y). Volume unit: shares. Returns
+    {t,o,h,l,c,v,source,adjusted}.
+
+    adjusted=False for finmind/twse (raw, unadjusted for splits/dividends --
+    see src/adjust.py for the separate adj_factor pipeline that back-adjusts
+    these). adjusted=True for yfinance: its "Close" column (and the o/h/l we
+    derive alongside it) is already split-adjusted upstream by Yahoo even
+    with auto_adjust=False, though not dividend-adjusted -- so a yfinance-
+    sourced bar is NOT on the same raw price scale as a finmind/twse one.
+    Callers combining adj_factor (built from finmind-scale corporate_actions,
+    see scripts/build_adj_factors.py) with a yfinance-sourced bar would
+    double-count any split. In practice this only matters when FinMind is
+    down for a `code` long enough to fall through to yfinance -- the backtest
+    DB's bars are 100% finmind-sourced as of Phase 1 (see
+    docs/archive/backtest_plan.md).
 
     cache=False skips the daily on-disk cache entirely (read and write) --
     used by the backtest importer, which pulls a much longer `days` window
@@ -259,14 +289,17 @@ def get_daily(code, days=730, cache=True):
                 hist["c"].append(float(c))
                 hist["v"].append(int(r.get("Trading_Volume") or 0))
             hist["source"] = "finmind"
+            hist["adjusted"] = False
     except (SourceError, requests.RequestException, ValueError, KeyError):
         hist = None
 
     # 2. yfinance
     if not hist or not hist["c"]:
         try:
-            hist = _df_to_hist(_yf_history(code, "2y", "1d"))
+            start = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+            hist = _df_to_hist(_yf_history_since(code, start, "1d"))
             hist["source"] = "yfinance"
+            hist["adjusted"] = True
         except (SourceError, Exception):
             hist = None
 
@@ -274,6 +307,7 @@ def get_daily(code, days=730, cache=True):
     if not hist or not hist["c"]:
         hist = _twse_daily(code)
         hist["source"] = "twse"
+        hist["adjusted"] = False
 
     if cache:
         _cache_put(f"daily_{code}", hist)
