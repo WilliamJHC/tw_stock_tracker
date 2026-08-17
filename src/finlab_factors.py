@@ -164,8 +164,19 @@ def composite_scores(universe_data, date):
     field pre-extracted, see _bar_index_on_or_before). Returns {code: score}
     for codes that pass the liquidity filter and have all three factors
     available as of `date` -- percentile ranks are computed within this
-    survivor set, matching the FinLab original's
-    `.where(liquid & close.notna())` (filter before rank, not after)."""
+    survivor set (filter, then rank).
+
+    This is NOT the same rank order as finlab_strategy.py's FinLab-backed
+    ranking_position(), which ranks over the WHOLE fetched universe first
+    and applies the liquidity/availability filter after
+    (`composite.where(liquid & close.notna())`) -- percentile rank of the
+    same liquid stock differs depending on whether the denominator is the
+    full market or only the survivor set. This module can't reproduce
+    rank-then-filter exactly anyway: scripts/run_factor_backtest.py's
+    two-stage fetch already drops non-survivors before they ever reach
+    universe_data, so a "whole universe" to rank against doesn't exist
+    here. Treat the two strategies as comparable in spirit, not bit-for-bit
+    identical rankings."""
     raw = {}
     for code, d in universe_data.items():
         bars, bar_dates = d["bars"], d["bar_dates"]

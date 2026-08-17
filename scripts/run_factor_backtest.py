@@ -178,6 +178,8 @@ def main():
     parser.add_argument("--top-n", type=int, default=ff.RANKING_TOP_N)
     parser.add_argument("--capital", type=float, default=pb.PORTFOLIO_PARAMS["initial_capital"])
     args = parser.parse_args()
+    if args.capital <= 0:
+        parser.error("--capital must be positive")
 
     codes = _load_universe(args.universe)
     print(f"universe={args.universe} ({len(codes)} codes), days={args.days}")

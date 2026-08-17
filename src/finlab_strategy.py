@@ -24,6 +24,7 @@ import env_utils
 # threshold is tuned in one place and not the other.
 from finlab_factors import (
     LIQUIDITY_MIN_TURNOVER,
+    LIQUIDITY_WINDOW,
     MOMENTUM_DAYS as RANKING_MOMENTUM_DAYS,
     RANKING_TOP_N,
     RANKING_WEIGHTS,
@@ -65,7 +66,7 @@ def _load_factors():
 
     rev_d = revenue_yoy.reindex(close.index, method="ffill")
     roe_d = roe.reindex(close.index, method="ffill")
-    liquid = (close * volume).rolling(20).mean() > LIQUIDITY_MIN_TURNOVER
+    liquid = (close * volume).rolling(LIQUIDITY_WINDOW).mean() > LIQUIDITY_MIN_TURNOVER
     return close, rev_d, roe_d, liquid
 
 

@@ -556,7 +556,11 @@ def get_monthly_revenue(code, days=760, cache=True):
     Returns [{date, revenue}] ascending, date = 1st of the revenue month
     (built from revenue_year/revenue_month, not FinMind's raw 'date' field --
     that field is an announcement-batch marker, not the revenue period), or
-    None. cache=False skips the on-disk cache (see get_daily()'s docstring)."""
+    None. Deduplicates by (year, month) keeping the last row FinMind returns
+    for that period -- restated revenue figures are a real occurrence, and
+    without this a period could otherwise produce two output rows sharing
+    one date. cache=False skips the on-disk cache (see get_daily()'s
+    docstring)."""
     cached = _cache_get(f"revenue_{code}") if cache else None
     if cached is not None:
         return cached or None
@@ -564,15 +568,15 @@ def get_monthly_revenue(code, days=760, cache=True):
     try:
         start = (dt.date.today() - dt.timedelta(days=days)).isoformat()
         rows = _finmind("TaiwanStockMonthRevenue", code, start)
-        out = []
+        by_date = {}
         for r in rows:
             rev, year, month = r.get("revenue"), r.get("revenue_year"), r.get("revenue_month")
             if rev is None or not year or not month:
                 continue
-            out.append({"date": f"{int(year):04d}-{int(month):02d}-01", "revenue": float(rev)})
-        out.sort(key=lambda x: x["date"])
-        if out:
-            result = out
+            date = f"{int(year):04d}-{int(month):02d}-01"
+            by_date[date] = {"date": date, "revenue": float(rev)}
+        if by_date:
+            result = [by_date[d] for d in sorted(by_date)]
     except (SourceError, requests.RequestException, ValueError, KeyError):
         result = None
     if cache:
