@@ -14,12 +14,12 @@ import data_sources as ds
 import db
 import pipeline as pl
 
-# 730 trading-day-ish calendar days ~= 1.5y of bars; analysis needs a 120-bar
-# warmup (ma60 + volume_profile lookback) before it can score a day, so to
-# get a full 2y of *scored* days the raw daily pull has to reach back further.
+# 3650 calendar days ~= 10y of bars; analysis needs a 120-bar warmup
+# (ma60 + volume_profile lookback) before it can score a day, so to get a
+# full 10y of *scored* days the raw daily pull has to reach back further.
 # See docs/backtest_plan.md Phase 2 "抓多久".
-DAILY_DAYS = 1000
-CHIP_DAYS = 730
+DAILY_DAYS = 3900
+CHIP_DAYS = 3650
 
 _CHIP_COLUMNS = (
     "foreign_net", "trust_net", "margin_balance", "margin_delta",
