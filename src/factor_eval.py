@@ -1,0 +1,128 @@
+# -*- coding: utf-8 -*-
+"""Factor evaluation: rank-IC, ICIR, and decay curves for the ranking
+strategy's three factors (momentum/revenue-YoY/ROE), reusing this project's
+existing rank_ic()/ic_stats() (src/metrics.py, built in Phase 0) and
+finlab_factors.py's point-in-time factor plumbing -- see docs/https-finlab-
+finance-blog-python-get-tai-memoized-lighthouse.md Phase 4 ("自建 rank-IC
+因子評估，取代 Qlib"). Pure functions over an already-fetched
+universe_data -- no I/O, no FinMind, no DB access, same split as
+backtest.py/analysis.py/portfolio_backtest.py.
+
+This answers the question src/finlab_factors.py's RANKING_WEIGHTS comment
+flags as unanswered: whether revenue 0.4 / ROE 0.3 / momentum 0.3 is a
+made-up weighting. Per-factor IC/ICIR/decay is evidence either way, not
+another guess -- see suggest_weights() for how to turn it into a proposal
+(never auto-applied; a human decides whether to adopt it).
+"""
+import finlab_factors as ff
+import metrics as m
+import portfolio_backtest as pb
+
+DEFAULT_HORIZONS = (1, 5, 20, 60)
+
+# RANKING_WEIGHTS' factor name -> the raw value key _raw_factor_values()
+# stores it under (finlab_factors.py names the revenue-YoY factor "yoy" in
+# its raw dict but "revenue" in RANKING_WEIGHTS -- this bridges the two).
+FACTOR_KEYS = {"revenue": "yoy", "roe": "roe", "momentum": "momentum"}
+
+
+def _raw_factor_values(universe_data, date):
+    """{code: {"momentum", "yoy", "roe", "_idx"}} at `date` -- same
+    liquidity-then-availability filter as finlab_factors.composite_scores()
+    (filter survivors first, only rank/evaluate within that set; see that
+    function's docstring for why this module can't evaluate against "the
+    whole market" either). `_idx` is the code's bar index at `date`, kept
+    so _forward_return() doesn't need to re-resolve it."""
+    raw = {}
+    for code, d in universe_data.items():
+        bars, bar_dates = d["bars"], d["bar_dates"]
+        idx = ff._bar_index_on_or_before(bar_dates, date)
+        if idx is None or not ff.liquidity_ok(bars, idx):
+            continue
+        mom = ff.momentum_pct(bars, idx)
+        yoy = ff._as_of(d["revenue_series"], date, "yoy_pct")
+        roe = ff._as_of(d["roe_series"], date, "roe_pct")
+        if mom is None or yoy is None or roe is None:
+            continue
+        raw[code] = {"momentum": mom, "yoy": yoy, "roe": roe, "_idx": idx}
+    return raw
+
+
+def _forward_return(bars, idx, horizon):
+    """horizon-BAR (not calendar-day) forward return from bars[idx] --
+    matches this project's existing bar-count convention (momentum_pct(),
+    max_hold_days). None if there aren't `horizon` more bars after idx."""
+    if idx + horizon >= len(bars):
+        return None
+    base = bars[idx]["c"]
+    if not base:
+        return None
+    return (bars[idx + horizon]["c"] - base) / base * 100
+
+
+def rebalance_dates(universe_data):
+    """This module's own rebalance-date source: reuses
+    portfolio_backtest.py's exact month-boundary convention (private
+    _trading_calendar/_rebalance_dates -- same package, not a public API
+    contract) so factor IC is measured at the cadence the strategy actually
+    trades on, not an arbitrary daily/weekly grid."""
+    calendar = pb._trading_calendar(universe_data)
+    return pb._rebalance_dates(calendar)
+
+
+def factor_ic_series(universe_data, dates, factor_name, horizon):
+    """[(date, ic), ...] for one factor at one holding horizon, across
+    `dates`. ic is None for a date with no cross-sectional spread (see
+    metrics.rank_ic()) or too few codes to correlate."""
+    raw_key = FACTOR_KEYS[factor_name]
+    out = []
+    for date in dates:
+        raw = _raw_factor_values(universe_data, date)
+        if not raw:
+            out.append((date, None))
+            continue
+        factor_values, forward_returns = [], []
+        for code, vals in raw.items():
+            fr = _forward_return(universe_data[code]["bars"], vals["_idx"], horizon)
+            if fr is None:
+                continue
+            factor_values.append(vals[raw_key])
+            forward_returns.append(fr)
+        out.append((date, m.rank_ic(factor_values, forward_returns)))
+    return out
+
+
+def evaluate_factors(universe_data, dates=None, horizons=DEFAULT_HORIZONS):
+    """{factor_name: {horizon: ic_stats_dict}} for every RANKING_WEIGHTS
+    factor x every horizon in `horizons` -- reading one factor across all
+    horizons IS its decay curve (docs/.../lighthouse.md Phase 4). `dates`
+    defaults to this universe's own month-boundary rebalance dates (see
+    rebalance_dates())."""
+    dates = dates if dates is not None else rebalance_dates(universe_data)
+    result = {}
+    for factor_name in FACTOR_KEYS:
+        result[factor_name] = {}
+        for horizon in horizons:
+            ic_series = [ic for _, ic in factor_ic_series(universe_data, dates, factor_name, horizon)]
+            result[factor_name][horizon] = m.ic_stats(ic_series)
+    return result
+
+
+def suggest_weights(evaluate_result, horizon=20, min_icir=0.0):
+    """Proposal ONLY for finlab_factors.RANKING_WEIGHTS -- never applied
+    automatically, a human decides whether to adopt it. Weights each factor
+    proportional to |ICIR| at `horizon` (20d matches this project's other
+    "hold ~1 month" default, see backtest.CONFIDENCE_HORIZON) among factors
+    whose |ICIR| clears `min_icir`. Returns None if no factor clears the
+    bar -- weighting by noise would be worse than keeping the current fixed
+    weights, so this function refuses to guess rather than return a
+    misleading answer."""
+    icirs = {}
+    for factor_name, by_horizon in evaluate_result.items():
+        icir = by_horizon.get(horizon, {}).get("icir")
+        if icir is not None and abs(icir) > min_icir:
+            icirs[factor_name] = abs(icir)
+    total = sum(icirs.values())
+    if not total:
+        return None
+    return {k: v / total for k, v in icirs.items()}

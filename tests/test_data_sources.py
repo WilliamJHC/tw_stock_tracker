@@ -326,3 +326,49 @@ def test_load_token_missing_file_returns_empty(tmp_path, monkeypatch):
     monkeypatch.delenv("FINMIND_TOKEN", raising=False)
     monkeypatch.setattr(ds, "BASE_DIR", str(tmp_path))
     assert ds._load_token() == ""
+
+
+# ------------------------------------------------------------------ fugle --
+# _fugle_daily() itself is UNVERIFIED against a real Fugle account/key (see
+# its docstring) -- these tests only lock down this module's OWN contract
+# (inert without a key, raises/parses as expected when it does call out),
+# not that the mocked response shape matches Fugle's real API.
+
+def test_fugle_daily_inert_without_api_key(monkeypatch):
+    monkeypatch.setattr(ds, "FUGLE_API_KEY", "")
+    with patch("data_sources.requests.get", side_effect=_no_network):
+        with pytest.raises(ds.SourceError):
+            ds._fugle_daily("2330", "2024-01-01")
+
+
+def test_fugle_daily_parses_candles(monkeypatch):
+    monkeypatch.setattr(ds, "FUGLE_API_KEY", "fake-key")
+    rows = [
+        {"date": "2024-01-02", "open": 590.0, "high": 593.0, "low": 589.0, "close": 593.0, "volume": 27997826},
+        {"date": "2024-01-03", "open": 584.0, "high": 585.0, "low": 576.0, "close": 578.0, "volume": 40134497},
+    ]
+    with patch("data_sources.requests.get", return_value=_fake_response(data=rows)) as mock_get:
+        hist = ds._fugle_daily("2330", "2024-01-01")
+    assert hist["c"] == [593.0, 578.0]
+    assert hist["v"] == [27997826, 40134497]
+    call_kwargs = mock_get.call_args.kwargs
+    assert call_kwargs["headers"]["X-API-KEY"] == "fake-key"
+    assert "2330" in mock_get.call_args.args[0]
+
+
+def test_fugle_daily_empty_response_raises(monkeypatch):
+    monkeypatch.setattr(ds, "FUGLE_API_KEY", "fake-key")
+    with patch("data_sources.requests.get", return_value=_fake_response(data=[])):
+        with pytest.raises(ds.SourceError):
+            ds._fugle_daily("2330", "2024-01-01")
+
+
+def test_load_fugle_key_prefers_env_var(monkeypatch):
+    monkeypatch.setenv("FUGLE_API_KEY", "env-fugle-key")
+    assert ds._load_fugle_key() == "env-fugle-key"
+
+
+def test_load_fugle_key_missing_returns_empty(tmp_path, monkeypatch):
+    monkeypatch.delenv("FUGLE_API_KEY", raising=False)
+    monkeypatch.setattr(ds, "BASE_DIR", str(tmp_path))
+    assert ds._load_fugle_key() == ""

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Data layer with source priority FinMind > yfinance > TWSE.
+"""Data layer with source priority FinMind > Fugle > yfinance > TWSE.
 
 Every public getter returns plain dicts/lists (JSON-ready) and tags the
 actual source used, so the UI can show where each number came from.
@@ -55,6 +55,13 @@ def _load_token():
 
 
 FINMIND_TOKEN = _load_token()
+
+
+def _load_fugle_key():
+    return env_utils.load_env_value("FUGLE_API_KEY", BASE_DIR)
+
+
+FUGLE_API_KEY = _load_fugle_key()
 
 
 def data_tier():
@@ -192,6 +199,63 @@ def _df_to_hist(df):
     return hist
 
 
+# ----------------------------------------------------------------- fugle --
+
+FUGLE_URL = "https://api.fugle.tw/marketdata/v1.0/stock/historical/candles/{symbol}"
+
+
+def _fugle_daily(code, start_date):
+    """Fugle MarketData v1.0 daily candles -- a FinMind 429/402 (rate-limit/
+    quota) long-range fallback, inserted in get_daily()'s chain AFTER
+    FinMind and BEFORE yfinance (docs/https-finlab-finance-blog-python-get-
+    tai-memoized-lighthouse.md Phase 4: "接，但只接一個位置" -- NOT a
+    replacement for FinMind, and yfinance must stay below it since it's the
+    only free source with a full back-adjusted series, see get_daily()'s
+    docstring and that Phase's "不要為了接富果而降級 yfinance" warning).
+
+    >>> UNVERIFIED <<< endpoint path, X-API-KEY header, and response shape
+    follow Fugle's public MarketData API docs, but this has never been
+    exercised against a real key/account (no FUGLE_API_KEY was available
+    while writing this). Confirm against a live key before trusting it in
+    production. Until then this is inert: _load_fugle_key() returns "" with
+    no key configured, so this raises immediately and get_daily() behaves
+    exactly as it did before this function existed.
+
+    Assumes raw (unadjusted, FinMind-scale) prices -- also UNCONFIRMED; if a
+    real key shows Fugle's Close is already split-adjusted like yfinance's,
+    get_daily()'s `adjusted` flag for this branch needs to flip to True.
+    """
+    if not FUGLE_API_KEY:
+        raise SourceError("fugle: no FUGLE_API_KEY configured")
+    end_date = dt.date.today().isoformat()
+    resp = requests.get(
+        FUGLE_URL.format(symbol=code),
+        headers={"X-API-KEY": FUGLE_API_KEY, **UA},
+        params={"from": start_date, "to": end_date, "fields": "open,high,low,close,volume"},
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise SourceError(f"fugle: HTTP {resp.status_code} for {code}")
+    rows = (resp.json() or {}).get("data") or []
+    if not rows:
+        raise SourceError(f"fugle: no data for {code}")
+    hist = {"t": [], "o": [], "h": [], "l": [], "c": [], "v": []}
+    for r in rows:
+        c = r.get("close")
+        if c is None:
+            continue
+        d = dt.datetime.strptime(r["date"], "%Y-%m-%d")
+        hist["t"].append(int(d.timestamp()))
+        hist["o"].append(float(r.get("open") or c))
+        hist["h"].append(float(r.get("high") or c))
+        hist["l"].append(float(r.get("low") or c))
+        hist["c"].append(float(c))
+        hist["v"].append(int(r.get("volume") or 0))
+    if not hist["c"]:
+        raise SourceError(f"fugle: all rows unusable for {code}")
+    return hist
+
+
 # ----------------------------------------------------------------- twse --
 
 def _roc_to_ts(roc_date):
@@ -249,18 +313,19 @@ def get_daily(code, days=730, cache=True):
     """`days`-window daily OHLCV (default ~2y). Volume unit: shares. Returns
     {t,o,h,l,c,v,source,adjusted}.
 
-    adjusted=False for finmind/twse (raw, unadjusted for splits/dividends --
-    see src/adjust.py for the separate adj_factor pipeline that back-adjusts
-    these). adjusted=True for yfinance: its "Close" column (and the o/h/l we
-    derive alongside it) is already split-adjusted upstream by Yahoo even
-    with auto_adjust=False, though not dividend-adjusted -- so a yfinance-
-    sourced bar is NOT on the same raw price scale as a finmind/twse one.
-    Callers combining adj_factor (built from finmind-scale corporate_actions,
-    see scripts/build_adj_factors.py) with a yfinance-sourced bar would
-    double-count any split. In practice this only matters when FinMind is
-    down for a `code` long enough to fall through to yfinance -- the backtest
-    DB's bars are 100% finmind-sourced as of Phase 1 (see
-    docs/archive/backtest_plan.md).
+    adjusted=False for finmind/fugle/twse (raw, unadjusted for splits/
+    dividends -- see src/adjust.py for the separate adj_factor pipeline that
+    back-adjusts these; fugle's raw-scale assumption is UNCONFIRMED, see
+    _fugle_daily()'s docstring). adjusted=True for yfinance: its "Close"
+    column (and the o/h/l we derive alongside it) is already split-adjusted
+    upstream by Yahoo even with auto_adjust=False, though not dividend-
+    adjusted -- so a yfinance-sourced bar is NOT on the same raw price scale
+    as a finmind/fugle/twse one. Callers combining adj_factor (built from
+    finmind-scale corporate_actions, see scripts/build_adj_factors.py) with
+    a yfinance-sourced bar would double-count any split. In practice this
+    only matters when FinMind is down for a `code` long enough to fall
+    through past Fugle to yfinance -- the backtest DB's bars are 100%
+    finmind-sourced as of Phase 1 (see docs/archive/backtest_plan.md).
 
     cache=False skips the daily on-disk cache entirely (read and write) --
     used by the backtest importer, which pulls a much longer `days` window
@@ -293,7 +358,18 @@ def get_daily(code, days=730, cache=True):
     except (SourceError, requests.RequestException, ValueError, KeyError):
         hist = None
 
-    # 2. yfinance
+    # 2. Fugle (FinMind 429/402 long-range fallback -- UNVERIFIED against a
+    # real key, and inert without one; see _fugle_daily()'s docstring)
+    if not hist or not hist["c"]:
+        try:
+            start = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+            hist = _fugle_daily(code, start)
+            hist["source"] = "fugle"
+            hist["adjusted"] = False  # UNCONFIRMED, see _fugle_daily() docstring
+        except (SourceError, requests.RequestException, ValueError, KeyError):
+            hist = None
+
+    # 3. yfinance
     if not hist or not hist["c"]:
         try:
             start = (dt.date.today() - dt.timedelta(days=days)).isoformat()
@@ -303,7 +379,7 @@ def get_daily(code, days=730, cache=True):
         except (SourceError, Exception):
             hist = None
 
-    # 3. TWSE (short window fallback)
+    # 4. TWSE (short window fallback)
     if not hist or not hist["c"]:
         hist = _twse_daily(code)
         hist["source"] = "twse"
