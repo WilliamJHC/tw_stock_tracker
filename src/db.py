@@ -140,6 +140,18 @@ def init_db(conn):
         CREATE INDEX IF NOT EXISTS idx_trades_run_code
             ON trades (run_id, code);
 
+        CREATE TABLE IF NOT EXISTS optimization_runs (
+            run_id TEXT NOT NULL,
+            trial_id INTEGER NOT NULL,
+            code TEXT,
+            param_name TEXT,
+            fold_idx INTEGER,
+            params_json TEXT NOT NULL,
+            score REAL,
+            computed_at TEXT,
+            PRIMARY KEY (run_id, trial_id)
+        );
+
         CREATE TABLE IF NOT EXISTS meta (
             key TEXT NOT NULL PRIMARY KEY,
             value TEXT
@@ -184,6 +196,21 @@ def migrate(conn):
                       "c_orderFlow", "c_gapTracker", "c_donchianPosition", "c_rsRanking"):
         if comp_col not in score_history_cols:
             conn.execute(f"ALTER TABLE score_history ADD COLUMN {comp_col} REAL")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS optimization_runs (
+            run_id TEXT NOT NULL,
+            trial_id INTEGER NOT NULL,
+            code TEXT,
+            param_name TEXT,
+            fold_idx INTEGER,
+            params_json TEXT NOT NULL,
+            score REAL,
+            computed_at TEXT,
+            PRIMARY KEY (run_id, trial_id)
+        )
+        """
+    )
     conn.commit()
 
 
@@ -417,6 +444,50 @@ def query_trades(conn, run_id, code):
             (run_id, code),
         ).fetchall()
     ]
+
+
+# ---------------------------------------------------- optimization_runs --
+
+def upsert_optimization_trials(conn, run_id, rows):
+    """`rows`: iterable of dicts with keys trial_id/code/param_name/
+    fold_idx/params_json/score/computed_at (src/optimize.py's
+    sweep_param_walk_forward() "trials" output, reshaped by the caller --
+    see scripts/run_optimize.py). Persists EVERY trial, winners and losers
+    alike, so DSR's n_trials can be recomputed later from
+    COUNT(*) instead of trusting a number carried around in memory
+    (docs/https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md
+    Phase 5: "含真實累計 n_trials，含被丟棄的試驗，讓 DSR 可事後重算")."""
+    conn.executemany(
+        """
+        INSERT OR REPLACE INTO optimization_runs (
+            run_id, trial_id, code, param_name, fold_idx, params_json, score, computed_at
+        ) VALUES (
+            :run_id, :trial_id, :code, :param_name, :fold_idx, :params_json, :score, :computed_at
+        )
+        """,
+        ({**r, "run_id": run_id} for r in rows),
+    )
+    conn.commit()
+
+
+def query_optimization_trials(conn, run_id):
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM optimization_runs WHERE run_id = ? ORDER BY trial_id ASC",
+            (run_id,),
+        ).fetchall()
+    ]
+
+
+def count_optimization_trials(conn, run_id):
+    """The real, persisted n_trials for `run_id` -- see
+    upsert_optimization_trials()'s docstring on why this must be a COUNT(*)
+    against stored rows, not a number threaded through in-memory state."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM optimization_runs WHERE run_id = ?", (run_id,)
+    ).fetchone()
+    return row["n"] if row else 0
 
 
 # -------------------------------------------------------- corporate_actions --

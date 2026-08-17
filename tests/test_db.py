@@ -173,6 +173,50 @@ def test_trades_insert_replaces_prior_rows_for_same_run_and_code(tmp_path):
     conn.close()
 
 
+def test_optimization_trials_round_trip_and_count(tmp_path):
+    conn = _conn(tmp_path)
+    rows = [
+        {"trial_id": 0, "code": "2330", "param_name": "exit_composite", "fold_idx": 0,
+         "params_json": '{"exit_composite": -60}', "score": 12.3, "computed_at": "2024-01-01T00:00:00"},
+        {"trial_id": 1, "code": "2330", "param_name": "exit_composite", "fold_idx": 0,
+         "params_json": '{"exit_composite": -40}', "score": None, "computed_at": "2024-01-01T00:00:00"},
+    ]
+    db.upsert_optimization_trials(conn, "opt_run1", rows)
+    out = db.query_optimization_trials(conn, "opt_run1")
+    assert len(out) == 2
+    assert out[0]["trial_id"] == 0 and out[0]["score"] == 12.3
+    assert out[1]["score"] is None  # a discarded/unscoreable trial is still persisted, not dropped
+    assert db.count_optimization_trials(conn, "opt_run1") == 2
+    assert db.count_optimization_trials(conn, "no_such_run") == 0
+    conn.close()
+
+
+def test_optimization_trials_upsert_replaces_same_trial_id(tmp_path):
+    conn = _conn(tmp_path)
+    db.upsert_optimization_trials(conn, "opt_run1", [
+        {"trial_id": 0, "code": "2330", "param_name": "exit_composite", "fold_idx": 0,
+         "params_json": '{"exit_composite": -60}', "score": 1.0, "computed_at": "t0"},
+    ])
+    db.upsert_optimization_trials(conn, "opt_run1", [
+        {"trial_id": 0, "code": "2330", "param_name": "exit_composite", "fold_idx": 0,
+         "params_json": '{"exit_composite": -60}', "score": 99.0, "computed_at": "t1"},
+    ])
+    out = db.query_optimization_trials(conn, "opt_run1")
+    assert len(out) == 1
+    assert out[0]["score"] == 99.0
+    conn.close()
+
+
+def test_migrate_adds_optimization_runs_table_to_old_db(tmp_path):
+    conn = _conn(tmp_path)
+    conn.execute("DROP TABLE optimization_runs")
+    conn.commit()
+    db.migrate(conn)
+    tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "optimization_runs" in tables
+    conn.close()
+
+
 def test_meta_round_trip_and_default(tmp_path):
     conn = _conn(tmp_path)
     db.set_meta(conn, "last_run_at", "2024-12-31T00:00:00")
