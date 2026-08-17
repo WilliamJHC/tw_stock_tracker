@@ -89,6 +89,50 @@ def test_simulate_fee_reduces_return_vs_zero_fee():
     assert with_fee["equity_curve"][-1]["equity"] < no_fee["equity_curve"][-1]["equity"]
 
 
+# ------------------------------------------ Phase 3 item 5: lot rounding/slippage --
+
+def test_floor_to_lot_hand_computed():
+    assert pb._floor_to_lot(2999, 1000) == 2000
+    assert pb._floor_to_lot(3000, 1000) == 3000
+    assert pb._floor_to_lot(500, 1000) == 0
+    assert pb._floor_to_lot(1234.5, 0) == 1234.5  # lot_size falsy -> no rounding
+    assert pb._floor_to_lot(1234.5, None) == 1234.5
+
+
+def test_simulate_lot_rounding_produces_whole_lot_share_counts():
+    universe = {"A": _entry(100, 0.5), "B": _entry(80, 0.4)}
+    result = pb.simulate(universe, params={"top_n": 2, "lot_size": 1000})
+    buys = [t for t in result["trades"] if t["side"] == "buy"]
+    assert buys  # at least one buy happened
+    for t in buys:
+        assert t["shares"] % 1000 == 0
+
+
+def test_simulate_lot_rounding_disabled_allows_fractional_shares():
+    universe = {"A": _entry(100, 0.5), "B": _entry(80, 0.4)}
+    result = pb.simulate(universe, params={"top_n": 2, "lot_size": 0, "slippage_pct": 0.0})
+    buys = [t for t in result["trades"] if t["side"] == "buy"]
+    assert buys
+    # with lot rounding off, target_value_each is hit ~exactly -> shares are
+    # essentially never an exact multiple of 1000 for these hand-picked prices
+    assert any(t["shares"] % 1000 != 0 for t in buys)
+
+
+def test_simulate_slippage_reduces_return_vs_zero_slippage():
+    universe = {"A": _entry(100, 0.5), "B": _entry(80, 0.4)}
+    no_slip = pb.simulate(universe, params={"top_n": 2, "slippage_pct": 0.0})
+    with_slip = pb.simulate(universe, params={"top_n": 2, "slippage_pct": 5.0})
+    assert with_slip["equity_curve"][-1]["equity"] < no_slip["equity_curve"][-1]["equity"]
+
+
+def test_simulate_slippage_moves_trade_fill_price_away_from_quote():
+    universe = {"A": _entry(100, 0.5), "B": _entry(80, 0.4)}
+    result = pb.simulate(universe, params={"top_n": 2, "slippage_pct": 1.0, "lot_size": 0})
+    buy = next(t for t in result["trades"] if t["side"] == "buy")
+    quote = next(b["c"] for b in universe[buy["code"]]["bars"] if b["date"] == buy["date"])
+    assert abs(buy["price"] - quote * 1.01) < 1e-9  # buys fill above the quote
+
+
 # --------------------------------------------------------- _compute_metrics --
 
 def test_compute_metrics_hand_computed_flat_curve():

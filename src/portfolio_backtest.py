@@ -10,11 +10,22 @@ backtest.py deliberately doesn't do -- see its module docstring).
 
 Simplifications (recorded, not hidden -- every threshold below is a named
 product-judgment default):
-  - Fractional shares. Real trading only fills whole 1000-share lots; this
-    engine sizes each name to an equal fraction of portfolio value exactly.
-    Mirrors how the FinLab original also backtests on % weights under the
-    hood, not literal share counts. Lot rounding is a real future gap, not
-    modeled here.
+  - Whole-lot (張, 1000-share) rounding: PORTFOLIO_PARAMS["lot_size"]. Every
+    rebalance buy/sell is floored to the nearest whole lot -- real TWSE/TPEx
+    fills don't do fractional lots. Leftover cash from the floor just sits
+    idle until the next rebalance rather than chasing the last few shares
+    (docs/https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md
+    Phase 3 item 5 -- this REPLACES the earlier fractional-share
+    simplification the module used to have). Set lot_size=0/None to fall
+    back to the old exact-fraction sizing (useful for isolating other
+    effects in a test).
+  - slippage_pct: one-way market-impact/spread cost, applied only to the
+    EXECUTED fill price (buys fill above the quoted close, sells fill
+    below it) -- position SIZING (target_value_each, diff_value, how many
+    lots to trade) still uses the quoted close, matching how a real order's
+    intended size is decided before the fill price is known. Default 0.1%
+    is a product-judgment placeholder (not derived from real fill data);
+    same "明確不做" Phase 3 item 5 as lot_size.
   - fee_pct is a flat ROUND-TRIP cost (matches backtest.STRATEGY_PARAMS'
     convention: 0.1425% commission x2 + 0.3% tax ~= 0.6%), split evenly
     across the buy leg and the sell leg (0.3% each) rather than modeled as
@@ -32,7 +43,17 @@ PORTFOLIO_PARAMS = {
     "initial_capital": 1_000_000,  # NTD
     "top_n": ff.RANKING_TOP_N,
     "fee_pct": 0.6,  # round-trip, see module docstring
+    "lot_size": 1000,  # whole-share-lot (張) rounding, see module docstring
+    "slippage_pct": 0.1,  # one-way, see module docstring
 }
+
+
+def _floor_to_lot(shares, lot_size):
+    """Round down to the nearest whole lot. lot_size falsy (0/None) skips
+    rounding -- see module docstring's fractional-sizing fallback."""
+    if not lot_size:
+        return shares
+    return math.floor(shares / lot_size) * lot_size
 
 
 def _trading_calendar(universe_data):
@@ -85,6 +106,8 @@ def simulate(universe_data, params=None):
     if params:
         p.update(params)
     leg_fee = p["fee_pct"] / 2 / 100
+    slip = p.get("slippage_pct", 0.0) / 100
+    lot_size = p.get("lot_size", 0)
 
     calendar = _trading_calendar(universe_data)
     if not calendar:
@@ -95,7 +118,7 @@ def simulate(universe_data, params=None):
     bar_dates = {code: d["bar_dates"] for code, d in universe_data.items()}
 
     cash = p["initial_capital"]
-    holdings = {}  # code -> shares (fractional, see module docstring)
+    holdings = {}  # code -> shares, whole-lot multiples once lot_size>0 (see module docstring)
     equity_curve, trades = [], []
 
     for date in calendar:
@@ -107,9 +130,10 @@ def simulate(universe_data, params=None):
                 px = prices[code].get(date)
                 if not px:
                     continue  # halted/no print today -- carry the position, retry next rebalance
-                proceeds = holdings[code] * px * (1 - leg_fee)
+                sell_fill = px * (1 - slip)
+                proceeds = holdings[code] * sell_fill * (1 - leg_fee)
                 cash += proceeds
-                trades.append({"date": date, "code": code, "side": "sell", "price": px, "shares": holdings[code]})
+                trades.append({"date": date, "code": code, "side": "sell", "price": sell_fill, "shares": holdings[code]})
                 del holdings[code]
 
             port_value = _mark_to_market(cash, holdings, prices, bar_dates, date)
@@ -131,17 +155,23 @@ def simulate(universe_data, params=None):
                     current_shares = holdings.get(code, 0)
                     diff_value = target_value_each - current_shares * px
                     if diff_value > 0:
-                        buy_shares = diff_value / (px * (1 + leg_fee))
-                        cost = buy_shares * px * (1 + leg_fee)
+                        buy_fill = px * (1 + slip)
+                        buy_shares = _floor_to_lot(diff_value / (buy_fill * (1 + leg_fee)), lot_size)
+                        if buy_shares <= 0:
+                            continue  # too small for even one lot -- cash sits idle till next rebalance
+                        cost = buy_shares * buy_fill * (1 + leg_fee)
                         if cost <= cash:
                             cash -= cost
                             holdings[code] = current_shares + buy_shares
-                            trades.append({"date": date, "code": code, "side": "buy", "price": px, "shares": buy_shares})
+                            trades.append({"date": date, "code": code, "side": "buy", "price": buy_fill, "shares": buy_shares})
                     elif diff_value < 0:
-                        sell_shares = -diff_value / px
-                        cash += sell_shares * px * (1 - leg_fee)
+                        sell_fill = px * (1 - slip)
+                        sell_shares = min(_floor_to_lot(-diff_value / px, lot_size), current_shares)
+                        if sell_shares <= 0:
+                            continue
+                        cash += sell_shares * sell_fill * (1 - leg_fee)
                         holdings[code] = current_shares - sell_shares
-                        trades.append({"date": date, "code": code, "side": "sell", "price": px, "shares": sell_shares})
+                        trades.append({"date": date, "code": code, "side": "sell", "price": sell_fill, "shares": sell_shares})
 
         equity_curve.append({"date": date, "equity": _mark_to_market(cash, holdings, prices, bar_dates, date)})
 

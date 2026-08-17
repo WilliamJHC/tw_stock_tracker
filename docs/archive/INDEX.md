@@ -2,7 +2,7 @@
 
 > ⚠️ **本資料夾僅供歷史參考，內容不再維護。**
 > 這些是各次 session 的**當時**計畫快照，不是待辦清單。文中的「現況」「行號」「尚未實作」等敘述都停在撰寫當天，多數項目早已完成或被後續計畫取代。實際完成度以 `git log` 與 `pytest tests\ -q` 為準。
-> 現行計畫在上一層的 [../backtest_plan.md](../backtest_plan.md)。
+> 現行計畫在上一層的 [../https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md](../https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md)（原本連到的 `backtest_plan.md` 已完成並歸檔進本資料夾：[backtest_plan.md](backtest_plan.md)）。
 
 這些檔案於 2026-07-27 從 `~/.claude/plans/` 集中搬入（原檔名為自動產生的隨機字串，已依日期與主題重新命名）。
 

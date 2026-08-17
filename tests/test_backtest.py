@@ -258,7 +258,9 @@ def test_simulate_composite_exit_distinct_from_action_sell():
         {"date": "d2", "action": "今日關注", "composite": -15},  # action != 減碼警示, but composite<=-10
         {"date": "d3", "action": "無變化", "composite": 0},
     ]
-    out = bt.simulate(score_rows, bars)
+    # exit_composite explicit here (not STRATEGY_PARAMS' Phase 3 default of
+    # -40) so this test stays independent of that default's own value.
+    out = bt.simulate(score_rows, bars, params={"exit_composite": -10})
     t = out["trades"][0]
     assert t["exit_reason"] == "composite_exit"
     assert t["entry_price"] == bars[2]["o"] and t["exit_price"] == bars[3]["o"]

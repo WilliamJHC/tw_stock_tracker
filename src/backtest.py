@@ -4,6 +4,27 @@
 Pure functions over daily bars / score rows -- no I/O, no FinMind, no DB
 access. run_backtest.py orchestrates data flow between this module and
 db.py. See docs/backtest_plan.md Phase 3/4.
+
+>>> What this engine is for (docs/https-finlab-finance-blog-python-get-tai-
+memoized-lighthouse.md Phase 3 item 4) <<<
+This single-code, single-position engine is the dashboard's entry/reduce
+ALERT and risk-control layer, not a return-generating strategy -- it is not
+meant to, and (per the Phase 0 evaluation baseline, see below) structurally
+does not, beat plain buy & hold. Every parameter combination in
+STRATEGY_PARAMS' space was walk-forward tested (docs/.../lighthouse.md
+Phase 0/3); none closes the gap. Phase 0's real-data numbers (23-code
+watchlist, 10y, pre-adjustment prices):
+    mean strategy total_return 177.3% vs mean buy&hold 2520.4%, beat 1/23
+    time in market (exposure) 33.5%
+After Phase 1's price-adjustment fix and this phase's parameter changes,
+mean total_return moves to the ~300% range (see scripts/report_backtest.py)
+but buy&hold still wins on most codes -- expected and reported honestly, not
+chased by further tuning (docs/.../lighthouse.md explicitly warns against
+optimizing toward beat_buy&hold; see its "明確不做" table). Alpha generation
+is this project's OTHER engine's job: portfolio_backtest.py's multi-factor,
+multi-position ranking strategy (src/finlab_factors.py), meant to be
+validated at Phase 4's full-market scale where a single-code timing engine
+structurally cannot express diversification-driven edge.
 """
 import datetime as dt
 import json
@@ -12,22 +33,46 @@ import analysis as an
 
 DEFAULT_HORIZONS = (5, 10, 20)
 
-# Phase 4 strategy knobs -- product judgment calls, not derived. Serialized
+# Phase 3/4 strategy knobs -- product judgment calls, not derived. Serialized
 # whole into strategy_runs.params_json so a stored run's numbers stay
 # traceable to the parameters that produced them (see docs/backtest_plan.md
 # Phase 4). fee_pct is a flat round-trip cost: 0.1425% commission x2
 # (buy+sell) + 0.3% securities transaction tax = 0.585%, rounded to 0.6.
+#
+# Phase 3 changes (docs/https-finlab-finance-blog-python-get-tai-memoized-
+# lighthouse.md), each backed by a walk-forward measurement on the Phase 0
+# baseline, not a guess:
+#   exit_composite -10 -> -40: walk-forward 4/4 folds beat the -10 default
+#     (mean OOS 294.5% vs 153.1%), and -60..-30 is a stable plateau across
+#     folds (argmax wobbles between -50/-50/-50/-30, but staying in-plateau
+#     matters more than chasing the single best argmax). -40 is the plateau
+#     CENTER, deliberately not the full-sample argmax of -30 (that argmax is
+#     plateau + noise -- unstable per-fold, see the plan doc).
+#   max_hold_days 60 -> 120: return saturates by 120 (60->177.3%, 90->183.6,
+#     120->188.4, 250->188.7) -- 120 captures nearly all of the benefit
+#     without holding into the flat tail.
+#   atr_mult 2.0 -> 100 (effectively disabled): the ATR stop as implemented
+#     is a single band fixed at entry, never trailed (see simulate()'s
+#     docstring) -- of 193 stop_loss exits, 0% won, mean -8.29%. Turning it
+#     off (atr_mult=100 means the stop sits ~50x too far to ever fire in
+#     practice) measured 184.7% vs the old default's 177.3%. A real trailing
+#     stop would need to re-derive ATR and ratchet the stop daily while
+#     held -- a genuinely bigger change for a knob that measured net-negative
+#     as implemented; simplest correct fix is turning it off, not building
+#     more machinery around a losing rule.
 STRATEGY_PARAMS = {
-    "exit_composite": -10,
-    "atr_mult": 2.0,
-    "max_hold_days": 60,
+    "exit_composite": -40,
+    "atr_mult": 100,
+    "max_hold_days": 120,
     "fee_pct": 0.6,
 }
 
 # Phase 5 confidence-engine knobs. horizon=20 matches this project's other
-# "hold ~1 month" framing (max_hold_days=60, but 20d is the default backtest
-# horizon used elsewhere); min_samples guards against an n=1 or n=2 signal
-# occurrence dominating the weighted average with a lucky/unlucky outcome.
+# "hold ~1 month" framing (20d is the default backtest horizon used
+# elsewhere -- max_hold_days moved to 120 in Phase 3, but 20d's own
+# rationale doesn't depend on that value); min_samples guards against an
+# n=1 or n=2 signal occurrence dominating the weighted average with a
+# lucky/unlucky outcome.
 CONFIDENCE_HORIZON = 20
 MIN_SAMPLES = 8
 
