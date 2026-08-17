@@ -85,6 +85,15 @@ def init_db(conn):
             priority REAL,
             action TEXT,
             signals_json TEXT,
+            c_maPosition REAL,
+            c_maAlign REAL,
+            c_volumePrice REAL,
+            c_trend REAL,
+            c_vpPosition REAL,
+            c_orderFlow REAL,
+            c_gapTracker REAL,
+            c_donchianPosition REAL,
+            c_rsRanking REAL,
             PRIMARY KEY (code, date)
         );
 
@@ -148,7 +157,11 @@ def migrate(conn):
     rewrite existing rows, so this is safe to run against a multi-million-row
     daily_bars table. corporate_actions is created here too (also covered by
     init_db's CREATE TABLE IF NOT EXISTS, but listed here so a single
-    migrate() call brings an old DB fully up to date)."""
+    migrate() call brings an old DB fully up to date). The 9 score_history
+    c_* columns are the unweighted per-dimension components analyze() now
+    returns (docs/https-finlab-finance-blog-python-get-tai-memoized-
+    lighthouse.md Phase 2b) -- letting SCORE_WEIGHTS re-tuning read a dot
+    product off stored rows instead of re-running replay_scores()."""
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(daily_bars)").fetchall()}
     if "adj_factor" not in cols:
         conn.execute("ALTER TABLE daily_bars ADD COLUMN adj_factor REAL")
@@ -166,6 +179,11 @@ def migrate(conn):
         )
         """
     )
+    score_history_cols = {row["name"] for row in conn.execute("PRAGMA table_info(score_history)").fetchall()}
+    for comp_col in ("c_maPosition", "c_maAlign", "c_volumePrice", "c_trend", "c_vpPosition",
+                      "c_orderFlow", "c_gapTracker", "c_donchianPosition", "c_rsRanking"):
+        if comp_col not in score_history_cols:
+            conn.execute(f"ALTER TABLE score_history ADD COLUMN {comp_col} REAL")
     conn.commit()
 
 
@@ -251,18 +269,31 @@ def query_chip_daily(conn, code, start_date=None, end_date=None):
 
 # --------------------------------------------------------- score_history --
 
+SCORE_HISTORY_COMPONENT_COLS = (
+    "c_maPosition", "c_maAlign", "c_volumePrice", "c_trend", "c_vpPosition",
+    "c_orderFlow", "c_gapTracker", "c_donchianPosition", "c_rsRanking",
+)
+
+
 def upsert_score_history(conn, code, rows):
     """`rows`: iterable of dicts with keys date/tech_score/chip_score/
-    composite/priority/action/signals_json."""
+    composite/priority/action/signals_json, plus the optional 9 unweighted
+    SCORE_WEIGHTS component columns (SCORE_HISTORY_COMPONENT_COLS, see
+    analysis.analyze()'s `components` output) -- NULL if a row's dict
+    doesn't have them (e.g. a hand-built row that predates Phase 2b)."""
     conn.executemany(
         """
         INSERT OR REPLACE INTO score_history (
-            code, date, tech_score, chip_score, composite, priority, action, signals_json
+            code, date, tech_score, chip_score, composite, priority, action, signals_json,
+            c_maPosition, c_maAlign, c_volumePrice, c_trend, c_vpPosition,
+            c_orderFlow, c_gapTracker, c_donchianPosition, c_rsRanking
         ) VALUES (
-            :code, :date, :tech_score, :chip_score, :composite, :priority, :action, :signals_json
+            :code, :date, :tech_score, :chip_score, :composite, :priority, :action, :signals_json,
+            :c_maPosition, :c_maAlign, :c_volumePrice, :c_trend, :c_vpPosition,
+            :c_orderFlow, :c_gapTracker, :c_donchianPosition, :c_rsRanking
         )
         """,
-        ({**r, "code": code} for r in rows),
+        ({**{c: None for c in SCORE_HISTORY_COMPONENT_COLS}, **r, "code": code} for r in rows),
     )
     conn.commit()
 

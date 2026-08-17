@@ -116,7 +116,16 @@ def replay_scores(bars, inst, margin, shareholding, sbl, rs_by_date=None, warmup
 
     - bar i's daily series is sliced to [:i+1] (protection #1) -- analyze()
       only ever reads index -1 as "today", so this slice is the only input
-      an.analyze() gets to see for that bar.
+      an.analyze() gets to see for that bar. The one exception is
+      ma5/ma20/ma60/vol20/quadrant: an.build_backtest_ctx() is built ONCE
+      here over the code's full history and passed to every an.analyze()
+      call via ctx=/at=i, instead of being rebuilt from an ever-growing
+      prefix on every bar -- those 5 series are causal (only read index <=
+      i), so this is bit-identical to the old per-bar rebuild while cutting
+      replay_scores() from O(n^2) to O(n) in n (docs/https-finlab-finance-
+      blog-python-get-tai-memoized-lighthouse.md Phase 2a). Every other
+      indicator in analyze() still reads off daily_slice's own length, so
+      the [:i+1] slice above is still what keeps them lookahead-free.
     - chip rows (inst/margin/shareholding/sbl) are cut off at the PREVIOUS
       bar's date, not bar i's own date (protection #2): a trading day's
       institutional/margin/shareholding/SBL figures are published after
@@ -155,6 +164,9 @@ def replay_scores(bars, inst, margin, shareholding, sbl, rs_by_date=None, warmup
     closes = [b["c"] for b in bars]
     vols = [b["v"] for b in bars]
 
+    full_daily = {"t": times, "o": opens, "h": highs, "l": lows, "c": closes, "v": vols}
+    ctx = an.build_backtest_ctx(full_daily)  # built once, see docstring above
+
     rows = []
     for i in range(warmup, n):
         date = dates[i]
@@ -172,12 +184,14 @@ def replay_scores(bars, inst, margin, shareholding, sbl, rs_by_date=None, warmup
         result = an.analyze(daily_slice, minute=None, tick_days=None,
                             inst=inst_slice, margin=margin_slice,
                             shareholding=shareholding_slice, sbl=sbl_slice,
-                            rs_info=rs_info, with_backtest=False)
+                            rs_info=rs_info, with_backtest=False,
+                            ctx=ctx, at=i)
         if result is None:
             continue
         attention = an.compute_attention(result["score"], result.get("chip"), result)
         chip_score = result["chip"]["score"] if result.get("chip") else None
         triggered = [s["bt"] for s in result["signals"] if s.get("bt")]
+        components = result["components"]
         rows.append({
             "date": date,
             "tech_score": result["score"],
@@ -186,6 +200,15 @@ def replay_scores(bars, inst, margin, shareholding, sbl, rs_by_date=None, warmup
             "priority": attention["priority"],
             "action": attention["action"],
             "signals_json": json.dumps(triggered, ensure_ascii=False),
+            "c_maPosition": components["maPosition"],
+            "c_maAlign": components["maAlign"],
+            "c_volumePrice": components["volumePrice"],
+            "c_trend": components["trend"],
+            "c_vpPosition": components["vpPosition"],
+            "c_orderFlow": components["orderFlow"],
+            "c_gapTracker": components["gapTracker"],
+            "c_donchianPosition": components["donchianPosition"],
+            "c_rsRanking": components["rsRanking"],
         })
     return rows
 

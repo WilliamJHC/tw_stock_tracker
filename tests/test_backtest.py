@@ -133,6 +133,79 @@ def test_replay_scores_disables_of_and_per_bar_backtest_recompute():
     assert all(r["date"] for r in rows)
 
 
+# ------------------------- replay_scores Phase 2a/2b (ctx/at + components) --
+
+def _random_bars(n=200, seed=13, p0=60.0):
+    import random
+    rng = random.Random(seed)
+    start = dt.date(2024, 1, 1)
+    bars = []
+    p = p0
+    for i in range(n):
+        p *= 1 + rng.uniform(-0.03, 0.032)
+        d = (start + dt.timedelta(days=i)).isoformat()
+        bars.append({"date": d, "o": p, "h": p * 1.01, "l": p * 0.99, "c": p,
+                     "v": rng.randint(1000, 5000) * 1000})
+    return bars
+
+
+def _replay_scores_old_per_bar_rebuild(bars, inst, margin, shareholding, sbl, warmup=120):
+    """Pre-Phase-2a replay_scores(): rebuilds build_backtest_ctx() from an
+    ever-growing prefix on every bar instead of once up front. Kept here
+    only as a golden-master reference for the O(n^2)->O(n) refactor -- not
+    the production code path."""
+    dates = [b["date"] for b in bars]
+    times = [bt._epoch(d) for d in dates]
+    opens = [b["o"] for b in bars]
+    highs = [b["h"] for b in bars]
+    lows = [b["l"] for b in bars]
+    closes = [b["c"] for b in bars]
+    vols = [b["v"] for b in bars]
+    rows = []
+    for i in range(warmup, len(bars)):
+        date = dates[i]
+        daily_slice = {"t": times[:i + 1], "o": opens[:i + 1], "h": highs[:i + 1],
+                       "l": lows[:i + 1], "c": closes[:i + 1], "v": vols[:i + 1]}
+        cutoff = dates[i - 1]
+        result = an.analyze(
+            daily_slice, minute=None, tick_days=None,
+            inst=[r for r in inst if r["date"] <= cutoff],
+            margin=[r for r in margin if r["date"] <= cutoff],
+            shareholding=[r for r in shareholding if r["date"] <= cutoff],
+            sbl=[r for r in sbl if r["date"] <= cutoff],
+            rs_info=None, with_backtest=False)
+        if result is None:
+            continue
+        rows.append({"date": date, "tech_score": result["score"], "components": result["components"]})
+    return rows
+
+
+def test_replay_scores_ctx_built_once_matches_per_bar_rebuild():
+    """docs/https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md
+    Phase 2a golden master: replay_scores()'s ctx-built-once optimization
+    must produce bit-identical tech_score/components to the old per-bar
+    rebuild."""
+    bars = _random_bars()
+    new_rows = bt.replay_scores(bars, [], [], [], [], warmup=120)
+    old_rows = _replay_scores_old_per_bar_rebuild(bars, [], [], [], [], warmup=120)
+    assert len(new_rows) == len(old_rows) > 0
+    for new, old in zip(new_rows, old_rows):
+        assert new["date"] == old["date"]
+        assert new["tech_score"] == old["tech_score"]
+        for key, weight in an.SCORE_WEIGHTS.items():
+            assert new[f"c_{key}"] == old["components"][key]
+
+
+def test_replay_scores_components_weighted_sum_equals_tech_score():
+    """docs/.../lighthouse.md Phase 2b identity test."""
+    bars = _random_bars(seed=21)
+    rows = bt.replay_scores(bars, [], [], [], [], warmup=120)
+    assert rows
+    for row in rows:
+        weighted = sum(row[f"c_{key}"] * weight for key, weight in an.SCORE_WEIGHTS.items())
+        assert row["tech_score"] == round(max(-100.0, min(100.0, weighted)))
+
+
 def test_compute_rs_by_date_hand_computed():
     dates = [f"d{i}" for i in range(10)]
     bars_a = [{"date": d, "c": 100.0} for d in dates[:6]] + [{"date": d, "c": c} for d, c in zip(dates[6:], [110, 120, 130, 140])]

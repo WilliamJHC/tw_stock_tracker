@@ -234,6 +234,38 @@ def test_bollinger_squeeze_insufficient_history():
     assert an.bollinger_squeeze([100], period=20) is None
 
 
+def test_bollinger_squeeze_bounded_scan_matches_full_scan():
+    """Bounding the internal loop to a trailing window (Phase 2a's second
+    O(n^2) fix, see the function docstring) must not change the result --
+    verify against a naive full-history-from-bar-0 reference implementation."""
+    import random
+    rng = random.Random(17)
+    closes = [80.0]
+    for _ in range(600):
+        closes.append(closes[-1] * (1 + rng.uniform(-0.03, 0.032)))
+
+    def full_scan(closes, period=20, std_mult=2, lookback=120, pct_threshold=20):
+        n = len(closes)
+        widths = []
+        for i in range(period - 1, n):
+            seg = closes[i - period + 1:i + 1]
+            m = sum(seg) / period
+            sd = an.stdev(seg)
+            widths.append(None if (not sd or not m) else (2 * std_mult * sd) / m)
+        valid = [w for w in widths if w is not None]
+        current = widths[-1]
+        window = valid[-lookback:]
+        percentile = sum(1 for w in window if w <= current) / len(window) * 100
+        return {"bandwidth": current, "percentile": percentile, "is_squeeze": percentile <= pct_threshold}
+
+    for n in (25, 50, 140, 300, 601):
+        expected = full_scan(closes[:n])
+        actual = an.bollinger_squeeze(closes[:n])
+        assert actual["bandwidth"] == expected["bandwidth"]
+        assert actual["percentile"] == expected["percentile"]
+        assert actual["is_squeeze"] == expected["is_squeeze"]
+
+
 # ------------------------------------------------------- donchian position -
 
 def test_donchian_position_hand_computed():
@@ -288,3 +320,75 @@ def test_analyze_with_rs_info_included_in_output_and_score():
     assert a["rs_rank"] == rs_info
     # a leading (percentile>=80) rs_info must produce a bullish rs signal
     assert any("相對強弱排名領先" in s["text"] for s in a["signals"])
+
+
+# ---------------------------------- analyze() ctx/at (Phase 2a golden master) -
+
+def _random_daily(n=200, seed=7, p0=80.0):
+    import random
+    rng = random.Random(seed)
+    closes, highs, lows, vols, times = [], [], [], [], []
+    p = p0
+    for i in range(n):
+        p *= 1 + rng.uniform(-0.03, 0.032)
+        closes.append(p)
+        highs.append(p * 1.01)
+        lows.append(p * 0.99)
+        vols.append(rng.randint(1000, 5000) * 1000)
+        times.append(1_700_000_000 + i * 86400)
+    return {"t": times, "o": closes[:], "h": highs, "l": lows, "c": closes, "v": vols}
+
+
+def test_analyze_ctx_at_bit_identical_to_full_rebuild():
+    """docs/https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md
+    Phase 2a: build_backtest_ctx() built once over full history + at=i must
+    give bit-identical analyze() output to the old per-bar rebuild (ctx
+    rebuilt fresh from a [:i+1] prefix each time)."""
+    full_daily = _random_daily()
+    ctx = an.build_backtest_ctx(full_daily)
+
+    for i in (10, 50, 119, 120, 199):
+        sliced = {k: full_daily[k][:i + 1] for k in full_daily}
+        old = an.analyze(sliced, with_backtest=False)          # old path: rebuilds ctx from the prefix
+        new = an.analyze(sliced, with_backtest=False, ctx=ctx, at=i)  # new path: precomputed ctx, indexed at i
+        if old is None:
+            assert new is None
+            continue
+        assert new is not None
+        assert new["score"] == old["score"]
+        assert new["label"] == old["label"]
+        assert new["components"] == old["components"]
+        assert new["signals"] == old["signals"]
+        assert new["ma5"][i] == old["ma5"][i]
+        assert new["ma20"][i] == old["ma20"][i]
+        assert new["ma60"][i] == old["ma60"][i]
+        assert new["quadrant_last"] == old["quadrant_last"]
+
+
+# ------------------------------ analyze() components (Phase 2b identity) -
+
+def test_components_weighted_sum_equals_score():
+    daily = _random_daily(seed=3)
+    a = an.analyze(daily)
+    weighted = sum(a["components"][k] * an.SCORE_WEIGHTS[k] for k in an.SCORE_WEIGHTS)
+    assert a["score"] == round(max(-100.0, min(100.0, weighted)))
+
+
+def test_components_weighted_sum_equals_score_with_of_divergence():
+    # exercise the orderFlow component's folded-in divergence bonus (the one
+    # component whose raw value isn't a plain pre-weight ratio/bias).
+    m_closes = [100.0 - i * 0.1 for i in range(10)]
+    m = {"t": [1_750_000_000 + i * 300 for i in range(10)],
+         "c": m_closes, "h": [c * 1.001 for c in m_closes], "l": [c * 0.999 for c in m_closes],
+         "v": [100] * 10}
+    daily = _random_daily(seed=11)
+    a = an.analyze(daily, minute=m)
+    assert a["of"] is not None
+    weighted = sum(a["components"][k] * an.SCORE_WEIGHTS[k] for k in an.SCORE_WEIGHTS)
+    assert a["score"] == round(max(-100.0, min(100.0, weighted)))
+
+
+def test_components_keys_match_score_weights():
+    daily = _random_daily(seed=5)
+    a = an.analyze(daily)
+    assert set(a["components"]) == set(an.SCORE_WEIGHTS)

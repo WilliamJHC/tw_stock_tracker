@@ -284,8 +284,19 @@ def bollinger_squeeze(closes, period=20, std_mult=2, lookback=120, pct_threshold
     n = len(closes)
     if n < period:
         return None
+    # Only the last `lookback` valid width readings ever matter (see below),
+    # and each width[i] depends only on closes[i-period+1:i+1] -- no
+    # recursion across bars -- so bounding the scan to a trailing window is
+    # bit-identical to scanning the full history from bar 0, but O(lookback)
+    # per call instead of O(n). `+ period` is slack for the (rare) None gaps
+    # a zero-stdev/zero-mean segment can produce. This was found to be the
+    # actual dominant O(n^2) cost in backtest.py's replay_scores() -- ~80%
+    # of wall-clock, well past ctx/at's build_backtest_ctx() hoist (see
+    # docs/https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md
+    # Phase 2a).
+    start = max(period - 1, n - lookback - period)
     widths = []
-    for i in range(period - 1, n):
+    for i in range(start, n):
         seg = closes[i - period + 1:i + 1]
         m = sum(seg) / period
         sd = stdev(seg)
@@ -765,7 +776,8 @@ def compute_attention(tech_score, chip, result):
 
 
 def analyze(daily, minute=None, tick_days=None, inst=None,
-            margin=None, shareholding=None, sbl=None, rs_info=None, with_backtest=True):
+            margin=None, shareholding=None, sbl=None, rs_info=None, with_backtest=True,
+            ctx=None, at=None):
     """Full analysis of one stock.
 
     daily: {t,o,h,l,c,v} 2y daily bars (shares).
@@ -781,21 +793,49 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
         today's triggered signals (result["backtest"] is left {}). Each
         backtest_signal() call rescans the full history, so a caller
         replaying scores bar-by-bar over hundreds of days (see
-        docs/backtest_plan.md Phase 4) must turn this off to avoid O(n^2).
+        docs/archive/backtest_plan.md Phase 4) must turn this off to avoid
+        O(n^2).
+    ctx/at: pass a build_backtest_ctx() computed ONCE over a code's full
+        history, plus the bar index to score `today` as, to skip rebuilding
+        ma5/ma20/ma60/vol20/quadrant from the historical prefix on every
+        call -- this is the O(n^2) source in backtest.py's replay_scores()
+        (docs/https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md
+        Phase 2a). ma_series()/quadrant_at() are causal (only read index <=
+        i), so ctx built once from full history and indexed at `at` is
+        identical to rebuilding it from a prefix truncated to at+1 -- ctx/at
+        only replace THIS set of series; `daily` itself must still be
+        truncated to [:at+1] by the caller (as replay_scores() already did
+        before this param existed), since every other indicator here
+        (fractal_pivots, volume_profile, atr, gap_tracker, bollinger_squeeze,
+        donchian_position) reads off `daily`'s own length/tail, not `at`,
+        and would leak future bars into a backtest otherwise.
+        Both None (the default): unchanged behavior -- ctx is built fresh
+        from `daily` and `at` is `len(daily["c"]) - 1` (today = daily's own
+        last bar), i.e. zero behavior change for pipeline.py/app.py's live
+        single-stock calls.
     """
     closes, highs, lows, vols, opens, times = (
         daily["c"], daily["h"], daily["l"], daily["v"], daily["o"], daily["t"])
     n = len(closes)
     if n < 5:
         return None
-    ctx = build_backtest_ctx(daily)
+    if ctx is None:
+        ctx = build_backtest_ctx(daily)
+    if at is None:
+        at = n - 1
     ma5, ma20, ma60, vol20, quadrant = (
         ctx["ma5"], ctx["ma20"], ctx["ma60"], ctx["vol20"], ctx["quadrant"])
-    last = n - 1
+    last = at
     price = closes[last]
     w = SCORE_WEIGHTS
     signals = []
-    score = 0.0
+    # Unweighted per-dimension raw values (docs/.../lighthouse.md Phase 2b):
+    # score == sum(components[k] * w[k]) always (see "finalize" below) --
+    # replay_scores() persists these so re-weighting SCORE_WEIGHTS becomes a
+    # dot product over stored rows instead of a full replay. orderFlow's raw
+    # value folds in the flat +-10 divergence override (see that block) so
+    # the identity holds even when a divergence signal fires.
+    components = {k: 0.0 for k in w}
 
     # ---- MA position / alignment ----
     ma_pos, ma_cnt = 0, 0
@@ -804,7 +844,7 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
             ma_cnt += 1
             ma_pos += 1 if price >= m[last] else -1
     if ma_cnt:
-        score += ma_pos / ma_cnt * w["maPosition"]
+        components["maPosition"] = ma_pos / ma_cnt
     aligned = None
     if ma5[last] is not None and ma20[last] is not None and ma60[last] is not None:
         if ma5[last] > ma20[last] > ma60[last]:
@@ -813,7 +853,7 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
         elif ma5[last] < ma20[last] < ma60[last]:
             aligned = -1
             signals.append({"text": "均線空頭排列（MA5 < MA20 < MA60）", "bias": -1, "bt": "均線空頭排列"})
-        score += (aligned or 0) * w["maAlign"]
+        components["maAlign"] = aligned or 0
     if BACKTEST_SIGNALS["突破站上MA60"](ctx, last):
         signals.append({"text": "今日突破站上 60 日均線", "bias": 1, "bt": "突破站上MA60"})
     if BACKTEST_SIGNALS["跌破MA60"](ctx, last):
@@ -824,7 +864,7 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
     if q:
         info = QUADRANT_INFO[q]
         signals.append({"text": f"{info['label']}：{info['desc']}", "bias": info["bias"], "bt": info["label"]})
-        score += info["score"] * w["volumePrice"]
+        components["volumePrice"] = info["score"]
     if BACKTEST_SIGNALS["爆量(>2倍均量)"](ctx, last):
         signals.append({"text": f"爆量：今日量為 20 日均量 {vols[last] / vol20[last]:.1f} 倍",
                         "bias": 0, "bt": "爆量(>2倍均量)"})
@@ -837,7 +877,7 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
     # ---- trend ----
     trend = trend_estimate(closes)
     if trend:
-        score += _clamp(trend["slope_pct_per_day"] * 20 / 10) * w["trend"]
+        components["trend"] = _clamp(trend["slope_pct_per_day"] * 20 / 10)
 
     # ---- volume profile (daily 120d; minute bars if available for finer bins) ----
     vp = volume_profile(highs, lows, vols, price)
@@ -851,11 +891,11 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
     if vp:
         if price > vp["vah"]:
             vp_position = "above_va"
-            score += w["vpPosition"]
+            components["vpPosition"] = 1.0
             signals.append({"text": f"現價高於 Value Area（VAH {vp['vah']:.1f}）：多方接受、價值區上移", "bias": 1, "bt": None})
         elif price < vp["val"]:
             vp_position = "below_va"
-            score -= w["vpPosition"]
+            components["vpPosition"] = -1.0
             signals.append({"text": f"現價低於 Value Area（VAL {vp['val']:.1f}）：空方主導、價值區下移", "bias": -1, "bt": None})
         else:
             vp_position = "inside_va"
@@ -864,7 +904,7 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
                 rel = (price - vp["poc"]) / (vp["vah"] - vp["poc"]) * 0.5
             elif vp["poc"] > vp["val"] and price < vp["poc"]:
                 rel = -(vp["poc"] - price) / (vp["poc"] - vp["val"]) * 0.5
-            score += rel * w["vpPosition"]
+            components["vpPosition"] = rel
             signals.append({"text": f"現價位於 Value Area 內（POC {vp['poc']:.1f}）：籌碼密集區，趨勢待表態", "bias": 0, "bt": None})
         for lv in vp["lvn"]:
             if abs(lv - price) / price < 0.03:
@@ -873,17 +913,23 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
                 break
 
     # ---- order flow ----
-    closes_by_date = {dt.datetime.fromtimestamp(times[i]).date().isoformat(): closes[i] for i in range(n)}
+    # closes_by_date is only used by of_summary()'s divergence check, so it's
+    # built lazily -- an O(n) dict comprehension on every call would be dead
+    # work on every replay_scores() bar (tick_days/minute are always None
+    # there, see backtest.py's replay_scores() docstring), re-adding an
+    # O(n^2) cost that Phase 2a's ctx/at hoist doesn't otherwise touch.
     of = None
     of_mode = None
     if tick_days:
+        closes_by_date = {dt.datetime.fromtimestamp(times[i]).date().isoformat(): closes[i] for i in range(n)}
         of = of_summary(of_from_ticks(tick_days), closes_by_date)
         of_mode = "tick"
     elif minute and minute.get("c"):
+        closes_by_date = {dt.datetime.fromtimestamp(times[i]).date().isoformat(): closes[i] for i in range(n)}
         of = of_summary(of_from_minutes(minute), closes_by_date)
         of_mode = "estimate"
     if of:
-        score += _clamp(of["ratio5"] / 0.15) * w["orderFlow"]
+        ratio_c = _clamp(of["ratio5"] / 0.15)
         pct = of["ratio5"] * 100
         side = "買盤" if of["delta5"] >= 0 else "賣盤"
         tag = "逐筆內外盤" if of_mode == "tick" else "分鐘K推估"
@@ -893,12 +939,17 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
             side = "買超" if of["streak"] > 0 else "賣超"
             signals.append({"text": f"主動{side}已連續 {abs(of['streak'])} 個交易日",
                             "bias": 1 if of["streak"] > 0 else -1, "bt": None})
+        # divergence is a flat +-10 score override, not proportional to
+        # w["orderFlow"] -- folded into the raw component (divided back out
+        # by w["orderFlow"]) so score == sum(components[k]*w[k]) still holds.
+        divergence_pts = 0.0
         if of["divergence"] == "bearish":
             signals.append({"text": "⚠ 量價背離：近10日價格上漲但主動賣盤佔優（出貨嫌疑）", "bias": -1, "bt": None})
-            score -= 10
+            divergence_pts = -10.0
         elif of["divergence"] == "bullish":
             signals.append({"text": "量價背離：近10日價格下跌但主動買盤佔優（吸籌嫌疑）", "bias": 1, "bt": None})
-            score += 10
+            divergence_pts = 10.0
+        components["orderFlow"] = ratio_c + divergence_pts / w["orderFlow"]
 
     # ---- short-term (1-5d): ATR, gap tracker ----
     atr_val = atr(highs, lows, closes, SHORT_TERM_THRESHOLDS["atr_period"])  # info only, not scored
@@ -906,7 +957,7 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
     open_gap = next((g for g in reversed(gaps) if not g["filled"]), None)
     if open_gap:
         bias = 1 if open_gap["direction"] == "up" else -1
-        score += bias * w["gapTracker"]
+        components["gapTracker"] = bias
         signals.append({"text": f"{'向上' if bias > 0 else '向下'}跳空缺口尚未回補（{open_gap['gap_pct']:+.1f}%）",
                         "bias": bias, "bt": None})
 
@@ -919,7 +970,7 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
     donch = donchian_position(highs, lows, closes, MID_TERM_THRESHOLDS["donchian_short"], MID_TERM_THRESHOLDS["donchian_long"])
     if donch and donch["short"] is not None:
         rel = (donch["short"] - 50) / 50
-        score += rel * w["donchianPosition"]
+        components["donchianPosition"] = rel
         if donch["short"] >= 90:
             signals.append({"text": f"價格逼近 {MID_TERM_THRESHOLDS['donchian_short']} 日 Donchian 通道上緣（{donch['short']:.0f}%）", "bias": 1, "bt": None})
         elif donch["short"] <= 10:
@@ -929,7 +980,7 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
     # ---- short-term: 5-day relative strength ranking (cross-stock, see rs_info docstring) ----
     if rs_info:
         rel = (rs_info["percentile"] - 50) / 50
-        score += rel * w["rsRanking"]
+        components["rsRanking"] = rel
         if rs_info["percentile"] >= 80:
             signals.append({"text": f"5日相對強弱排名領先（第 {rs_info['rank']} 名，百分位 {rs_info['percentile']:.0f}）", "bias": 1, "bt": None})
         elif rs_info["percentile"] <= 20:
@@ -944,6 +995,7 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
                         "trust_recent": sum(r["trust"] for r in inst[-5:])}
 
     # ---- finalize ----
+    score = sum(components[k] * w[k] for k in w)
     score = round(max(-100.0, min(100.0, score)))
     label = label_for(score)
 
@@ -969,5 +1021,5 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
         "rs_rank": rs_info,
         "inst": inst_summary, "chip": chip,
         "signals": signals, "backtest": backtest,
-        "score": score, "label": label,
+        "score": score, "label": label, "components": components,
     }
