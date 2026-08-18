@@ -42,6 +42,46 @@ def test_build_adj_factor_unsorted_actions_same_result():
             == adjust.build_adj_factor(dates, actions_unsorted))
 
 
+def test_build_adj_factor_ignores_action_dated_after_last_bar():
+    # TWSE publishes ex-dividend dates in advance -- an action dated past
+    # the last fetched bar (e.g. today's session hasn't closed/been
+    # fetched yet, but is already on TWSE's table) hasn't happened within
+    # the observed price history and must not touch any bar, including the
+    # last one (discovered via a full-market sample run against code 3022,
+    # see docs/https-finlab-finance-blog-python-get-tai-memoized-
+    # lighthouse.md Phase 4).
+    dates = ["2024-01-01", "2024-01-02", "2024-01-03"]
+    actions = [{"date": "2024-01-04", "ratio": 0.9}]  # one day past the last bar
+    factors = adjust.build_adj_factor(dates, actions)
+    assert factors == [1.0, 1.0, 1.0]
+
+
+def test_build_adj_factor_action_exactly_on_last_bar_still_excluded():
+    # An action dated exactly on the last bar means that bar already trades
+    # post-action (TWSE convention, see the ex-date-itself rule above) --
+    # it must not scale the last bar down either.
+    dates = ["2024-01-01", "2024-01-02"]
+    actions = [{"date": "2024-01-02", "ratio": 0.9}]
+    factors = adjust.build_adj_factor(dates, actions)
+    assert factors == [0.9, 1.0]
+
+
+def test_build_adj_factor_future_action_does_not_affect_earlier_ones():
+    # A genuine, already-effective action before the last bar must still
+    # apply normally even when a not-yet-effective one exists further out.
+    dates = ["2024-01-01", "2024-01-02", "2024-01-03"]
+    actions = [
+        {"date": "2024-01-02", "ratio": 0.8},   # already happened
+        {"date": "2024-01-10", "ratio": 0.5},   # scheduled, past the last bar
+    ]
+    factors = adjust.build_adj_factor(dates, actions)
+    assert factors == [0.8, 1.0, 1.0]
+
+
+def test_build_adj_factor_empty_bar_dates_returns_empty():
+    assert adjust.build_adj_factor([], [{"date": "2024-01-01", "ratio": 0.5}]) == []
+
+
 def test_apply_adjustment_scales_price_fields_not_volume():
     bars = [{"date": "2024-01-01", "o": 100, "h": 110, "l": 90, "c": 105, "v": 5000}]
     out = adjust.apply_adjustment(bars, [0.5])

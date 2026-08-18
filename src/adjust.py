@@ -43,8 +43,25 @@ def build_adj_factor(bar_dates, actions):
     1.0. Usually non-decreasing going forward in time (dividends/splits/
     rights issues all push ratio <= 1), but NOT guaranteed to be: a capital
     reduction (減資) raises the nominal price and has ratio > 1 -- see
-    validate_adj_factor()'s docstring."""
-    sorted_actions = sorted(actions, key=lambda a: a["date"])
+    validate_adj_factor()'s docstring.
+
+    Actions dated strictly AFTER the last bar_date are ignored -- TWSE
+    publishes ex-dividend dates in advance (docs/https-finlab-finance-blog-
+    python-get-tai-memoized-lighthouse.md Phase 4's full-market sample
+    verification), so corporate_actions can already contain a not-yet-
+    happened ex-date sitting past the latest fetched bar (e.g. today's
+    session hasn't closed/been fetched yet, but TWSE's table already lists
+    today's scheduled ex-dividends). Applying such an action would make the
+    LAST bar's factor != 1.0 even though it's the reference point every
+    other bar is scaled against -- see this module's own "今天的還原價 ==
+    原始價" definition above. An action that hasn't happened within the
+    observed price history yet should affect zero bars in that history,
+    not just be silently included by the same ">" comparison that applies
+    to every other action."""
+    if not bar_dates:
+        return []
+    last_bar_date = bar_dates[-1]
+    sorted_actions = sorted((a for a in actions if a["date"] <= last_bar_date), key=lambda a: a["date"])
     n = len(bar_dates)
     factors = [1.0] * n
     cum = 1.0
