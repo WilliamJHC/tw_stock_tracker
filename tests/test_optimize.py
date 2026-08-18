@@ -14,6 +14,7 @@ import random
 
 import backtest as bt
 import optimize as opt
+import portfolio_backtest as pb
 
 
 # --------------------------------------------------- purged walk-forward --
@@ -226,3 +227,139 @@ def test_sweep_param_walk_forward_respects_base_params_override():
         )
     assert captured  # at least one call happened
     assert all(p.get("max_hold_days") == 30 for p in captured)
+
+
+# ---------------------- purged_calendar_walk_forward_splits / RANKING_WEIGHTS --
+
+def _calendar(n=600, start=dt.date(2020, 1, 1)):
+    return [(start + dt.timedelta(days=i)).isoformat() for i in range(n)]
+
+
+def test_purged_calendar_walk_forward_splits_anchored_and_purge_gap():
+    calendar = _calendar(600)
+    folds = opt.purged_calendar_walk_forward_splits(calendar, n_folds=3, purge_days=60, mode="anchored")
+    assert len(folds) == 3
+    for fold in folds:
+        assert fold["train"][0] == calendar[0]  # anchored: train always starts at calendar[0]
+        train_end = dt.date.fromisoformat(fold["train"][1])
+        test_start = dt.date.fromisoformat(fold["test"][0])
+        assert (test_start - train_end).days >= 60
+    # test windows are non-overlapping and cover the tail
+    assert folds[0]["test"][1] < folds[1]["test"][0]
+    assert folds[-1]["test"][1] == calendar[-1]
+
+
+def test_purged_calendar_walk_forward_splits_too_little_calendar_returns_empty():
+    assert opt.purged_calendar_walk_forward_splits(_calendar(20), n_folds=4, purge_days=60) == []
+
+
+def test_slice_universe_by_date_filters_bars_keeps_factor_series():
+    universe = {
+        "A": {
+            "bars": [{"date": d, "c": 100.0, "v": 1000} for d in _calendar(10)],
+            "bar_dates": _calendar(10),
+            "revenue_series": [{"usable_date": "2020-01-01", "yoy_pct": 5.0}],
+            "roe_series": [{"usable_date": "2020-01-01", "roe_pct": 10.0}],
+        }
+    }
+    sliced = opt._slice_universe_by_date(universe, "2020-01-03", "2020-01-05")
+    assert sliced["A"]["bar_dates"] == ["2020-01-03", "2020-01-04", "2020-01-05"]
+    assert sliced["A"]["revenue_series"] == universe["A"]["revenue_series"]  # untouched
+    assert sliced["A"]["roe_series"] == universe["A"]["roe_series"]
+
+
+def test_slice_universe_by_date_drops_codes_with_no_bars_in_range():
+    universe = {"A": {"bars": [{"date": "2020-01-01", "c": 100.0, "v": 1000}],
+                      "bar_dates": ["2020-01-01"], "revenue_series": [], "roe_series": []}}
+    assert opt._slice_universe_by_date(universe, "2021-01-01", "2021-06-01") == {}
+
+
+def _ranking_universe(n_codes=6, days=500, seed=3):
+    """Codes whose momentum/revenue-YoY/ROE all scale with rank (same
+    construction as tests/test_factor_eval.py's fixture) -- gives
+    sweep_ranking_weights_walk_forward() a real signal to distinguish a
+    momentum-heavy candidate from a fundamentals-heavy one."""
+    import finlab_factors as ff
+    rng = random.Random(seed)
+    universe = {}
+    for rank in range(n_codes):
+        drift = 0.0015 + rank * 0.0012
+        d0 = dt.date(2019, 1, 1)
+        bars = []
+        price = 60.0
+        for i in range(days):
+            price *= 1 + drift + rng.uniform(-0.01, 0.01)
+            bars.append({"date": (d0 + dt.timedelta(days=i)).isoformat(), "c": price, "v": 800_000})
+        revenue_rows = []
+        rev, growth = 1_000_000.0, 1.001 + rank * 0.0015
+        for m in range(30):
+            month_date = (dt.date(2017, 1, 1) + dt.timedelta(days=30 * m)).replace(day=1).isoformat()
+            revenue_rows.append({"date": month_date, "revenue": rev})
+            rev *= growth
+        revenue_series = ff.revenue_yoy_series(revenue_rows)
+        for r in revenue_series:
+            r["usable_date"] = "2019-01-01"
+        roe_pct = 4.0 + rank * 2.5
+        financials_rows = []
+        q0 = dt.date(2017, 1, 1)
+        for q in range(6):
+            qd = (q0 + dt.timedelta(days=91 * q)).isoformat()
+            financials_rows.append({"date": qd, "net_income": roe_pct / 4 * 1_000_000, "equity": 1_000_000})
+        roe_series = ff.roe_series(financials_rows)
+        for r in roe_series:
+            r["usable_date"] = "2019-01-01"
+        universe[f"C{rank}"] = {
+            "bars": bars, "bar_dates": [b["date"] for b in bars],
+            "revenue_series": revenue_series, "roe_series": roe_series,
+        }
+    return universe
+
+
+def test_sweep_ranking_weights_walk_forward_shape_and_trial_accounting():
+    universe = _ranking_universe()
+    candidates = {
+        "current": {"revenue": 0.4, "roe": 0.3, "momentum": 0.3},
+        "momentum_only": {"revenue": 0.0, "roe": 0.0, "momentum": 1.0},
+    }
+    result = opt.sweep_ranking_weights_walk_forward(universe, candidates, n_folds=3, purge_days=60)
+    assert result is not None
+    assert set(result) == {
+        "candidates", "plateau", "point_best", "fold_argmax", "candidate_scores",
+        "dsr", "pbo", "n_trials", "vs_buy_hold", "decision", "trials",
+    }
+    usable_folds = len(result["fold_argmax"])
+    assert usable_folds > 0
+    assert result["n_trials"] == usable_folds * len(candidates)
+    assert len(result["trials"]) == result["n_trials"]
+    assert all(t["name"] in candidates for t in result["trials"])
+    assert all(f in candidates for f in result["fold_argmax"])
+    assert set(result["candidate_scores"]) == set(candidates)
+    assert set(result["decision"]) == {"accept", "reasons"}
+
+
+def test_sweep_ranking_weights_walk_forward_insufficient_history_returns_none():
+    universe = _ranking_universe(days=60)
+    result = opt.sweep_ranking_weights_walk_forward(
+        universe, {"a": {"revenue": 1, "roe": 0, "momentum": 0}}, n_folds=4, purge_days=60,
+    )
+    assert result is None
+
+
+def test_sweep_ranking_weights_walk_forward_passes_sim_params_through():
+    universe = _ranking_universe(n_codes=4, days=500)
+    captured = []
+    orig_simulate = pb.simulate
+
+    def spy(universe_data, params=None):
+        captured.append(dict(params or {}))
+        return orig_simulate(universe_data, params=params)
+
+    import unittest.mock as mock
+    with mock.patch("optimize.pb.simulate", side_effect=spy):
+        opt.sweep_ranking_weights_walk_forward(
+            universe, {"a": {"revenue": 1, "roe": 0, "momentum": 0}},
+            n_folds=2, purge_days=60, sim_params={"top_n": 2},
+        )
+    assert captured
+    assert all(p.get("top_n") == 2 for p in captured)
+    assert all(p.get("ranking_weights") == {"revenue": 1, "roe": 0, "momentum": 0} for p in captured)

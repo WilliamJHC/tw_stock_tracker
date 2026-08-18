@@ -12,15 +12,18 @@ parameter pick, not to squeeze out the highest backtested number.
 The plan says this module should only be BUILT after Phase 4 (full-market
 rank-IC + universe expansion), because applying an optimizer to the 3
 factor weights / 9 score components before Phase 4's survivorship-bias-free
-universe exists means optimizing on a biased sample. Phase 4's full-market
-fetch was still running in the background when this was written. The
-framework itself doesn't depend on Phase 4's data, though -- Phase 5's own
+universe exists means optimizing on a biased sample. This was written while
+Phase 4's full-market fetch was still running in the background -- the
+framework itself doesn't depend on Phase 4's data (Phase 5's own
 verification example optimizes backtest.STRATEGY_PARAMS' exit_composite on
-the single-code watchlist backtest.db, which Phase 0-3 already completed --
-so building/testing it now is safe. Actually RUNNING it against
-finlab_factors.RANKING_WEIGHTS or analysis.SCORE_WEIGHTS should wait for
-Phase 4's full-market data (scripts/run_optimize.py's docstring repeats
-this caveat at the point someone would actually do that).
+the single-code watchlist backtest.db, which Phase 0-3 already completed),
+so building/testing it then was safe. Phase 4 has since finished (2148/2148
+codes, 1795 usable, rank-IC computed) -- sweep_ranking_weights_walk_forward()
+below is the part that DOES need that data, and now has it: it runs the
+purged walk-forward comparison against finlab_factors.RANKING_WEIGHTS
+candidates derived from Phase 4's rank-IC/ICIR results (see
+scripts/report_factor_ic.py's suggest_weights() output) instead of just
+assuming the suggestion is an improvement.
 
 >>> Simplification vs. the plan's literal PBO spec <<<
 The plan describes PBO via CSCV with S=8 blocks. This module instead uses
@@ -32,10 +35,12 @@ reuses that structure instead of building a second, finer-grained
 bucketing pass. Coarser than 8 blocks, but honest about it, not a silent
 choice.
 """
+import datetime as dt
 import statistics
 
 import backtest as bt
 import metrics as m
+import portfolio_backtest as pb
 
 # A trade can hold for up to STRATEGY_PARAMS["max_hold_days"] bars (120,
 # post-Phase-3); a train fold ending inside that window could still have an
@@ -204,15 +209,22 @@ def detect_plateau(values, scores, tolerance_frac=0.1):
     return {"range": (lo, hi), "center": (lo + hi) / 2, "width_frac": width_frac}
 
 
-def evaluate_decision(plateau, pbo_value, dsr_value):
+def evaluate_decision(plateau, pbo_value, dsr_value, plateau_width_min_frac=PLATEAU_WIDTH_MIN_FRAC):
     """Applies docs/.../lighthouse.md Phase 5's three accept/reject rules.
     Returns {"accept": bool, "reasons": [str, ...]} -- reasons lists every
     rule that fired (rejection can have more than one cause). A rule whose
     input is None (couldn't be computed) does not fire -- absence of
-    evidence isn't treated as evidence of overfitting."""
+    evidence isn't treated as evidence of overfitting.
+
+    plateau_width_min_frac: overridable because sweep_ranking_weights_walk_
+    forward() reuses "width_frac" for a DIFFERENT quantity -- the fraction
+    of folds the winning NAMED candidate actually won (not a numeric
+    plateau's width) -- whose chance baseline is 1/len(candidates), not a
+    fixed fraction of a numeric search range; that caller passes a
+    chance-adjusted threshold instead of the default."""
     reasons = []
-    if plateau is None or plateau["width_frac"] < PLATEAU_WIDTH_MIN_FRAC:
-        reasons.append(f"plateau width < {PLATEAU_WIDTH_MIN_FRAC:.0%} of search range -- looks like an overfit spike")
+    if plateau is None or plateau["width_frac"] < plateau_width_min_frac:
+        reasons.append(f"plateau width < {plateau_width_min_frac:.0%} of search range -- looks like an overfit spike")
     if pbo_value is not None and pbo_value > PBO_MAX:
         reasons.append(f"PBO {pbo_value:.2f} > {PBO_MAX} -- overfitting probability too high")
     if dsr_value is not None and dsr_value < DSR_MIN_SIGNIFICANT:
@@ -331,5 +343,186 @@ def sweep_param_walk_forward(bars, inst, margin, shareholding, sbl, rs_by_date,
             "buy_hold_return_pct": buy_hold_return,
         },
         "decision": evaluate_decision(plateau, pbo_value, dsr_value),
+        "trials": trials,
+    }
+
+
+# ---------------------------------- portfolio-engine (RANKING_WEIGHTS) sweep --
+
+def _slice_universe_by_date(universe_data, start_date, end_date):
+    """universe_data restricted to bars within [start_date, end_date]
+    (inclusive). revenue_series/roe_series are left untouched -- their own
+    usable_date-gated finlab_factors._as_of() lookups already enforce
+    point-in-time correctness independent of how the bars window is cut."""
+    sliced = {}
+    for code, d in universe_data.items():
+        bars = [b for b in d["bars"] if start_date <= b["date"] <= end_date]
+        if not bars:
+            continue
+        sliced[code] = {
+            "bars": bars, "bar_dates": [b["date"] for b in bars],
+            "revenue_series": d["revenue_series"], "roe_series": d["roe_series"],
+        }
+    return sliced
+
+
+def purged_calendar_walk_forward_splits(calendar, n_folds=4, purge_days=60, mode="anchored"):
+    """Like purged_walk_forward_splits() but over a trading CALENDAR (date
+    strings) instead of bar indices -- portfolio_backtest.py's engine has
+    no single bars array to index into (every code has its own). purge_days
+    is calendar days, not bars; defaults to finlab_factors.FINANCIALS_LAG_DAYS
+    (60), the longest point-in-time latency this engine's factors carry, so
+    a fold boundary can't land inside a quarter's still-unpublished
+    disclosure window.
+
+    Returns [{"train": (start_date, end_date), "test": (start_date, end_date)},
+    ...], or [] if there isn't enough calendar for even one purged fold."""
+    n = len(calendar)
+    if n_folds < 1 or n < (n_folds + 1) * 2:
+        return []
+    block = n // (n_folds + 1)
+    folds = []
+    for k in range(1, n_folds + 1):
+        test_start_idx = k * block
+        test_end_idx = n - 1 if k == n_folds else (k + 1) * block - 1
+        if test_start_idx > test_end_idx:
+            continue
+        train_start_idx = 0 if mode == "anchored" else max(0, test_start_idx - block)
+        test_start_dt = dt.date.fromisoformat(calendar[test_start_idx])
+        purge_idx = test_start_idx - 1
+        while purge_idx >= train_start_idx and (test_start_dt - dt.date.fromisoformat(calendar[purge_idx])).days < purge_days:
+            purge_idx -= 1
+        if purge_idx < train_start_idx:
+            continue
+        folds.append({
+            "train": (calendar[train_start_idx], calendar[purge_idx]),
+            "test": (calendar[test_start_idx], calendar[test_end_idx]),
+        })
+    return folds
+
+
+def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, purge_days=60,
+                                        mode="anchored", sim_params=None):
+    """Purged walk-forward comparison of NAMED finlab_factors.RANKING_WEIGHTS
+    candidates -- e.g. the current fixed weights vs Phase 4's rank-IC-
+    derived suggestions at a few horizons (docs/https-finlab-finance-blog-
+    python-get-tai-memoized-lighthouse.md Phase 5, applied to Phase 4's
+    results). This compares a handful of specific proposals, not a
+    coordinate-descent grid search over the 3-dim weight space: Phase 4's
+    IC/ICIR significance tests already did the "is there a real signal"
+    check per factor, so re-searching continuous weights here would mostly
+    relearn that same in-sample noise a second time.
+
+    candidates: {name: {"revenue","roe","momentum"} weight dict}.
+
+    Each fold reruns portfolio_backtest.simulate() from the trading
+    calendar's start (mode="anchored") or the fold's own train_start
+    (mode="rolling") through the fold's test_end -- monthly rebalance
+    state has to carry forward, there's no way to "resume" simulate() mid-
+    history -- then scores each candidate by the OOS return realized ONLY
+    within the fold's test window (the equity curve segment between
+    test_start and test_end), not the whole run.
+
+    Returns None if there isn't enough calendar for even one purged fold.
+    Otherwise: {"candidates", "plateau", "point_best", "fold_argmax",
+    "candidate_scores", "dsr", "pbo", "n_trials", "vs_buy_hold", "decision",
+    "trials"}. "plateau" here means "how many folds did the overall winner
+    actually win" (a numeric plateau range doesn't apply to named
+    candidates) -- its accept/reject threshold is chance-adjusted to
+    max(PLATEAU_WIDTH_MIN_FRAC, 1/len(candidates)), since e.g. a 2-candidate
+    race has a 50% win-by-chance floor that a fixed 20% bar would let
+    through. "candidate_scores" is the raw {name: mean OOS return%} for
+    every candidate, in case the winner isn't obviously the plateau."""
+    calendar = pb._trading_calendar(universe_data)
+    folds = purged_calendar_walk_forward_splits(calendar, n_folds=n_folds, purge_days=purge_days, mode=mode)
+    if not folds:
+        return None
+
+    names = list(candidates)
+    scores_by_name = {name: [] for name in names}
+    fold_argmax = []
+    trials = []
+    n_trials = 0
+    for fold_idx, fold in enumerate(folds):
+        train_start, _ = fold["train"]
+        test_start, test_end = fold["test"]
+        sim_start = calendar[0] if mode == "anchored" else train_start
+        sliced = _slice_universe_by_date(universe_data, sim_start, test_end)
+        fold_best_name, fold_best_score = None, float("-inf")
+        for name in names:
+            p = dict(sim_params or {})
+            p["ranking_weights"] = candidates[name]
+            result = pb.simulate(sliced, params=p)
+            oos_points = [pt for pt in result["equity_curve"] if test_start <= pt["date"] <= test_end]
+            score = None
+            if len(oos_points) >= 2 and oos_points[0]["equity"]:
+                score = (oos_points[-1]["equity"] / oos_points[0]["equity"] - 1) * 100
+            n_trials += 1
+            trials.append({"fold_idx": fold_idx, "name": name, "score": score})
+            scores_by_name[name].append(score)
+            score_for_argmax = score if score is not None else float("-inf")
+            if score_for_argmax > fold_best_score:
+                fold_best_name, fold_best_score = name, score_for_argmax
+        if fold_best_name is not None:
+            fold_argmax.append(fold_best_name)
+
+    usable_folds = len(fold_argmax)
+    if usable_folds == 0:
+        return None
+
+    mean_scores = {}
+    for name in names:
+        valid = [s for s in scores_by_name[name] if s is not None]
+        mean_scores[name] = sum(valid) / len(valid) if valid else None
+    valid_means = {n: s for n, s in mean_scores.items() if s is not None}
+    point_best_name = max(valid_means, key=valid_means.get) if valid_means else None
+
+    argmax_counts = {}
+    for name in fold_argmax:
+        argmax_counts[name] = argmax_counts.get(name, 0) + 1
+    winner, winner_count = max(argmax_counts.items(), key=lambda kv: kv[1]) if argmax_counts else (None, 0)
+    stability = winner_count / usable_folds if usable_folds else 0.0
+    plateau = {"most_common": winner, "width_frac": stability}
+    chance_threshold = max(PLATEAU_WIDTH_MIN_FRAC, 1 / len(names)) if names else PLATEAU_WIDTH_MIN_FRAC
+
+    pbo_value = dsr_value = None
+    if usable_folds >= 2:
+        returns_matrix = {name: [(s if s is not None else 0.0) / 100 for s in scores_by_name[name]] for name in names}
+        pbo_value = m.pbo(returns_matrix, n_blocks=usable_folds)
+        if point_best_name is not None:
+            chosen_returns = returns_matrix[point_best_name]
+            sharpe = m.sharpe_ratio(chosen_returns, periods_per_year=usable_folds)
+            trial_sharpes = [s for s in (
+                m.sharpe_ratio(returns_matrix[n], periods_per_year=usable_folds) for n in names
+            ) if s is not None]
+            trial_std = statistics.pstdev(trial_sharpes) if len(trial_sharpes) > 1 else 1.0
+            if sharpe is not None:
+                dsr_value = m.deflated_sharpe_ratio(sharpe, n_trials=n_trials, n_obs=usable_folds,
+                                                    trial_sharpe_std=trial_std or 1.0)
+
+    oos_start, oos_end = folds[0]["test"][0], folds[-1]["test"][1]
+    buy_hold_returns = []
+    for d in universe_data.values():
+        prices = {b["date"]: b["c"] for b in d["bars"]}
+        dates_in_range = sorted(dd for dd in prices if oos_start <= dd <= oos_end)
+        if len(dates_in_range) >= 2 and prices[dates_in_range[0]]:
+            buy_hold_returns.append((prices[dates_in_range[-1]] / prices[dates_in_range[0]] - 1) * 100)
+    universe_buy_hold = sum(buy_hold_returns) / len(buy_hold_returns) if buy_hold_returns else None
+
+    return {
+        "candidates": names,
+        "plateau": plateau,
+        "point_best": {"name": point_best_name, "score": valid_means.get(point_best_name)},
+        "fold_argmax": fold_argmax,
+        "candidate_scores": mean_scores,
+        "dsr": dsr_value,
+        "pbo": pbo_value,
+        "n_trials": n_trials,
+        "vs_buy_hold": {
+            "chosen_name": point_best_name,
+            "chosen_oos_mean_return_pct": mean_scores.get(point_best_name),
+            "universe_mean_buy_hold_return_pct": universe_buy_hold,
+        },
+        "decision": evaluate_decision(plateau, pbo_value, dsr_value, plateau_width_min_frac=chance_threshold),
         "trials": trials,
     }

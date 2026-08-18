@@ -45,6 +45,24 @@ def test_simulate_picks_best_ranked_names_and_excludes_others():
     assert traded_codes == {"A", "B"}
 
 
+def test_simulate_ranking_weights_override_changes_selection():
+    # A: weak revenue/ROE (base=10) but strong momentum; B: strong
+    # revenue/ROE (base=100) but weak momentum. Default RANKING_WEIGHTS
+    # (revenue+roe=0.7 outweighs momentum=0.3) picks B; a momentum-only
+    # override picks A instead -- proves PORTFOLIO_PARAMS["ranking_weights"]
+    # actually reaches finlab_factors.composite_scores() (docs/https-
+    # finlab-finance-blog-python-get-tai-memoized-lighthouse.md Phase 5,
+    # applied to Phase 4's rank-IC-derived weight suggestions).
+    universe = {"A": _entry(10, 2.0), "B": _entry(100, 0.01)}
+    default_result = pb.simulate(universe, params={"top_n": 1})
+    assert {t["code"] for t in default_result["trades"]} == {"B"}
+
+    override_result = pb.simulate(universe, params={
+        "top_n": 1, "ranking_weights": {"revenue": 0.0, "roe": 0.0, "momentum": 1.0},
+    })
+    assert {t["code"] for t in override_result["trades"]} == {"A"}
+
+
 def test_simulate_equity_grows_when_selected_names_trend_up():
     universe = {"A": _entry(100, 0.5), "B": _entry(80, 0.4)}
     result = pb.simulate(universe, params={"top_n": 2, "initial_capital": 1_000_000})

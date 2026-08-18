@@ -158,13 +158,20 @@ def _pct_rank(values):
     return ranks
 
 
-def composite_scores(universe_data, date):
+def composite_scores(universe_data, date, weights=None):
     """universe_data: {code: {"bars": [...], "bar_dates": [...],
     "revenue_series": [...], "roe_series": [...]}} (bar_dates = bars' date
     field pre-extracted, see _bar_index_on_or_before). Returns {code: score}
     for codes that pass the liquidity filter and have all three factors
     available as of `date` -- percentile ranks are computed within this
     survivor set (filter, then rank).
+
+    weights: optional {"revenue","roe","momentum"} override for the module-
+    level RANKING_WEIGHTS -- lets a caller compare candidate weightings
+    (e.g. src/optimize.py's sweep_ranking_weights_walk_forward(), Phase 5
+    applied to Phase 4's rank-IC-derived suggestions) without mutating
+    global state. None (the default) uses RANKING_WEIGHTS, unchanged
+    behavior for every existing caller.
 
     This is NOT the same rank order as finlab_strategy.py's FinLab-backed
     ranking_position(), which ranks over the WHOLE fetched universe first
@@ -193,15 +200,16 @@ def composite_scores(universe_data, date):
     if not raw:
         return {}
 
+    w = weights if weights is not None else RANKING_WEIGHTS
     mom_rank = _pct_rank({c: v["momentum"] for c, v in raw.items()})
     yoy_rank = _pct_rank({c: v["yoy"] for c, v in raw.items()})
     roe_rank = _pct_rank({c: v["roe"] for c, v in raw.items()})
 
     return {
         code: (
-            yoy_rank[code] * RANKING_WEIGHTS["revenue"]
-            + roe_rank[code] * RANKING_WEIGHTS["roe"]
-            + mom_rank[code] * RANKING_WEIGHTS["momentum"]
+            yoy_rank[code] * w["revenue"]
+            + roe_rank[code] * w["roe"]
+            + mom_rank[code] * w["momentum"]
         )
         for code in raw
     }

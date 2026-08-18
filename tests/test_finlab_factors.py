@@ -161,6 +161,25 @@ def test_composite_scores_empty_when_no_survivors():
     assert ff.composite_scores({}, "2023-01-01") == {}
 
 
+def test_composite_scores_weights_override_can_flip_ranking():
+    # A has the best momentum but worst revenue/ROE; B is the reverse.
+    # Default RANKING_WEIGHTS (revenue+roe=0.7 vs momentum=0.3) favors B,
+    # since B wins 2 of 3 percentile-ranked factors; a momentum-only
+    # override flips it to A.
+    universe = {
+        "A": _universe_entry(10, 2.0),    # weak fundamentals, strong momentum
+        "B": _universe_entry(100, 0.01),  # strong fundamentals, weak momentum
+    }
+    date = universe["A"]["bar_dates"][-1]
+    default_scores = ff.composite_scores(universe, date)
+    assert default_scores["B"] > default_scores["A"]
+
+    flipped = ff.composite_scores(universe, date, weights={"revenue": 0.0, "roe": 0.0, "momentum": 1.0})
+    assert flipped["A"] > flipped["B"]
+    # module-level RANKING_WEIGHTS must be untouched by the override
+    assert ff.RANKING_WEIGHTS == {"revenue": 0.4, "roe": 0.3, "momentum": 0.3}
+
+
 # -------------------------------------------------------------------- top_n --
 
 def test_top_n_descending_and_truncated():
