@@ -40,6 +40,22 @@ def test_upsert_overwrites_same_pk_not_duplicates(tmp_path):
     conn.close()
 
 
+def test_upsert_preserves_existing_adj_factor(tmp_path):
+    conn = _conn(tmp_path)
+    db.upsert_daily_bars(conn, "2330", [
+        {"date": "2024-01-01", "o": 100, "h": 101, "l": 99, "c": 100, "v": 1000, "source": "finmind"},
+    ])
+    db.update_adj_factors(conn, "2330", {"2024-01-01": 0.95})
+    db.upsert_daily_bars(conn, "2330", [
+        {"date": "2024-01-01", "o": 200, "h": 201, "l": 199, "c": 200, "v": 2000, "source": "finmind"},
+        {"date": "2024-01-02", "o": 201, "h": 202, "l": 200, "c": 201, "v": 2100, "source": "finmind"},
+    ])
+    rows = db.query_daily_bars(conn, "2330")
+    assert rows[0]["c"] == 200 and rows[0]["adj_factor"] == 0.95  # OHLCV updated, adj_factor kept
+    assert rows[1]["adj_factor"] is None  # brand-new row still defaults to NULL
+    conn.close()
+
+
 def test_daily_bars_round_trip(tmp_path):
     conn = _conn(tmp_path)
     rows_in = [

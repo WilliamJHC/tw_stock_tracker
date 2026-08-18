@@ -284,29 +284,43 @@ def bollinger_squeeze(closes, period=20, std_mult=2, lookback=120, pct_threshold
     n = len(closes)
     if n < period:
         return None
+
+    def _widths(lo, hi):
+        out = []
+        for i in range(lo, hi):
+            seg = closes[i - period + 1:i + 1]
+            m = sum(seg) / period
+            sd = stdev(seg)
+            out.append(None if (not sd or not m) else (2 * std_mult * sd) / m)
+        return out
+
     # Only the last `lookback` valid width readings ever matter (see below),
     # and each width[i] depends only on closes[i-period+1:i+1] -- no
     # recursion across bars -- so bounding the scan to a trailing window is
     # bit-identical to scanning the full history from bar 0, but O(lookback)
-    # per call instead of O(n). `+ period` is slack for the (rare) None gaps
-    # a zero-stdev/zero-mean segment can produce. This was found to be the
+    # per call instead of O(n) in the common case. This was found to be the
     # actual dominant O(n^2) cost in backtest.py's replay_scores() -- ~80%
     # of wall-clock, well past ctx/at's build_backtest_ctx() hoist (see
     # docs/https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md
     # Phase 2a).
-    start = max(period - 1, n - lookback - period)
-    widths = []
-    for i in range(start, n):
-        seg = closes[i - period + 1:i + 1]
-        m = sum(seg) / period
-        sd = stdev(seg)
-        if not sd or not m:
-            widths.append(None)
-            continue
-        widths.append((2 * std_mult * sd) / m)
-    valid = [w for w in widths if w is not None]
-    if not valid or widths[-1] is None:
+    earliest_start = period - 1
+    start = max(earliest_start, n - lookback - period)
+    widths = _widths(start, n)
+    if not widths or widths[-1] is None:
         return None
+    valid = [w for w in widths if w is not None]
+    # `+ period` above is slack for the (rare) None gaps a zero-stdev/zero-
+    # mean flat segment can produce, but a run of gaps longer than that slack
+    # would otherwise silently shrink `window` below `lookback` readings vs.
+    # what a full scan from bar 0 finds. Widen the scan further back until
+    # `lookback` valid readings are collected (or bar 0 is reached) -- only
+    # costs extra work when gaps are unusually dense.
+    while len(valid) < lookback and start > earliest_start:
+        new_start = max(earliest_start, start - lookback)
+        widths = _widths(new_start, start) + widths
+        valid = [w for w in widths if w is not None]
+        start = new_start
+
     current = widths[-1]
     window = valid[-lookback:]
     percentile = sum(1 for w in window if w <= current) / len(window) * 100

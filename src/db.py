@@ -219,15 +219,20 @@ def migrate(conn):
 def upsert_daily_bars(conn, code, rows):
     """`rows`: iterable of dicts with keys date/o/h/l/c/v/source.
 
-    Does NOT preserve adj_factor -- INSERT OR REPLACE overwrites the whole
-    row, and adj_factor isn't one of `rows`' keys, so it reverts to NULL for
-    every date touched. Re-running --refresh-data therefore requires
-    re-running scripts/build_adj_factors.py afterwards (see
-    docs/archive/backtest_plan.md Phase 1a)."""
+    Preserves adj_factor across re-upserts of an existing (code, date) row --
+    ON CONFLICT DO UPDATE only touches o/h/l/c/v/source, leaving adj_factor
+    at whatever scripts/build_adj_factors.py last computed for it instead of
+    silently reverting it to NULL. Only a genuinely new row gets adj_factor's
+    column default (NULL), same as before this fix -- run
+    scripts/build_adj_factors.py once after backfilling brand-new dates, same
+    as always (see docs/archive/backtest_plan.md Phase 1a)."""
     conn.executemany(
         """
-        INSERT OR REPLACE INTO daily_bars (code, date, o, h, l, c, v, source)
+        INSERT INTO daily_bars (code, date, o, h, l, c, v, source)
         VALUES (:code, :date, :o, :h, :l, :c, :v, :source)
+        ON CONFLICT (code, date) DO UPDATE SET
+            o = excluded.o, h = excluded.h, l = excluded.l,
+            c = excluded.c, v = excluded.v, source = excluded.source
         """,
         ({**r, "code": code} for r in rows),
     )

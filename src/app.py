@@ -68,6 +68,7 @@ def api_suggestions():
     run_backtest.py hasn't been run yet -- see pl.build_suggestions()."""
     conn = db.connect()
     db.init_db(conn)
+    db.migrate(conn)
     last_run_at = db.get_meta(conn, "last_run_at")
     conn.close()
     return {"suggestions": pl.build_suggestions(), "last_run_at": last_run_at}
@@ -82,6 +83,7 @@ def api_backtest(code: str):
     code = code.strip().upper()
     conn = db.connect()
     db.init_db(conn)
+    db.migrate(conn)
     strategy_run = db.query_strategy_run(conn, code)
     trades = db.query_trades(conn, strategy_run["run_id"], code) if strategy_run else []
     result = {

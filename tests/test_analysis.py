@@ -266,6 +266,42 @@ def test_bollinger_squeeze_bounded_scan_matches_full_scan():
         assert actual["is_squeeze"] == expected["is_squeeze"]
 
 
+def test_bollinger_squeeze_bounded_scan_matches_full_scan_with_dense_none_gaps():
+    """A long flat (zero-stdev) segment produces far more than `period` None
+    width readings in a row -- more than the trailing window's slack can
+    absorb -- so the bounded scan must widen its window until it finds
+    `lookback` valid readings, same as a full scan from bar 0 would."""
+    import random
+    rng = random.Random(29)
+    closes = [80.0]
+    for _ in range(200):
+        closes.append(closes[-1] * (1 + rng.uniform(-0.03, 0.032)))
+    flat_price = closes[-1]
+    closes += [flat_price] * 150  # a 150-bar flat run -> ~130 consecutive None widths
+    for _ in range(50):
+        closes.append(closes[-1] * (1 + rng.uniform(-0.03, 0.032)))
+
+    def full_scan(closes, period=20, std_mult=2, lookback=120, pct_threshold=20):
+        n = len(closes)
+        widths = []
+        for i in range(period - 1, n):
+            seg = closes[i - period + 1:i + 1]
+            m = sum(seg) / period
+            sd = an.stdev(seg)
+            widths.append(None if (not sd or not m) else (2 * std_mult * sd) / m)
+        valid = [w for w in widths if w is not None]
+        current = widths[-1]
+        window = valid[-lookback:]
+        percentile = sum(1 for w in window if w <= current) / len(window) * 100
+        return {"bandwidth": current, "percentile": percentile, "is_squeeze": percentile <= pct_threshold}
+
+    expected = full_scan(closes)
+    actual = an.bollinger_squeeze(closes)
+    assert actual["bandwidth"] == expected["bandwidth"]
+    assert actual["percentile"] == expected["percentile"]
+    assert actual["is_squeeze"] == expected["is_squeeze"]
+
+
 # ------------------------------------------------------- donchian position -
 
 def test_donchian_position_hand_computed():

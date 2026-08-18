@@ -38,6 +38,7 @@ import datetime as dt
 import math
 
 import finlab_factors as ff
+import metrics as mt
 
 PORTFOLIO_PARAMS = {
     "initial_capital": 1_000_000,  # NTD
@@ -187,10 +188,11 @@ def simulate(universe_data, params=None):
 
 
 def _compute_metrics(equity_curve, initial_capital):
-    """CAGR / Sharpe / max drawdown off the daily equity curve. Sharpe uses
-    a 0% risk-free rate: strategy is a long-only relative comparison, 0 is
-    a conservative, easily-adjusted default (matches backtest.py's
-    convention)."""
+    """CAGR / Sharpe / max drawdown off the daily equity curve, via
+    metrics.py's shared implementations (no more duplicating that logic
+    here -- see metrics.py's module docstring). Sharpe uses a 0% risk-free
+    rate: strategy is a long-only relative comparison, 0 is a conservative,
+    easily-adjusted default (matches backtest.py's convention)."""
     if len(equity_curve) < 2:
         return {}
     equities = [row["equity"] for row in equity_curve]
@@ -204,25 +206,13 @@ def _compute_metrics(equity_curve, initial_capital):
     start = dt.datetime.strptime(dates[0], "%Y-%m-%d")
     end = dt.datetime.strptime(dates[-1], "%Y-%m-%d")
     n_days = (end - start).days or 1
-    final_over_initial = equities[-1] / initial_capital
-    cagr = final_over_initial ** (365 / n_days) - 1 if final_over_initial > 0 else None
-
-    mean_ret = sum(daily_returns) / len(daily_returns) if daily_returns else 0
-    variance = sum((r - mean_ret) ** 2 for r in daily_returns) / len(daily_returns) if daily_returns else 0
-    std_ret = math.sqrt(variance)
-    sharpe = (mean_ret / std_ret * math.sqrt(252)) if std_ret else None
-
-    peak, max_dd = equities[0], 0.0
-    for e in equities:
-        peak = max(peak, e)
-        if peak:
-            max_dd = min(max_dd, (e - peak) / peak)
+    cagr = mt.cagr_pct(initial_capital, equities[-1], n_days)
 
     return {
         "start_date": dates[0],
         "end_date": dates[-1],
-        "total_return_pct": (final_over_initial - 1) * 100,
-        "cagr_pct": cagr * 100 if cagr is not None else None,
-        "sharpe": sharpe,
-        "max_drawdown_pct": max_dd * 100,
+        "total_return_pct": (equities[-1] / initial_capital - 1) * 100,
+        "cagr_pct": cagr,
+        "sharpe": mt.sharpe_ratio(daily_returns),
+        "max_drawdown_pct": mt.max_drawdown_pct(equities),
     }

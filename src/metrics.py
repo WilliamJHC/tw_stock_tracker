@@ -97,14 +97,16 @@ def turnover_pct(traded_value, avg_portfolio_value):
 # --------------------------------------------------------------- rank-IC ----
 
 def _pct_rank(values):
-    """Percentile rank (0..1) of each value within `values`; ties share
-    the average rank. Same convention as finlab_factors._pct_rank so
-    Phase 4 can reuse either implementation interchangeably."""
+    """Percentile rank in (0, 1] of each value within `values`; ties share
+    the average rank. Same convention as finlab_factors._pct_rank (matches
+    pandas .rank(pct=True)) so Phase 4 can actually reuse either
+    implementation interchangeably -- rank_ic()'s Spearman correlation
+    would have been unaffected by a different (but still monotonic)
+    convention here, but a future direct comparison of raw percentile
+    values between the two implementations would not have been."""
     n = len(values)
     if n == 0:
         return []
-    if n == 1:
-        return [0.0]
     order = sorted(range(n), key=lambda i: values[i])
     ranks = [0.0] * n
     i = 0
@@ -112,9 +114,9 @@ def _pct_rank(values):
         j = i
         while j + 1 < n and values[order[j + 1]] == values[order[i]]:
             j += 1
-        avg_rank = (i + j) / 2
+        avg_rank_pct = ((i + j) / 2 + 1) / n
         for k in range(i, j + 1):
-            ranks[order[k]] = avg_rank / (n - 1)
+            ranks[order[k]] = avg_rank_pct
         i = j + 1
     return ranks
 

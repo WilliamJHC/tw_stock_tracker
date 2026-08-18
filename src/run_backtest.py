@@ -245,8 +245,9 @@ def main():
             print(f"\n{len(failed)}/{len(codes)} 檔匯入失敗: {', '.join(failed)}")
         else:
             print(f"\n{len(codes)} 檔全部匯入成功")
-        print("提醒：--refresh-data 會清空重抓日線的 adj_factor（見 db.upsert_daily_bars "
-              "docstring），記得之後跑一次 scripts/build_adj_factors.py 重建還原因子。")
+        print("提醒：--refresh-data 只會補上新日期的日線（adj_factor 預設 NULL），"
+              "已存在日期的 adj_factor 會被保留（見 db.upsert_daily_bars docstring）。"
+              "若這段期間有新的除權息，記得跑一次 scripts/build_adj_factors.py 補上新日期的還原因子。")
     else:
         print("未加 --refresh-data，不會呼叫 FinMind。目前 DB 內容：")
         for code in codes:

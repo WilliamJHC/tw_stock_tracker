@@ -207,6 +207,7 @@ def build_suggestions(codes=None):
 
     conn = db.connect()
     db.init_db(conn)
+    db.migrate(conn)
     last_run_at = db.get_meta(conn, "last_run_at")
 
     payloads = build_watchlist_payloads(codes)

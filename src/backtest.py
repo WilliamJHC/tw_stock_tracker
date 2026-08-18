@@ -30,6 +30,7 @@ import datetime as dt
 import json
 
 import analysis as an
+import metrics as mt
 
 DEFAULT_HORIZONS = (5, 10, 20)
 
@@ -359,13 +360,11 @@ def simulate(score_rows, bars, params=None):
 
     n_trades = len(trades)
     wins = sum(1 for t in trades if t["ret_pct"] > 0)
-    equity = 1.0
-    peak = 1.0
-    max_dd = 0.0
+    equities = [1.0]
     for t in trades:
-        equity *= 1 + t["ret_pct"] / 100
-        peak = max(peak, equity)
-        max_dd = min(max_dd, (equity - peak) / peak * 100)
+        equities.append(equities[-1] * (1 + t["ret_pct"] / 100))
+    equity = equities[-1]
+    max_dd = mt.max_drawdown_pct(equities)
 
     start_date = score_rows[0]["date"] if score_rows else None
     end_date = score_rows[-1]["date"] if score_rows else None
