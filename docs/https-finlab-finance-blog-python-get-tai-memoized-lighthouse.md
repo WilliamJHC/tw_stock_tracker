@@ -243,6 +243,12 @@ Qlib 真正有價值的是 rank-IC 因子評估 + 滾動重訓，純 stdlib 約 
 
 風險：**中高**。最大風險是框架本身變成過擬合的加速器。緩解：`n_trials` 強制寫進 DB 且 DSR 必須用真實累計試驗數。
 
+**2026-08-18 補充：完整 16 維（4 策略參數 + 3 因子權重 + 9 分項權重）搜尋，真實資料跑過一次。** 因子權重（RANKING_WEIGHTS）維持用具名候選比較（見上方 `sweep_ranking_weights_walk_forward()`），不納入連續搜尋——Phase 4 的 IC/ICIR 顯著性檢定已經對每個因子做過「有沒有真訊號」的把關，對權重再做連續搜尋只是在同一批雜訊上重學一次。剩下 13 維（`STRATEGY_PARAMS` 4 個 + `SCORE_WEIGHTS` 9 個，都在單檔引擎內）用 `coordinate_descent()` 從現況出發 + 1 次 `random_restart()`，在 8 檔 watchlist 子集合上做 in-sample 搜尋（159 次試驗），找到一組候選（`exit_composite=-60, atr_mult=100, max_hold_days=90, fee_pct=0.3`，分項權重小幅重分配、maPosition/orderFlow 略增）。
+
+用全部 23 檔 watchlist 做 purged walk-forward（4 fold、purge=120 根 bar）驗證這組候選 vs 現況：OOS 平均報酬 338.5% vs 322.8%（88 個可用 code×fold 樣本，勝 48/88=54.5%），DSR=1.00（過門檻），但 **PBO=0.91，遠超過 0.5 門檻——框架判定 reject**。結論：**不採用**這組搜尋出來的候選，維持現有 `STRATEGY_PARAMS`/`SCORE_WEIGHTS`。這正是框架設計要抓的情況——即使 DSR 與勝率都過關，PBO（CSCV 對 159 次試驗的過擬合機率估計）仍能單獨否決，說明 in-sample 搜出來的「改善」大機率是雜訊而非真訊號。兩個候選在這份倖存者偏誤 watchlist 上都遠輸買進持有（均值 2181.7%），與 Phase 0/3 的結論一致，未被此次搜尋推翻。
+
+範圍簡化（因時間成本記錄，非隱藏）：搜尋階段用 8 檔子集合（而非全 23 檔）以控制單次 `replay_scores()` 全歷史重算的耗時（SCORE_WEIGHTS 改變會使分數改變，每個候選權重向量都要重跑一次 replay，23 檔 × 3.8s/檔 對 coordinate descent 的試驗量而言太貴）；OOS 驗證階段換回全 23 檔。此驗證是一次性腳本（`$CLAUDE_JOB_DIR/tmp`，未進 repo），複用 `src/optimize.py` 既有的 `coordinate_descent`/`random_restart`/`purged_walk_forward_splits`/`evaluate_decision`/`metrics.pbo`/`metrics.deflated_sharpe_ratio`，未新增 src 程式碼——這些通用元件已足夠支撐這次驗證，不需要為了跑一次而新增永久 CLI。
+
 ---
 
 ## 明確不做
