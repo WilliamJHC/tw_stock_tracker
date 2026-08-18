@@ -157,7 +157,10 @@ def simulate(universe_data, params=None):
                     diff_value = target_value_each - current_shares * px
                     if diff_value > 0:
                         buy_fill = px * (1 + slip)
-                        buy_shares = _floor_to_lot(diff_value / (buy_fill * (1 + leg_fee)), lot_size)
+                        # sizing uses the quoted close px, not buy_fill -- see module
+                        # docstring's slippage_pct paragraph (sizing decided before the
+                        # fill price is known, matching the sell leg's use of px below).
+                        buy_shares = _floor_to_lot(diff_value / (px * (1 + leg_fee)), lot_size)
                         if buy_shares <= 0:
                             continue  # too small for even one lot -- cash sits idle till next rebalance
                         cost = buy_shares * buy_fill * (1 + leg_fee)

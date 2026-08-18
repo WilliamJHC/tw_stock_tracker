@@ -52,6 +52,16 @@ PLATEAU_WIDTH_MIN_FRAC = 0.2
 PBO_MAX = 0.5
 DSR_MIN_SIGNIFICANT = 0.95
 
+# sweep_ranking_weights_walk_forward()'s mode="rolling" sim window needs to
+# start this many CALENDAR days before a fold's train_start so that
+# finlab_factors.momentum_pct()'s MOMENTUM_DAYS (60 TRADING bars) lookback is
+# already satisfied at the fold's earliest rebalance dates -- otherwise those
+# early rebalances see momentum_pct()/liquidity_ok() return None and
+# composite_scores() silently drops otherwise-eligible codes. 120 calendar
+# days is a generous margin over 60 trading days once weekends/holidays are
+# counted (same order of magnitude as PURGE_BARS_DEFAULT above).
+ROLLING_MOMENTUM_LOOKBACK_BUFFER_DAYS = 120
+
 
 # ------------------------------------------------- walk-forward splitting --
 
@@ -274,6 +284,7 @@ def sweep_param_walk_forward(bars, inst, margin, shareholding, sbl, rs_by_date,
         test_score_rows = [rows_by_date[d] for d in (dates[i] for i in test_range) if d in rows_by_date]
         if not test_score_rows:
             continue
+        fold_scores = {}
         fold_best_value, fold_best_score = None, float("-inf")
         for value in candidate_values:
             params = dict(base_params, **{param_name: value})
@@ -281,12 +292,19 @@ def sweep_param_walk_forward(bars, inst, margin, shareholding, sbl, rs_by_date,
             total_return = result["summary"]["total_return"]
             n_trials += 1
             trials.append({"fold_idx": fold_idx, "value": value, "score": total_return})
-            scores_by_value[value].append(total_return)
+            fold_scores[value] = total_return
             score_for_fold_argmax = total_return if total_return is not None else float("-inf")
             if score_for_fold_argmax > fold_best_score:
                 fold_best_value, fold_best_score = value, score_for_fold_argmax
+        # Only folded into scores_by_value/returns_matrix when the fold is
+        # "usable" (fold_argmax gets an entry) -- otherwise a fold where every
+        # candidate scored None would still push a 0.0 into every value's
+        # series, making returns_matrix longer than usable_folds and silently
+        # misaligning m.pbo()'s n_blocks with the actual row length below.
         if fold_best_value is not None:
             fold_argmax.append(fold_best_value)
+            for value in candidate_values:
+                scores_by_value[value].append(fold_scores[value])
 
     usable_folds = len(fold_argmax)
     if usable_folds == 0:
@@ -446,8 +464,14 @@ def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, pur
     for fold_idx, fold in enumerate(folds):
         train_start, _ = fold["train"]
         test_start, test_end = fold["test"]
-        sim_start = calendar[0] if mode == "anchored" else train_start
+        if mode == "anchored":
+            sim_start = calendar[0]
+        else:
+            buffered = (dt.date.fromisoformat(train_start)
+                        - dt.timedelta(days=ROLLING_MOMENTUM_LOOKBACK_BUFFER_DAYS)).isoformat()
+            sim_start = max(calendar[0], buffered)
         sliced = _slice_universe_by_date(universe_data, sim_start, test_end)
+        fold_scores = {}
         fold_best_name, fold_best_score = None, float("-inf")
         for name in names:
             p = dict(sim_params or {})
@@ -459,12 +483,17 @@ def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, pur
                 score = (oos_points[-1]["equity"] / oos_points[0]["equity"] - 1) * 100
             n_trials += 1
             trials.append({"fold_idx": fold_idx, "name": name, "score": score})
-            scores_by_name[name].append(score)
+            fold_scores[name] = score
             score_for_argmax = score if score is not None else float("-inf")
             if score_for_argmax > fold_best_score:
                 fold_best_name, fold_best_score = name, score_for_argmax
+        # See sweep_param_walk_forward()'s matching comment: only fold into
+        # scores_by_name/returns_matrix on a usable fold, so its length stays
+        # aligned with usable_folds (n_blocks passed to m.pbo() below).
         if fold_best_name is not None:
             fold_argmax.append(fold_best_name)
+            for name in names:
+                scores_by_name[name].append(fold_scores[name])
 
     usable_folds = len(fold_argmax)
     if usable_folds == 0:
