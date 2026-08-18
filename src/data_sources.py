@@ -213,17 +213,18 @@ def _fugle_daily(code, start_date):
     only free source with a full back-adjusted series, see get_daily()'s
     docstring and that Phase's "不要為了接富果而降級 yfinance" warning).
 
-    >>> UNVERIFIED <<< endpoint path, X-API-KEY header, and response shape
-    follow Fugle's public MarketData API docs, but this has never been
-    exercised against a real key/account (no FUGLE_API_KEY was available
-    while writing this). Confirm against a live key before trusting it in
-    production. Until then this is inert: _load_fugle_key() returns "" with
-    no key configured, so this raises immediately and get_daily() behaves
-    exactly as it did before this function existed.
-
-    Assumes raw (unadjusted, FinMind-scale) prices -- also UNCONFIRMED; if a
-    real key shows Fugle's Close is already split-adjusted like yfinance's,
-    get_daily()'s `adjusted` flag for this branch needs to flip to True.
+    Verified 2026-08-18 against a live key: endpoint path, X-API-KEY header,
+    and response shape (`{"data": [{"date","open","high","low","close",
+    "volume"}, ...]}`) all confirmed correct for 2330. Close is raw
+    (unadjusted, FinMind-scale) -- 30/30 overlapping trading days matched
+    FinMind's raw close exactly (diff=0.000% every day), so `get_daily()`'s
+    `adjusted=False` for this branch is correct. Caveat: the verification
+    window had no corporate action for 2330, so it confirms price *scale*
+    matches FinMind but doesn't independently exercise a split/dividend
+    event; if a future check on a code with a recent action disagrees,
+    revisit this assumption. Still inert with no key configured:
+    _load_fugle_key() returns "" and this raises immediately, so
+    get_daily() behaves exactly as it did before this function existed.
     """
     if not FUGLE_API_KEY:
         raise SourceError("fugle: no FUGLE_API_KEY configured")
@@ -315,8 +316,9 @@ def get_daily(code, days=730, cache=True):
 
     adjusted=False for finmind/fugle/twse (raw, unadjusted for splits/
     dividends -- see src/adjust.py for the separate adj_factor pipeline that
-    back-adjusts these; fugle's raw-scale assumption is UNCONFIRMED, see
-    _fugle_daily()'s docstring). adjusted=True for yfinance: its "Close"
+    back-adjusts these; fugle's raw-scale assumption confirmed 2026-08-18
+    against a live key, see _fugle_daily()'s docstring). adjusted=True for
+    yfinance: its "Close"
     column (and the o/h/l we derive alongside it) is already split-adjusted
     upstream by Yahoo even with auto_adjust=False, though not dividend-
     adjusted -- so a yfinance-sourced bar is NOT on the same raw price scale
@@ -358,14 +360,14 @@ def get_daily(code, days=730, cache=True):
     except (SourceError, requests.RequestException, ValueError, KeyError):
         hist = None
 
-    # 2. Fugle (FinMind 429/402 long-range fallback -- UNVERIFIED against a
-    # real key, and inert without one; see _fugle_daily()'s docstring)
+    # 2. Fugle (FinMind 429/402 long-range fallback -- verified 2026-08-18
+    # against a live key, see _fugle_daily()'s docstring; inert without one)
     if not hist or not hist["c"]:
         try:
             start = (dt.date.today() - dt.timedelta(days=days)).isoformat()
             hist = _fugle_daily(code, start)
             hist["source"] = "fugle"
-            hist["adjusted"] = False  # UNCONFIRMED, see _fugle_daily() docstring
+            hist["adjusted"] = False  # confirmed raw/FinMind-scale, see _fugle_daily() docstring
         except (SourceError, requests.RequestException, ValueError, KeyError):
             hist = None
 

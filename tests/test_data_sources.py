@@ -329,10 +329,10 @@ def test_load_token_missing_file_returns_empty(tmp_path, monkeypatch):
 
 
 # ------------------------------------------------------------------ fugle --
-# _fugle_daily() itself is UNVERIFIED against a real Fugle account/key (see
-# its docstring) -- these tests only lock down this module's OWN contract
-# (inert without a key, raises/parses as expected when it does call out),
-# not that the mocked response shape matches Fugle's real API.
+# _fugle_daily()'s endpoint/header/response-shape/raw-scale assumptions were
+# confirmed 2026-08-18 against a live key (see its docstring). These tests
+# still run mocked (no network) -- they lock down this module's OWN contract
+# (inert without a key, raises/parses as expected when it does call out).
 
 def test_fugle_daily_inert_without_api_key(monkeypatch):
     monkeypatch.setattr(ds, "FUGLE_API_KEY", "")
