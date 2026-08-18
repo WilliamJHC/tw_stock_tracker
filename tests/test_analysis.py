@@ -411,16 +411,32 @@ def test_components_weighted_sum_equals_score():
 
 
 def test_components_weighted_sum_equals_score_with_of_divergence():
-    # exercise the orderFlow component's folded-in divergence bonus (the one
-    # component whose raw value isn't a plain pre-weight ratio/bias).
-    m_closes = [100.0 - i * 0.1 for i in range(10)]
-    m = {"t": [1_750_000_000 + i * 300 for i in range(10)],
-         "c": m_closes, "h": [c * 1.001 for c in m_closes], "l": [c * 0.999 for c in m_closes],
-         "v": [100] * 10}
-    daily = _random_daily(seed=11)
-    a = an.analyze(daily, minute=m)
+    # exercise the orderFlow component's flat divergence override, which is
+    # added to the score OUTSIDE the components*weights dot product (see
+    # analyze()'s order_flow_override comment) -- tick_days gives exact
+    # control over both price and OF delta, needed to actually land in
+    # of_summary()'s divergence branch (a plain few-minute-bar OF estimate
+    # over too few calendar days, as this test used to build, never reaches
+    # the >=10-day window that divergence detection requires).
+    import datetime as dt
+    n = 15
+    closes = [100.0 + i * 1.5 for i in range(n)]  # steady rise -> price leg of "bearish" divergence
+    daily = {
+        "t": [1_700_000_000 + i * 86400 for i in range(n)],
+        "o": closes[:], "h": [c * 1.01 for c in closes], "l": [c * 0.99 for c in closes],
+        "c": closes, "v": [100_000] * n,
+    }
+    dates = [dt.datetime.fromtimestamp(t).date().isoformat() for t in daily["t"]]
+    # Last 10 days: net aggressive selling (TickType=1) every day while price
+    # keeps rising over that window -> bearish divergence (price up, sellers
+    # dominant, "出貨嫌疑").
+    tick_days = {d: [{"volume": 100, "TickType": 1}] for d in dates[-10:]}
+
+    a = an.analyze(daily, tick_days=tick_days)
     assert a["of"] is not None
-    weighted = sum(a["components"][k] * an.SCORE_WEIGHTS[k] for k in an.SCORE_WEIGHTS)
+    assert a["of"]["divergence"] == "bearish"  # sanity: this test must actually exercise the override
+    order_flow_override = -10.0
+    weighted = sum(a["components"][k] * an.SCORE_WEIGHTS[k] for k in an.SCORE_WEIGHTS) + order_flow_override
     assert a["score"] == round(max(-100.0, min(100.0, weighted)))
 
 
