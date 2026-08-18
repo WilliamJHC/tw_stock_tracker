@@ -97,6 +97,10 @@ def main():
     db.migrate(conn)
     run_id = dt.datetime.now().strftime("%Y%m%d_%H%M%S") + "_opt"
 
+    next_trial_id = 0  # running counter across the whole --codes loop: optimization_runs'
+    # PRIMARY KEY is (run_id, trial_id) with code as a plain non-key column, so a per-code
+    # enumerate() restarting at 0 would let later codes' INSERT OR REPLACE silently overwrite
+    # earlier codes' rows at the same key.
     for code in codes:
         result = run_for_code(conn, code, args.param, candidates, args.n_folds,
                               args.purge_bars, args.mode, base_params=None)
@@ -109,8 +113,9 @@ def main():
                 "trial_id": i, "code": code, "param_name": args.param, "fold_idx": t["fold_idx"],
                 "params_json": json.dumps({args.param: t["value"]}), "score": t["score"], "computed_at": now,
             }
-            for i, t in enumerate(result["trials"])
+            for i, t in enumerate(result["trials"], start=next_trial_id)
         ])
+        next_trial_id += len(result["trials"])
 
     print(f"\nrun_id={run_id}，每筆試驗（含被拒絕的候選值）已寫入 optimization_runs，"
           f"可用 db.count_optimization_trials(conn, run_id) 事後核對真實 n_trials。")

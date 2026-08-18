@@ -830,12 +830,17 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
     w = SCORE_WEIGHTS
     signals = []
     # Unweighted per-dimension raw values (docs/.../lighthouse.md Phase 2b):
-    # score == sum(components[k] * w[k]) always (see "finalize" below) --
-    # replay_scores() persists these so re-weighting SCORE_WEIGHTS becomes a
-    # dot product over stored rows instead of a full replay. orderFlow's raw
-    # value folds in the flat +-10 divergence override (see that block) so
-    # the identity holds even when a divergence signal fires.
+    # score == sum(components[k] * w[k]) + order_flow_override always (see
+    # "finalize" below) -- replay_scores() persists components so re-weighting
+    # SCORE_WEIGHTS becomes a dot product over stored rows instead of a full
+    # replay. orderFlow's divergence signal is a flat +-10 override that is
+    # NOT proportional to w["orderFlow"], so it is kept out of components and
+    # added directly to the final score instead (folding it into components
+    # via division-by-weight would crash at w["orderFlow"]==0 and would make
+    # the "reconstructed" score depend on whatever weight is active at
+    # reconstruction time instead of staying flat).
     components = {k: 0.0 for k in w}
+    order_flow_override = 0.0
 
     # ---- MA position / alignment ----
     ma_pos, ma_cnt = 0, 0
@@ -940,16 +945,15 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
             signals.append({"text": f"主動{side}已連續 {abs(of['streak'])} 個交易日",
                             "bias": 1 if of["streak"] > 0 else -1, "bt": None})
         # divergence is a flat +-10 score override, not proportional to
-        # w["orderFlow"] -- folded into the raw component (divided back out
-        # by w["orderFlow"]) so score == sum(components[k]*w[k]) still holds.
-        divergence_pts = 0.0
+        # w["orderFlow"] -- see the components["orderFlow"] comment above for
+        # why it's added to order_flow_override instead of folded in here.
         if of["divergence"] == "bearish":
             signals.append({"text": "⚠ 量價背離：近10日價格上漲但主動賣盤佔優（出貨嫌疑）", "bias": -1, "bt": None})
-            divergence_pts = -10.0
+            order_flow_override = -10.0
         elif of["divergence"] == "bullish":
             signals.append({"text": "量價背離：近10日價格下跌但主動買盤佔優（吸籌嫌疑）", "bias": 1, "bt": None})
-            divergence_pts = 10.0
-        components["orderFlow"] = ratio_c + divergence_pts / w["orderFlow"]
+            order_flow_override = 10.0
+        components["orderFlow"] = ratio_c
 
     # ---- short-term (1-5d): ATR, gap tracker ----
     atr_val = atr(highs, lows, closes, SHORT_TERM_THRESHOLDS["atr_period"])  # info only, not scored
@@ -995,7 +999,7 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
                         "trust_recent": sum(r["trust"] for r in inst[-5:])}
 
     # ---- finalize ----
-    score = sum(components[k] * w[k] for k in w)
+    score = sum(components[k] * w[k] for k in w) + order_flow_override
     score = round(max(-100.0, min(100.0, score)))
     label = label_for(score)
 
