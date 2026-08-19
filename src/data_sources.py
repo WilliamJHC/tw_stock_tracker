@@ -432,6 +432,14 @@ def parse_mis_item(item):
     this file mirrored mis_source.py's fix late (2026-08-13 fix landed
     there, not here, until 2026-08-19).
 
+    Field mapping (verified against a live getStockInfo.jsp response):
+        c = stock code; z = last price ('-' during the pre-open call auction
+            -> fall back to pz); pz = simulated/pre-open matched price;
+            y = previous close; v = accumulated volume, in lots (張);
+            n = stock name; a/f = ask prices/volumes, '_'-joined, low->high
+            (up to 5, aligned); b/g = bid prices/volumes, '_'-joined,
+            high->low (up to 5, aligned); t / '%' = time string "HH:MM:SS".
+
     Price fallback, in order:
     1. z (last trade price)
     2. pz (pre-open call-auction simulated match price; z is legitimately
