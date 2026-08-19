@@ -392,16 +392,106 @@ def get_daily(code, days=730, cache=True):
     return hist
 
 
-def _first_book_level(s):
-    """First '_'-joined price from an MIS bid/ask depth string (top of book)."""
-    for tok in (s or "").split("_"):
-        tok = tok.strip()
-        if tok:
-            try:
-                return float(tok)
-            except ValueError:
-                return None
-    return None
+def _mis_num(item, key):
+    s = item.get(key, "")
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mis_book_levels(item, price_key, vol_key, limit=5):
+    """Parse an MIS '_'-joined price/vol depth string (e.g. item['b']/item['g'])
+    into aligned float/int lists, dropping trailing empty slots (MIS pads
+    unused levels with '_')."""
+    raw_p = (item.get(price_key) or "").split("_")
+    raw_v = (item.get(vol_key) or "").split("_")
+    prices, vols = [], []
+    for p, v in zip(raw_p, raw_v):
+        p, v = p.strip(), v.strip()
+        if not p or not v:
+            continue
+        try:
+            prices.append(float(p))
+            vols.append(int(float(v)))
+        except ValueError:
+            continue
+        if len(prices) >= limit:
+            break
+    return prices, vols
+
+
+def parse_mis_item(item):
+    """Parse one MIS msgArray item (one code) into a plain dict, or None if
+    no code, or no price at all (not even a bid/ask estimate), can be
+    determined -- deliberately does NOT fall back to prev close on its own;
+    that last-resort call is caller-specific (see below), not shared parsing.
+    Shared by get_quote() (single-code, used by pipeline/snapshot) and
+    realtime.mis_source.MISSource (batched polling) so the z/pz fallback
+    chain has exactly one implementation -- see docs/spike_notes.md for why
+    this file mirrored mis_source.py's fix late (2026-08-13 fix landed
+    there, not here, until 2026-08-19).
+
+    Price fallback, in order:
+    1. z (last trade price)
+    2. pz (pre-open call-auction simulated match price; z is legitimately
+       "-" 08:30-09:00 Taipei time, before any real trade has happened)
+    3. best bid/ask midpoint -- KNOWN GAP, confirmed live 2026-08-13 13:00-
+       13:04 Taipei time (continuous session, not pre-open): z and pz can
+       both come back "-" for many consecutive polls on a liquid, actively-
+       trading stock even though v/t and the full bid/ask depth keep
+       advancing normally each poll. Root cause unconfirmed (undocumented
+       endpoint, no official spec to check against). Only one side present
+       -> use that side. source is tagged "twse-mis-midpoint" (vs "twse-mis"
+       for a real z/pz) so callers can tell an estimate from a real trade.
+
+    When even the book is empty, this returns None rather than silently
+    falling back to prev close (`y`) -- whether "nothing at all" should
+    still render a stale prev-close price is a caller decision: get_quote()
+    (single-stock dashboard display) does fall back to it so the UI always
+    shows a number; MISSource._parse_item() (batched realtime poller)
+    deliberately does not, and instead drops the quote so poll_once() can
+    degrade the whole batch to yfinance rather than fabricate one code's
+    price -- see that method's docstring.
+    """
+    code = (item.get("c") or "").strip()
+    if not code:
+        return None
+
+    prev = _mis_num(item, "y")
+    bid_prices, bid_vols = _mis_book_levels(item, "b", "g")
+    ask_prices, ask_vols = _mis_book_levels(item, "a", "f")
+
+    price = _mis_num(item, "z")
+    if price is None:
+        price = _mis_num(item, "pz")
+    source = "twse-mis"
+    if price is None:
+        if bid_prices and ask_prices:
+            price = (bid_prices[0] + ask_prices[0]) / 2
+            source = "twse-mis-midpoint"
+        elif bid_prices:
+            price = bid_prices[0]
+            source = "twse-mis-midpoint"
+        elif ask_prices:
+            price = ask_prices[0]
+            source = "twse-mis-midpoint"
+    if price is None:
+        return None
+
+    change = price - prev if prev else None
+    return {
+        "code": code,
+        "price": price,
+        "prev_close": prev,
+        "change": change,
+        "change_pct": (change / prev * 100) if (change is not None and prev) else None,
+        "vol_lots": int(_mis_num(item, "v") or 0),  # accumulated lots (張)
+        "name": item.get("n") or code,
+        "source": source,
+        "bid_prices": bid_prices, "bid_vols": bid_vols,
+        "ask_prices": ask_prices, "ask_vols": ask_vols,
+    }
 
 
 def get_quote(code):
@@ -412,47 +502,29 @@ def get_quote(code):
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex_ch}&json=1&delay=0"
         body = requests.get(url, headers=UA, timeout=15).json()
         for item in body.get("msgArray") or []:
-            def num(k):
-                s = item.get(k, "")
-                try:
-                    return float(s)
-                except (TypeError, ValueError):
-                    return None
-            prev = num("y")
-            price = num("z")
-            if price is None:
-                price = num("pz")
-            source = "twse-mis"
-            if price is None:
-                # z/pz can both be "-" for many consecutive polls on a live,
-                # actively-trading stock while bid/ask depth stays populated
-                # (see realtime/mis_source.py's KNOWN GAP) -- fall back to the
-                # best bid/ask midpoint instead of `prev`, which would silently
-                # render an intraday quote as yesterday's close with 0 change.
-                bid = _first_book_level(item.get("b"))
-                ask = _first_book_level(item.get("a"))
-                if bid is not None and ask is not None:
-                    price = (bid + ask) / 2
-                    source = "twse-mis-midpoint"
-                elif bid is not None:
-                    price = bid
-                    source = "twse-mis-midpoint"
-                elif ask is not None:
-                    price = ask
-                    source = "twse-mis-midpoint"
-                else:
-                    price = prev  # z='-' outside trading and no book -- last resort
-            if price is None:
-                continue
-            change = price - prev if prev else None
+            parsed = parse_mis_item(item)
+            if parsed is None:
+                # parse_mis_item() found no z/pz and no bid/ask book at all --
+                # unlike MISSource (batched realtime poller, which would
+                # rather drop this quote and degrade the whole poll to
+                # yfinance), this is a single-stock dashboard display: still
+                # show prev close so the UI has *a* number rather than blank.
+                prev = _mis_num(item, "y")
+                if prev is None:
+                    continue
+                return {
+                    "price": prev, "prev_close": prev, "change": 0.0, "change_pct": 0.0,
+                    "vol_lots": int(_mis_num(item, "v") or 0),
+                    "name": item.get("n") or code, "source": "twse-mis",
+                }
             return {
-                "price": price,
-                "prev_close": prev,
-                "change": change,
-                "change_pct": (change / prev * 100) if (change is not None and prev) else None,
-                "vol_lots": int(num("v") or 0),  # accumulated lots (張)
-                "name": item.get("n") or code,
-                "source": source,
+                "price": parsed["price"],
+                "prev_close": parsed["prev_close"],
+                "change": parsed["change"],
+                "change_pct": parsed["change_pct"],
+                "vol_lots": parsed["vol_lots"],
+                "name": parsed["name"],
+                "source": parsed["source"],
             }
     except (requests.RequestException, ValueError):
         pass

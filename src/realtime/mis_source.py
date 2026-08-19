@@ -9,30 +9,14 @@ was never load-tested during live trading hours while this module was built
 between batches -- to be recalibrated ("待下一交易日盤中補測校正") once the
 spike in docs/spike_notes.md has real numbers.
 
-Field mapping (verified against a live getStockInfo.jsp response):
-    z = last price ('-' during the pre-open call auction -> fall back to pz)
-    pz = simulated/pre-open matched price
-    y = previous close
-    v = accumulated volume, in lots (張)
-    n = stock name
-    a = ask prices, '_'-joined, low -> high (up to 5)
-    f = ask volumes, '_'-joined, aligned with `a`
-    b = bid prices, '_'-joined, high -> low (up to 5)
-    g = bid volumes, '_'-joined, aligned with `b`
-    t / '%' = time string "HH:MM:SS"
-
-KNOWN GAP, confirmed live 2026-08-13 13:00-13:04 Taipei time (continuous
-session, not pre-open): z and pz can both come back "-" for many consecutive
-polls on a liquid, actively-trading stock (2330/2317/0050 all reproduced it)
-even though v/t and the full bid/ask depth keep advancing normally each poll
--- ruled out both throttling (still happens at a clean 15s-spaced cadence)
-and the tse+otc batch pairing (still happens querying a single tse_ code
-alone). Root cause unconfirmed (undocumented endpoint, no official spec to
-check against), but it is not a code bug in this module and not new. _parse_item()
-falls back to the best bid/ask midpoint when z/pz are both unavailable
-(source="twse-mis-midpoint") rather than letting the whole poll round degrade
-to yfinance's delayed close just because one field is missing -- see its
-docstring. If z/pz recover, revisit whether this fallback is still needed.
+Per-item field parsing (z/pz/bid-ask-midpoint fallback chain, field mapping,
+the pre-open-vs-continuous-session KNOWN GAP) lives in
+data_sources.parse_mis_item() -- shared with data_sources.get_quote(), which
+polls the same endpoint for a single code (pipeline/snapshot use). Was two
+separate implementations until 2026-08-19: get_quote() had never picked up
+this module's 2026-08-13 midpoint fix, so it silently rendered an intraday
+quote as an unchanged prev-close whenever z/pz went missing mid-session. See
+parse_mis_item()'s docstring for the fallback order and the KNOWN GAP detail.
 
 On request failure (RequestException, timeout, or unparsable body), or when
 not even a bid/ask midpoint is available, the whole batch degrades to
@@ -44,7 +28,7 @@ from typing import Callable, List, Optional
 
 import requests
 
-from data_sources import SourceError, UA, _yf_history
+from data_sources import SourceError, UA, _yf_history, parse_mis_item
 from .base import RealtimeSource
 from .models import Depth, Quote
 
@@ -52,34 +36,6 @@ MIS_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 DEFAULT_POLL_INTERVAL = 10.0  # seconds; conservative Phase 0 default, see module docstring
 PRETRADE_START = dt.time(8, 30)
 PRETRADE_END = dt.time(9, 0)
-
-
-def _num(item: dict, key: str) -> Optional[float]:
-    s = item.get(key, "")
-    try:
-        return float(s)
-    except (TypeError, ValueError):
-        return None
-
-
-def _split_levels(item: dict, price_key: str, vol_key: str, limit: int = 5):
-    """Parse '_'-joined price/vol strings into aligned float/int lists,
-    dropping trailing empty slots (MIS pads unused levels with '_')."""
-    raw_p = (item.get(price_key) or "").split("_")
-    raw_v = (item.get(vol_key) or "").split("_")
-    prices, vols = [], []
-    for p, v in zip(raw_p, raw_v):
-        p, v = p.strip(), v.strip()
-        if not p or not v:
-            continue
-        try:
-            prices.append(float(p))
-            vols.append(int(float(v)))
-        except ValueError:
-            continue
-        if len(prices) >= limit:
-            break
-    return prices, vols
 
 
 def _is_pretrade(now: dt.datetime) -> bool:
@@ -110,47 +66,29 @@ class MISSource(RealtimeSource):
         return resp.json()
 
     def _parse_item(self, item: dict) -> Optional[Quote]:
-        prev = _num(item, "y")
-        bid_prices, bid_vols = _split_levels(item, "b", "g")
-        ask_prices, ask_vols = _split_levels(item, "a", "f")
-
-        price = _num(item, "z")
-        if price is None:
-            price = _num(item, "pz")
-        source = "twse-mis"
-        if price is None:
-            # z/pz can both be "-" even on a live, actively-trading snapshot
-            # (see module docstring's KNOWN GAP) while the order book stays
-            # populated -- fall back to the best bid/ask midpoint rather than
-            # dropping this quote and forcing the whole poll to degrade to
-            # yfinance's delayed close over one missing field.
-            if bid_prices and ask_prices:
-                price = (bid_prices[0] + ask_prices[0]) / 2
-            elif bid_prices:
-                price = bid_prices[0]
-            elif ask_prices:
-                price = ask_prices[0]
-            if price is not None:
-                source = "twse-mis-midpoint"
-        if price is None:
+        """Field parsing (z/pz/midpoint fallback) lives in
+        data_sources.parse_mis_item(), shared with get_quote(); this method
+        just adapts that plain dict to this module's Quote dataclass and adds
+        the polling-specific bits (ts, is_pretrade) parse_mis_item() can't
+        know about."""
+        parsed = parse_mis_item(item)
+        if parsed is None:
             return None
 
-        change = price - prev if prev else None
         now = self._now_fn()
-        code = (item.get("c") or "").strip()
         return Quote(
-            code=code,
-            price=price,
-            prev_close=prev,
-            change=change,
-            change_pct=(change / prev * 100) if (change is not None and prev) else None,
-            vol_lots=int(_num(item, "v") or 0),
-            bid_prices=bid_prices,
-            bid_vols=bid_vols,
-            ask_prices=ask_prices,
-            ask_vols=ask_vols,
-            name=item.get("n") or code,
-            source=source,
+            code=parsed["code"],
+            price=parsed["price"],
+            prev_close=parsed["prev_close"],
+            change=parsed["change"],
+            change_pct=parsed["change_pct"],
+            vol_lots=parsed["vol_lots"],
+            bid_prices=parsed["bid_prices"],
+            bid_vols=parsed["bid_vols"],
+            ask_prices=parsed["ask_prices"],
+            ask_vols=parsed["ask_vols"],
+            name=parsed["name"],
+            source=parsed["source"],
             ts=now.timestamp(),
             is_pretrade=_is_pretrade(now),
         )
