@@ -372,3 +372,48 @@ def test_load_fugle_key_missing_returns_empty(tmp_path, monkeypatch):
     monkeypatch.delenv("FUGLE_API_KEY", raising=False)
     monkeypatch.setattr(ds, "BASE_DIR", str(tmp_path))
     assert ds._load_fugle_key() == ""
+
+
+# ------------------------------------------------------------- get_quote --
+# MIS's own JSON shape (top-level msgArray), not FinMind's {status, data}.
+
+def _fake_mis_response(msg_array):
+    class FakeResponse:
+        def json(self):
+            return {"msgArray": msg_array}
+
+    return FakeResponse()
+
+
+def test_get_quote_uses_z_when_available():
+    item = {"c": "2330", "n": "台積電", "z": "600.0000", "pz": "-", "y": "590.0000", "v": "12345"}
+    with patch("data_sources.requests.get", return_value=_fake_mis_response([item])):
+        q = ds.get_quote("2330")
+    assert q["price"] == 600.0
+    assert q["prev_close"] == 590.0
+    assert q["source"] == "twse-mis"
+
+
+def test_get_quote_falls_back_to_bid_ask_midpoint_when_z_and_pz_missing():
+    # Reproduces the live MIS quirk documented in realtime/mis_source.py's
+    # KNOWN GAP: z and pz both "-" mid-session while the order book is still
+    # populated. Before this fix get_quote() fell straight through to `y`
+    # (prev close), silently showing an intraday quote as unchanged.
+    item = {
+        "c": "2330", "n": "台積電", "z": "-", "pz": "-", "y": "2380.0000", "v": "6532",
+        "b": "2345.0000_2340.0000_", "g": "713_1442_",
+        "a": "2350.0000_2355.0000_", "f": "333_353_",
+    }
+    with patch("data_sources.requests.get", return_value=_fake_mis_response([item])):
+        q = ds.get_quote("2330")
+    assert q["price"] == 2347.5  # midpoint of best bid 2345 / best ask 2350
+    assert q["prev_close"] == 2380.0
+    assert q["source"] == "twse-mis-midpoint"
+
+
+def test_get_quote_falls_back_to_prev_close_when_no_book_either():
+    item = {"c": "2330", "n": "台積電", "z": "-", "pz": "-", "y": "2380.0000", "v": "0"}
+    with patch("data_sources.requests.get", return_value=_fake_mis_response([item])):
+        q = ds.get_quote("2330")
+    assert q["price"] == 2380.0
+    assert q["source"] == "twse-mis"

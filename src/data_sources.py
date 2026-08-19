@@ -392,6 +392,18 @@ def get_daily(code, days=730, cache=True):
     return hist
 
 
+def _first_book_level(s):
+    """First '_'-joined price from an MIS bid/ask depth string (top of book)."""
+    for tok in (s or "").split("_"):
+        tok = tok.strip()
+        if tok:
+            try:
+                return float(tok)
+            except ValueError:
+                return None
+    return None
+
+
 def get_quote(code):
     """Realtime-ish quote. TWSE MIS first (covers TWSE+TPEX), then yfinance."""
     # 1. TWSE MIS
@@ -407,7 +419,29 @@ def get_quote(code):
                 except (TypeError, ValueError):
                     return None
             prev = num("y")
-            price = num("z") or num("pz") or prev  # z='-' outside trading
+            price = num("z")
+            if price is None:
+                price = num("pz")
+            source = "twse-mis"
+            if price is None:
+                # z/pz can both be "-" for many consecutive polls on a live,
+                # actively-trading stock while bid/ask depth stays populated
+                # (see realtime/mis_source.py's KNOWN GAP) -- fall back to the
+                # best bid/ask midpoint instead of `prev`, which would silently
+                # render an intraday quote as yesterday's close with 0 change.
+                bid = _first_book_level(item.get("b"))
+                ask = _first_book_level(item.get("a"))
+                if bid is not None and ask is not None:
+                    price = (bid + ask) / 2
+                    source = "twse-mis-midpoint"
+                elif bid is not None:
+                    price = bid
+                    source = "twse-mis-midpoint"
+                elif ask is not None:
+                    price = ask
+                    source = "twse-mis-midpoint"
+                else:
+                    price = prev  # z='-' outside trading and no book -- last resort
             if price is None:
                 continue
             change = price - prev if prev else None
@@ -418,7 +452,7 @@ def get_quote(code):
                 "change_pct": (change / prev * 100) if (change is not None and prev) else None,
                 "vol_lots": int(num("v") or 0),  # accumulated lots (張)
                 "name": item.get("n") or code,
-                "source": "twse-mis",
+                "source": source,
             }
     except (requests.RequestException, ValueError):
         pass
