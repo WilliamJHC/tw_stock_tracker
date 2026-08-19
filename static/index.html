@@ -1057,11 +1057,19 @@ function mountChart(code) {
   }
   // 現價併入同一套標籤系統（取代原生 lastValueVisible），跟支撐/壓力/
   // MA/POC/VAH/VAL 一起排序、一起判斷要不要合併，不會再各自佔一行、
-  // 貼近任一技術價位時互相蓋住。顏色跟量能子圖同一套漲跌判斷（比較前一
-  // 根收盤）。
+  // 貼近任一技術價位時互相蓋住。
+  // 現價一律優先取 d.quote.price（跟表格 price 欄同一份資料，見上面
+  // watchlistRow() 的 d.quote 用法）而不是 ch.c[lastIdx]：盤中今天的日線
+  // 還沒收盤入庫，ch.c[lastIdx] 這時其實是昨收，會讓現價標籤整個交易日都
+  // 顯示昨天的收盤價。漲跌顏色同理改比 d.quote.prev_close，不比
+  // ch.c[lastIdx - 1] ——後者在「今天日線已入庫」跟「還沒入庫」兩種情況
+  // 下代表的日期不一樣，quote.prev_close 兩種情況都一定是昨收。
   const lastIdx = ch.c.length - 1;
-  const lastColor = lastIdx > 0 && ch.c[lastIdx] >= ch.c[lastIdx - 1] ? UP_COLOR : DOWN_COLOR;
-  labelEntries.push({ price: ch.c[lastIdx], color: lastColor, title: '現價' });
+  const curPrice = (d.quote && d.quote.price != null) ? d.quote.price : ch.c[lastIdx];
+  const prevClose = (d.quote && d.quote.prev_close != null)
+    ? d.quote.prev_close : (lastIdx > 0 ? ch.c[lastIdx - 1] : null);
+  const lastColor = prevClose != null && curPrice >= prevClose ? UP_COLOR : DOWN_COLOR;
+  labelEntries.push({ price: curPrice, color: lastColor, title: '現價' });
 
   // 依價格排序一次，讓 PriceAxisLabelsPrimitive 不用每次重繪都重新排序
   // （見該類別建構子註解：本圖表價格軸從不反轉，價格降序＝y 座標升序）。
