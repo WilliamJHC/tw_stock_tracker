@@ -435,8 +435,8 @@ def test_components_weighted_sum_equals_score_with_of_divergence():
     a = an.analyze(daily, tick_days=tick_days)
     assert a["of"] is not None
     assert a["of"]["divergence"] == "bearish"  # sanity: this test must actually exercise the override
-    order_flow_override = -10.0
-    weighted = sum(a["components"][k] * an.SCORE_WEIGHTS[k] for k in an.SCORE_WEIGHTS) + order_flow_override
+    assert a["order_flow_override"] == -10.0
+    weighted = sum(a["components"][k] * an.SCORE_WEIGHTS[k] for k in an.SCORE_WEIGHTS) + a["order_flow_override"]
     assert a["score"] == round(max(-100.0, min(100.0, weighted)))
 
 

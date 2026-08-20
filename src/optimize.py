@@ -244,6 +244,38 @@ def evaluate_decision(plateau, pbo_value, dsr_value, plateau_width_min_frac=PLAT
 
 # --------------------------------------------- backtest-engine integration --
 
+def _pbo_and_dsr(scores_by_key, usable_folds, chosen_key, n_trials):
+    """Shared overfitting-guard computation for both sweep_*_walk_forward()
+    variants below: PBO across every candidate's per-fold OOS returns, and
+    the Deflated Sharpe Ratio for whichever candidate was actually chosen
+    (the plateau center for sweep_param_walk_forward(), the plateau's most-
+    common per-fold winner for sweep_ranking_weights_walk_forward()).
+
+    scores_by_key: {key: [per-fold score%, ...]}, one entry per usable
+    fold; a None score (candidate had no trades that fold) is treated as
+    0% for both metrics -- matches this project's existing convention, see
+    each caller. Returns (pbo_value, dsr_value), both None if
+    usable_folds < 2; dsr_value is also None if chosen_key is None or its
+    Sharpe couldn't be computed."""
+    if usable_folds < 2:
+        return None, None
+    returns_matrix = {k: [(s if s is not None else 0.0) / 100 for s in scores]
+                       for k, scores in scores_by_key.items()}
+    pbo_value = m.pbo(returns_matrix, n_blocks=usable_folds)
+    dsr_value = None
+    if chosen_key is not None:
+        chosen_returns = returns_matrix[chosen_key]
+        sharpe = m.sharpe_ratio(chosen_returns, periods_per_year=usable_folds)
+        trial_sharpes = [s for s in (
+            m.sharpe_ratio(returns, periods_per_year=usable_folds) for returns in returns_matrix.values()
+        ) if s is not None]
+        trial_std = statistics.pstdev(trial_sharpes) if len(trial_sharpes) > 1 else 1.0
+        if sharpe is not None:
+            dsr_value = m.deflated_sharpe_ratio(sharpe, n_trials=n_trials, n_obs=usable_folds,
+                                                trial_sharpe_std=trial_std or 1.0)
+    return pbo_value, dsr_value
+
+
 def sweep_param_walk_forward(bars, inst, margin, shareholding, sbl, rs_by_date,
                               param_name, candidate_values, base_params=None,
                               n_folds=4, mode="anchored", purge_bars=PURGE_BARS_DEFAULT):
@@ -284,11 +316,22 @@ def sweep_param_walk_forward(bars, inst, margin, shareholding, sbl, rs_by_date,
         test_score_rows = [rows_by_date[d] for d in (dates[i] for i in test_range) if d in rows_by_date]
         if not test_score_rows:
             continue
+        # Bound simulate()'s "still open at data end" close to this fold's
+        # own test range, not the whole (possibly multi-year) `bars` array --
+        # otherwise a position left open at the fold boundary gets force-
+        # closed at the LAST bar of the entire dataset, leaking years of
+        # future price action into this fold's total_return. Mirrors
+        # sweep_ranking_weights_walk_forward()'s _slice_universe_by_date()
+        # call below, which bounds simulate() the same way for that path.
+        fold_bars = bars[:test_range[-1] + 1]
+        # Same fold_bars for every candidate value below -- build the index
+        # once per fold instead of once per (fold, candidate) call.
+        fold_bar_index = bt.build_bar_index(fold_bars)
         fold_scores = {}
         fold_best_value, fold_best_score = None, float("-inf")
         for value in candidate_values:
             params = dict(base_params, **{param_name: value})
-            result = bt.simulate(test_score_rows, bars, params=params)
+            result = bt.simulate(test_score_rows, fold_bars, params=params, bar_index=fold_bar_index)
             total_return = result["summary"]["total_return"]
             n_trials += 1
             trials.append({"fold_idx": fold_idx, "value": value, "score": total_return})
@@ -328,20 +371,7 @@ def sweep_param_walk_forward(bars, inst, margin, shareholding, sbl, rs_by_date,
     elif point_best_value is not None:
         chosen_value = point_best_value
 
-    pbo_value = dsr_value = None
-    if usable_folds >= 2:
-        returns_matrix = {v: [(s if s is not None else 0.0) / 100 for s in scores_by_value[v]] for v in candidate_values}
-        pbo_value = m.pbo(returns_matrix, n_blocks=usable_folds)
-        if chosen_value is not None:
-            chosen_returns = returns_matrix[chosen_value]
-            sharpe = m.sharpe_ratio(chosen_returns, periods_per_year=usable_folds)
-            trial_sharpes = [s for s in (
-                m.sharpe_ratio(returns_matrix[v], periods_per_year=usable_folds) for v in candidate_values
-            ) if s is not None]
-            trial_std = statistics.pstdev(trial_sharpes) if len(trial_sharpes) > 1 else 1.0
-            if sharpe is not None:
-                dsr_value = m.deflated_sharpe_ratio(sharpe, n_trials=n_trials, n_obs=usable_folds,
-                                                    trial_sharpe_std=trial_std or 1.0)
+    pbo_value, dsr_value = _pbo_and_dsr(scores_by_value, usable_folds, chosen_value, n_trials)
 
     oos_start_idx, oos_end_idx = folds[0][1][0], folds[-1][1][-1]
     c0, c1 = bars[oos_start_idx]["c"], bars[oos_end_idx]["c"]
@@ -514,20 +544,7 @@ def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, pur
     plateau = {"most_common": winner, "width_frac": stability}
     chance_threshold = max(PLATEAU_WIDTH_MIN_FRAC, 1 / len(names)) if names else PLATEAU_WIDTH_MIN_FRAC
 
-    pbo_value = dsr_value = None
-    if usable_folds >= 2:
-        returns_matrix = {name: [(s if s is not None else 0.0) / 100 for s in scores_by_name[name]] for name in names}
-        pbo_value = m.pbo(returns_matrix, n_blocks=usable_folds)
-        if point_best_name is not None:
-            chosen_returns = returns_matrix[point_best_name]
-            sharpe = m.sharpe_ratio(chosen_returns, periods_per_year=usable_folds)
-            trial_sharpes = [s for s in (
-                m.sharpe_ratio(returns_matrix[n], periods_per_year=usable_folds) for n in names
-            ) if s is not None]
-            trial_std = statistics.pstdev(trial_sharpes) if len(trial_sharpes) > 1 else 1.0
-            if sharpe is not None:
-                dsr_value = m.deflated_sharpe_ratio(sharpe, n_trials=n_trials, n_obs=usable_folds,
-                                                    trial_sharpe_std=trial_std or 1.0)
+    pbo_value, dsr_value = _pbo_and_dsr(scores_by_name, usable_folds, point_best_name, n_trials)
 
     oos_start, oos_end = folds[0]["test"][0], folds[-1]["test"][1]
     buy_hold_returns = []

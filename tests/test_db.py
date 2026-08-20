@@ -92,23 +92,28 @@ def test_score_history_round_trip(tmp_path):
     assert out[0]["action"] == "準備進場"
     assert out[0]["priority"] == 36  # numeric, not a stringified "36" (Phase 4 schema fix)
     assert out[0]["c_maPosition"] is None  # row predates Phase 2b -- NULL, not a KeyError
+    assert out[0]["order_flow_override"] is None  # same: not in this hand-built row
     conn.close()
 
 
 def test_score_history_round_trip_with_components(tmp_path):
     """docs/https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md
     Phase 2b: the 9 unweighted score components round-trip through
-    upsert_score_history()/query_score_history()."""
+    upsert_score_history()/query_score_history(). order_flow_override rides
+    along the same way -- it's the +-10 divergence override analyze() adds
+    ON TOP of the components dot product, so it isn't one of the 9 and is
+    checked separately here."""
     conn = _conn(tmp_path)
     row = {"date": "2024-01-01", "tech_score": 60, "chip_score": 55, "composite": 58,
            "priority": 36, "action": "準備進場", "signals_json": '["ma_cross"]',
            "c_maPosition": 0.5, "c_maAlign": 1, "c_volumePrice": -0.25, "c_trend": 0.1,
            "c_vpPosition": 1.0, "c_orderFlow": -0.4, "c_gapTracker": 0, "c_donchianPosition": 0.2,
-           "c_rsRanking": -0.6}
+           "c_rsRanking": -0.6, "order_flow_override": -10.0}
     db.upsert_score_history(conn, "2330", [row])
     out = db.query_score_history(conn, "2330")[0]
     for col in db.SCORE_HISTORY_COMPONENT_COLS:
         assert out[col] == row[col]
+    assert out["order_flow_override"] == -10.0
     conn.close()
 
 
@@ -134,9 +139,11 @@ def test_migrate_adds_score_history_component_columns_to_old_db(tmp_path):
     db.migrate(conn)
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(score_history)").fetchall()}
     assert set(db.SCORE_HISTORY_COMPONENT_COLS) <= cols
+    assert "order_flow_override" in cols
     row = conn.execute("SELECT * FROM score_history WHERE code='2330'").fetchone()
     assert row["tech_score"] == 42
     assert row["c_maPosition"] is None
+    assert row["order_flow_override"] is None
     conn.close()
 
 

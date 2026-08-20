@@ -203,7 +203,21 @@ def test_replay_scores_components_weighted_sum_equals_tech_score():
     assert rows
     for row in rows:
         weighted = sum(row[f"c_{key}"] * weight for key, weight in an.SCORE_WEIGHTS.items())
+        weighted += row["order_flow_override"]
         assert row["tech_score"] == round(max(-100.0, min(100.0, weighted)))
+
+
+def test_replay_scores_persists_order_flow_override():
+    """replay_scores() always calls an.analyze() with minute=None/
+    tick_days=None (see its own docstring), so the divergence override
+    never fires here -- every row's order_flow_override is 0.0, not
+    missing/None. Regression test: db.upsert_score_history() used to have
+    no column to receive this at all, so the c_* dot product silently
+    dropped it whenever a caller DID have real intraday data."""
+    bars = _random_bars(seed=21)
+    rows = bt.replay_scores(bars, [], [], [], [], warmup=120)
+    assert rows
+    assert all(row["order_flow_override"] == 0.0 for row in rows)
 
 
 def test_compute_rs_by_date_hand_computed():
@@ -303,6 +317,19 @@ def test_simulate_end_of_data_force_closes_open_position():
     t = out["trades"][-1]
     assert t["exit_reason"] == "end_of_data"
     assert t["exit_price"] == bars[-1]["c"]
+
+
+def test_simulate_with_precomputed_bar_index_matches_default():
+    """build_bar_index() lets a caller (e.g. optimize.py's walk-forward grid
+    search) reuse one (bar_idx_by_date, highs, lows, closes) tuple across
+    many simulate() calls against the same bars -- must produce identical
+    results to the default (rebuild internally) path."""
+    bars = _bars([100 + i for i in range(10)])
+    score_rows = [{"date": f"d{i}", "action": ("準備進場" if i == 1 else "無變化"),
+                   "composite": (45 if i == 1 else 0)} for i in range(9)]
+    baseline = bt.simulate(score_rows, bars)
+    with_index = bt.simulate(score_rows, bars, bar_index=bt.build_bar_index(bars))
+    assert with_index == baseline
 
 
 def test_simulate_summary_win_rate_avg_ret_total_return_max_drawdown():

@@ -13,6 +13,23 @@ became public." Taiwan's regulatory deadlines are ~10 days after month-end
 for monthly revenue and up to ~45-60 days after quarter-end for quarterly
 financials; REVENUE_LAG_DAYS/FINANCIALS_LAG_DAYS use the conservative end
 of that range rather than a per-filing lookup.
+
+>>> KNOWN LIMITATION: momentum_pct() runs on UNADJUSTED close <<<
+adjust.py's downstream rule (docs/archive/backtest_plan.md Phase 1c) says
+momentum must run on split/dividend-adjusted price levels, not raw ones.
+But the callers that build this module's `bars` (scripts/run_factor_backtest.py's
+fetch_universe_data(), via ds.get_daily() -> FinMind's raw TaiwanStockPrice)
+fetch directly from FinMind and never touch backtest.db, so
+scripts/build_adj_factors.py's TWSE/Yahoo-derived adj_factor -- computed
+per-code against daily_bars rows in that DB -- has nothing to attach to
+here. Building an equivalent corporate-action pipeline for this module's
+(potentially 2000+ code) universe would be a substantial new fetch
+subsystem, not a local fix, and hasn't been built. Net effect: at a
+rebalance date shortly after a stock split/large stock dividend,
+momentum_pct() computes a phantom return off the raw price jump, which
+composite_scores() and factor_eval.evaluate_factors() then rank/measure
+IC on as if it were real. liquidity_ok() is NOT affected -- it wants raw
+close*volume by design (adjust.py's own rule), not a bug.
 """
 import bisect
 import datetime as dt
@@ -130,7 +147,11 @@ def liquidity_ok(bars, idx, min_turnover=LIQUIDITY_MIN_TURNOVER, window=LIQUIDIT
 
 def momentum_pct(bars, idx, days=MOMENTUM_DAYS):
     """`days`-bar percent return ending at bars[idx], or None if idx has
-    fewer than `days` bars of history before it."""
+    fewer than `days` bars of history before it.
+
+    Runs on bars[idx]["c"] as-is, which today's callers only ever populate
+    with UNADJUSTED close -- see this module's docstring's KNOWN LIMITATION
+    section. Phantom near a split/large stock dividend."""
     if idx - days < 0:
         return None
     base = bars[idx - days]["c"]

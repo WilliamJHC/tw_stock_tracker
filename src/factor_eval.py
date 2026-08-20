@@ -13,6 +13,11 @@ flags as unanswered: whether revenue 0.4 / ROE 0.3 / momentum 0.3 is a
 made-up weighting. Per-factor IC/ICIR/decay is evidence either way, not
 another guess -- see suggest_weights() for how to turn it into a proposal
 (never auto-applied; a human decides whether to adopt it).
+
+Momentum's IC here inherits finlab_factors.momentum_pct()'s KNOWN
+LIMITATION (see that module's docstring): it runs on unadjusted close, so
+a rebalance date shortly after any universe code's split/large stock
+dividend contributes a phantom momentum value to that date's IC.
 """
 import finlab_factors as ff
 import metrics as m
@@ -70,14 +75,21 @@ def rebalance_dates(universe_data):
     return pb._rebalance_dates(calendar)
 
 
-def factor_ic_series(universe_data, dates, factor_name, horizon):
+def factor_ic_series(universe_data, dates, factor_name, horizon, raw_by_date=None):
     """[(date, ic), ...] for one factor at one holding horizon, across
     `dates`. ic is None for a date with no cross-sectional spread (see
-    metrics.rank_ic()) or too few codes to correlate."""
+    metrics.rank_ic()) or too few codes to correlate.
+
+    raw_by_date: optional {date: _raw_factor_values(universe_data, date)}
+    precomputed cache -- _raw_factor_values() doesn't depend on factor_name
+    or horizon, so evaluate_factors()'s factor x horizon loop passes one in
+    to avoid rescanning the full universe on every (factor, horizon) pair.
+    Defaults to None (compute per-date here) so standalone callers/tests
+    don't have to build the cache themselves."""
     raw_key = FACTOR_KEYS[factor_name]
     out = []
     for date in dates:
-        raw = _raw_factor_values(universe_data, date)
+        raw = raw_by_date[date] if raw_by_date is not None else _raw_factor_values(universe_data, date)
         if not raw:
             out.append((date, None))
             continue
@@ -99,11 +111,17 @@ def evaluate_factors(universe_data, dates=None, horizons=DEFAULT_HORIZONS):
     defaults to this universe's own month-boundary rebalance dates (see
     rebalance_dates())."""
     dates = dates if dates is not None else rebalance_dates(universe_data)
+    # _raw_factor_values() doesn't depend on factor_name/horizon -- compute
+    # it once per date and reuse across the full factor x horizon loop below
+    # instead of rescanning the whole universe len(FACTOR_KEYS)*len(horizons)
+    # times.
+    raw_by_date = {date: _raw_factor_values(universe_data, date) for date in dates}
     result = {}
     for factor_name in FACTOR_KEYS:
         result[factor_name] = {}
         for horizon in horizons:
-            ic_series = [ic for _, ic in factor_ic_series(universe_data, dates, factor_name, horizon)]
+            ic_series = [ic for _, ic in factor_ic_series(universe_data, dates, factor_name, horizon,
+                                                            raw_by_date=raw_by_date)]
             result[factor_name][horizon] = m.ic_stats(ic_series)
     return result
 

@@ -35,11 +35,29 @@ def _adjusted_bars(bars):
     win-rate/strategy simulation compare price *levels* across time, so
     they must run on the adjusted series, not the raw one that jumps at
     every split/stock-dividend ex-date). `v` is left untouched -- see
-    adjust.py's module docstring. A NULL adj_factor (build_adj_factors.py
-    hasn't been run for this code yet) falls back to 1.0, i.e. today's
-    unadjusted behavior, so this is a no-op until the offline batch job
-    has populated the column."""
-    factors = [b["adj_factor"] if b.get("adj_factor") is not None else 1.0 for b in bars]
+    adjust.py's module docstring.
+
+    adj_factor is NULL for a bar scripts/build_adj_factors.py hasn't
+    processed yet. If EVERY bar is NULL (the batch job has never run for
+    this code), defaulting all of them to 1.0 is a consistent no-op
+    (today's unadjusted behavior). But if only SOME bars are NULL -- e.g.
+    --refresh-data just appended new dates after a fresh split, and the
+    batch job hasn't rerun to push that split's ratio back through the
+    older, already-computed bars -- treating the NULL tail as 1.0 while
+    the stale non-NULL older bars still carry their pre-split factor would
+    silently create a phantom price jump right at the seam (the older
+    factors are wrong, not the NULL ones). Raise instead of guessing;
+    callers should skip this code and prompt a build_adj_factors.py rerun."""
+    raw_factors = [b.get("adj_factor") for b in bars]
+    has_null = any(f is None for f in raw_factors)
+    has_value = any(f is not None for f in raw_factors)
+    if has_null and has_value:
+        raise ValueError(
+            f"{bars[0]['code']}: adj_factor 只有部分算過（可能是 --refresh-data 補了新日期，"
+            "但 scripts/build_adj_factors.py 還沒重跑）——還原股價會在新舊資料接縫處出現假跳空，"
+            "先跑 scripts/build_adj_factors.py 再重試"
+        )
+    factors = [f if f is not None else 1.0 for f in raw_factors]
     return [
         {**b, "o": b["o_adj"], "h": b["h_adj"], "l": b["l_adj"], "c": b["c_adj"]}
         for b in adjust.apply_adjustment(bars, factors)
@@ -149,7 +167,11 @@ def compute_signal_stats(conn, codes):
         if not bars:
             print(f"  {code}: 尚無日線資料，略過（先跑 --refresh-data）")
             continue
-        bars = _adjusted_bars(bars)
+        try:
+            bars = _adjusted_bars(bars)
+        except ValueError as e:
+            print(f"  {e}，略過")
+            continue
         daily = {"c": [r["c"] for r in bars], "v": [r["v"] for r in bars],
                   "o": [r["o"] for r in bars]}
         rows = bt.signal_win_rates(daily)
@@ -173,8 +195,12 @@ def run_replay_and_simulate(conn, codes, run_id=None):
     bars_by_code = {}
     for code in codes:
         bars = db.query_daily_bars(conn, code)
-        if bars:
+        if not bars:
+            continue
+        try:
             bars_by_code[code] = _adjusted_bars(bars)
+        except ValueError as e:
+            print(f"  {e}，略過")
     rs_by_code_date = bt.compute_rs_by_date(bars_by_code) if len(bars_by_code) >= 2 else {}
     if len(bars_by_code) < 2:
         print("  可用日線資料的股票不足 2 檔，RS 排名略過（其餘照常執行）")

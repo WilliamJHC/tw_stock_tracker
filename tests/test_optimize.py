@@ -214,9 +214,9 @@ def test_sweep_param_walk_forward_respects_base_params_override():
     captured = []
     orig_simulate = bt.simulate
 
-    def spy(score_rows, bars_, params=None):
+    def spy(score_rows, bars_, params=None, bar_index=None):
         captured.append(dict(params or {}))
-        return orig_simulate(score_rows, bars_, params=params)
+        return orig_simulate(score_rows, bars_, params=params, bar_index=bar_index)
 
     import unittest.mock as mock
     with mock.patch("optimize.bt.simulate", side_effect=spy):
@@ -227,6 +227,44 @@ def test_sweep_param_walk_forward_respects_base_params_override():
         )
     assert captured  # at least one call happened
     assert all(p.get("max_hold_days") == 30 for p in captured)
+
+
+def test_sweep_param_walk_forward_bounds_simulate_to_each_folds_test_range():
+    """A position still open when a fold's score rows run out must be
+    force-closed within that fold's own bars, not against the full (many
+    years later) `bars` array -- otherwise total_return leaks future price
+    action from outside the fold. Regression test: bt.simulate() used to
+    receive the full, unsliced `bars` for every fold."""
+    bars = _synthetic_bars(n=600, seed=7)
+    candidate_values = [-40, -10]
+    folds = opt.purged_walk_forward_splits(len(bars), n_folds=3, purge_bars=20, mode="anchored")
+    assert len(folds) > 1  # need at least one non-final fold to prove the bound
+
+    captured_lens = []
+    orig_simulate = bt.simulate
+
+    def spy(score_rows, bars_, params=None, bar_index=None):
+        captured_lens.append(len(bars_))
+        return orig_simulate(score_rows, bars_, params=params, bar_index=bar_index)
+
+    import unittest.mock as mock
+    with mock.patch("optimize.bt.simulate", side_effect=spy):
+        opt.sweep_param_walk_forward(
+            bars, [], [], [], [], None,
+            param_name="exit_composite", candidate_values=candidate_values,
+            n_folds=3, purge_bars=20,
+        )
+
+    # Calls are grouped fold-by-fold, len(candidate_values) calls per fold,
+    # in fold order -- every call within a fold shares that fold's bars.
+    assert len(captured_lens) == len(folds) * len(candidate_values)
+    for fold_idx, (_, test_range) in enumerate(folds):
+        expected_len = test_range[-1] + 1
+        chunk = captured_lens[fold_idx * len(candidate_values):(fold_idx + 1) * len(candidate_values)]
+        assert chunk == [expected_len] * len(candidate_values)
+    # The non-final folds' bound must fall strictly short of the full
+    # dataset -- this is what the bug let leak through.
+    assert captured_lens[0] < len(bars)
 
 
 # ---------------------- purged_calendar_walk_forward_splits / RANKING_WEIGHTS --

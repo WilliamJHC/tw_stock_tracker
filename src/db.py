@@ -94,6 +94,7 @@ def init_db(conn):
             c_gapTracker REAL,
             c_donchianPosition REAL,
             c_rsRanking REAL,
+            order_flow_override REAL,
             PRIMARY KEY (code, date)
         );
 
@@ -173,7 +174,12 @@ def migrate(conn):
     c_* columns are the unweighted per-dimension components analyze() now
     returns (docs/https-finlab-finance-blog-python-get-tai-memoized-
     lighthouse.md Phase 2b) -- letting SCORE_WEIGHTS re-tuning read a dot
-    product off stored rows instead of re-running replay_scores()."""
+    product off stored rows instead of re-running replay_scores().
+    order_flow_override is the flat +-10 divergence override analysis.
+    analyze() adds ON TOP of that dot product (not proportional to any
+    SCORE_WEIGHTS entry, so it isn't one of the 9 c_* component columns) --
+    without persisting it, reconstructing score from the c_* columns alone
+    silently drops it whenever a divergence signal fired that day."""
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(daily_bars)").fetchall()}
     if "adj_factor" not in cols:
         conn.execute("ALTER TABLE daily_bars ADD COLUMN adj_factor REAL")
@@ -193,7 +199,8 @@ def migrate(conn):
     )
     score_history_cols = {row["name"] for row in conn.execute("PRAGMA table_info(score_history)").fetchall()}
     for comp_col in ("c_maPosition", "c_maAlign", "c_volumePrice", "c_trend", "c_vpPosition",
-                      "c_orderFlow", "c_gapTracker", "c_donchianPosition", "c_rsRanking"):
+                      "c_orderFlow", "c_gapTracker", "c_donchianPosition", "c_rsRanking",
+                      "order_flow_override"):
         if comp_col not in score_history_cols:
             conn.execute(f"ALTER TABLE score_history ADD COLUMN {comp_col} REAL")
     conn.execute(
@@ -311,21 +318,23 @@ def upsert_score_history(conn, code, rows):
     """`rows`: iterable of dicts with keys date/tech_score/chip_score/
     composite/priority/action/signals_json, plus the optional 9 unweighted
     SCORE_WEIGHTS component columns (SCORE_HISTORY_COMPONENT_COLS, see
-    analysis.analyze()'s `components` output) -- NULL if a row's dict
-    doesn't have them (e.g. a hand-built row that predates Phase 2b)."""
+    analysis.analyze()'s `components` output) and order_flow_override (see
+    that function's docstring) -- NULL if a row's dict doesn't have them
+    (e.g. a hand-built row that predates Phase 2b/order_flow_override)."""
     conn.executemany(
         """
         INSERT OR REPLACE INTO score_history (
             code, date, tech_score, chip_score, composite, priority, action, signals_json,
             c_maPosition, c_maAlign, c_volumePrice, c_trend, c_vpPosition,
-            c_orderFlow, c_gapTracker, c_donchianPosition, c_rsRanking
+            c_orderFlow, c_gapTracker, c_donchianPosition, c_rsRanking, order_flow_override
         ) VALUES (
             :code, :date, :tech_score, :chip_score, :composite, :priority, :action, :signals_json,
             :c_maPosition, :c_maAlign, :c_volumePrice, :c_trend, :c_vpPosition,
-            :c_orderFlow, :c_gapTracker, :c_donchianPosition, :c_rsRanking
+            :c_orderFlow, :c_gapTracker, :c_donchianPosition, :c_rsRanking, :order_flow_override
         )
         """,
-        ({**{c: None for c in SCORE_HISTORY_COMPONENT_COLS}, **r, "code": code} for r in rows),
+        ({**{c: None for c in SCORE_HISTORY_COMPONENT_COLS}, "order_flow_override": None, **r, "code": code}
+         for r in rows),
     )
     conn.commit()
 

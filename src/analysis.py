@@ -1040,4 +1040,5 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
         "inst": inst_summary, "chip": chip,
         "signals": signals, "backtest": backtest,
         "score": score, "label": label, "components": components,
+        "order_flow_override": order_flow_override,
     }

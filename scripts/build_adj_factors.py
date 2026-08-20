@@ -208,12 +208,13 @@ def _matches_any(date, other_dates, tolerance_days=DATE_MATCH_TOLERANCE_DAYS):
 
 # ------------------------------------------------------------- per-code --
 
-def build_code(conn, code, market):
+def build_code(conn, code, market, bars=None):
     """Resolves one code's corporate_actions + adj_factor and writes them.
     Returns a dict of counters for the summary report: n_events (final,
     written), n_twse, n_yahoo_supplement, n_warnings, violations (from
     adjust.validate_adj_factor(), should be [])."""
-    bars = db.query_daily_bars(conn, code)
+    if bars is None:
+        bars = db.query_daily_bars(conn, code)
     if not bars:
         return {"n_events": 0, "n_twse": 0, "n_yahoo_supplement": 0, "n_warnings": 0, "violations": ["no bars"]}
     bar_dates = [b["date"] for b in bars]
@@ -277,9 +278,11 @@ def main():
     universe = ds.get_universe() or []
     market_by_code = {r["code"]: r["market"] for r in universe}
 
+    bars_by_code = {}
     min_dates = []
     for code in codes:
         bars = db.query_daily_bars(conn, code)
+        bars_by_code[code] = bars
         if bars:
             min_dates.append(bars[0]["date"])
     if not min_dates:
@@ -302,7 +305,7 @@ def main():
     all_violations = {}
     for i, code in enumerate(codes, 1):
         market = market_by_code.get(code, "twse")
-        result = build_code(conn, code, market)
+        result = build_code(conn, code, market, bars=bars_by_code.get(code))
         for key in totals:
             totals[key] += result[key]
         if result["violations"]:

@@ -93,6 +93,8 @@ def main():
     print(f"  FinLab 資料範圍：{adj_close.index.min().date()} ~ {adj_close.index.max().date()}")
 
     conn = db.connect()
+    db.init_db(conn)
+    db.migrate(conn)
     total_steps = 0
     for code in codes:
         if code not in adj_close.columns:

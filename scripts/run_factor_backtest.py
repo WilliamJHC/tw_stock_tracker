@@ -183,6 +183,9 @@ def main():
 
     codes = _load_universe(args.universe)
     print(f"universe={args.universe} ({len(codes)} codes), days={args.days}")
+    print("提醒：這條路徑直接抓 FinMind 原始（未還原）股價，沒有套用 scripts/build_adj_factors.py "
+          "算出的除權息還原因子（見 src/finlab_factors.py module docstring 的 KNOWN LIMITATION）。"
+          "任一代碼在回測期間若有除權息或大額股票股利，momentum 因子在那個時點附近會算出失真的假報酬。")
 
     limiter = _RateLimiter()
     universe_data = fetch_universe_data(codes, args.days, limiter)

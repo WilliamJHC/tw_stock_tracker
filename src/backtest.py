@@ -198,8 +198,15 @@ def replay_scores(bars, inst, margin, shareholding, sbl, rs_by_date=None, warmup
         need ~120 bars of history to be meaningful -- see Phase 2 "抓多久").
 
     Returns a list of {date, tech_score, chip_score, composite, priority,
-    action, signals_json} rows, ready for db.upsert_score_history(). Empty
-    if there aren't more than `warmup` bars.
+    action, signals_json, order_flow_override, ...c_* components} rows,
+    ready for db.upsert_score_history(). Empty if there aren't more than
+    `warmup` bars.
+
+    order_flow_override is always 0.0 here (this function always calls
+    an.analyze() with minute=None/tick_days=None, so its divergence check
+    never fires -- see run_backtest.py's of_excluded meta flag) but is
+    still persisted per-row so db.upsert_score_history()'s stored rows stay
+    correct once/if a caller starts replaying with real intraday data.
     """
     n = len(bars)
     dates = [b["date"] for b in bars]
@@ -255,13 +262,29 @@ def replay_scores(bars, inst, margin, shareholding, sbl, rs_by_date=None, warmup
             "c_gapTracker": components["gapTracker"],
             "c_donchianPosition": components["donchianPosition"],
             "c_rsRanking": components["rsRanking"],
+            "order_flow_override": result["order_flow_override"],
         })
     return rows
 
 
 # ----------------------------------------------------- strategy simulation ----
 
-def simulate(score_rows, bars, params=None):
+def build_bar_index(bars):
+    """(bar_idx_by_date, highs, lows, closes) for `bars` -- simulate()'s own
+    per-call setup, factored out so a caller running simulate() many times
+    against the SAME bars array (e.g. optimize.py's walk-forward grid
+    search: one fold's bars, swept across every candidate parameter value)
+    can build this once and pass it in via simulate()'s `bar_index` arg
+    instead of paying an O(len(bars)) rebuild on every call."""
+    return (
+        {b["date"]: i for i, b in enumerate(bars)},
+        [b["h"] for b in bars],
+        [b["l"] for b in bars],
+        [b["c"] for b in bars],
+    )
+
+
+def simulate(score_rows, bars, params=None, bar_index=None):
     """Long-only, single-position, no-leverage strategy simulation over one
     code's replayed scores (docs/backtest_plan.md Phase 4). Pure function --
     no I/O.
@@ -293,15 +316,20 @@ def simulate(score_rows, bars, params=None):
 
     Returns {"trades": [...], "summary": {n_trades, win_rate, avg_ret,
     total_return, buy_hold_return, max_drawdown, start_date, end_date}}.
+
+    bar_index: optional (bar_idx_by_date, highs, lows, closes) precomputed
+    by build_bar_index(bars) -- pass it in when calling simulate() many
+    times against the same `bars` array to skip rebuilding it every call.
+    Must actually correspond to `bars`; not verified here.
     """
     p = dict(STRATEGY_PARAMS)
     if params:
         p.update(params)
 
-    bar_idx_by_date = {b["date"]: i for i, b in enumerate(bars)}
-    highs = [b["h"] for b in bars]
-    lows = [b["l"] for b in bars]
-    closes = [b["c"] for b in bars]
+    if bar_index is not None:
+        bar_idx_by_date, highs, lows, closes = bar_index
+    else:
+        bar_idx_by_date, highs, lows, closes = build_bar_index(bars)
 
     trades = []
     position = None  # {entry_idx, entry_date, entry_price, stop_price}
