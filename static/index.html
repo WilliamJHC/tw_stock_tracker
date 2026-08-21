@@ -84,8 +84,7 @@ body.static-mode #backtestStatus, body.static-mode #backtestDisclaimerLines { di
 .decision-card:hover { background: var(--color-background-secondary); }
 .dc-code { font-family: var(--font-mono); font-weight: 600; }
 .dc-name { color: var(--color-text-secondary); font-size: 13px; }
-.dc-priority { font-size: 12px; color: var(--color-text-secondary); font-family: var(--font-mono); white-space: nowrap; }
-.dc-price { font-size: 12px; color: var(--color-text-secondary); font-family: var(--font-mono); white-space: nowrap; }
+.dc-priority, .dc-price { font-size: 12px; color: var(--color-text-secondary); font-family: var(--font-mono); white-space: nowrap; }
 .dc-reason { flex: 1; min-width: 160px; font-size: 13px; }
 .dc-badges { display: flex; gap: 6px; flex-shrink: 0; }
 .action-badge { display: inline-block; font-size: 12px; padding: 3px 10px; border-radius: 4px; font-weight: 600; white-space: nowrap; }
@@ -553,8 +552,14 @@ function renderDecisionPanel(views) {
     // (VAH for bullish score, VAL for bearish) already computed for the chart,
     // reused here as a reference level -- see docs/archive/backtest_plan.md's
     // explicit decision against building real entry/exit price suggestions.
-    const target = v.score > 0 ? v.vpVah : v.score < 0 ? v.vpVal : null;
-    const priceBadge = `<span class="dc-price" title="目標價＝Volume Profile 價值區${v.score > 0 ? '上緣 VAH' : v.score < 0 ? '下緣 VAL' : ''}，估算參考、非投資建議">現價 ${fmtP(v.price)}｜目標 ${target != null ? fmtP(target) : '—'}</span>`;
+    // Only shown while the level is still ahead of price: a price/vp_position
+    // breakout through VAH/VAL is itself part of what pushes score positive/
+    // negative (see analysis.py's vp_position scoring), so "target" can land
+    // behind current price once broken through -- misleading if shown as-is.
+    const bull = v.score > 0, bear = v.score < 0;
+    const target = bull ? v.vpVah : bear ? v.vpVal : null;
+    const targetValid = target != null && v.price != null && (bull ? target > v.price : target < v.price);
+    const priceBadge = `<span class="dc-price" title="目標價＝Volume Profile 價值區${bull ? '上緣 VAH' : bear ? '下緣 VAL' : ''}，估算參考、非投資建議；現價已越過該水位時不顯示">現價 ${fmtP(v.price)}｜目標 ${targetValid ? fmtP(target) : '—'}</span>`;
     // Confidence badge (Phase 5/6): backtest-only feature, hidden entirely in
     // static-snapshot mode (see docs/backtest_plan.md Phase 6 point 1).
     const confBadge = staticMode ? '' : (
