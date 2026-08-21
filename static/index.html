@@ -85,6 +85,7 @@ body.static-mode #backtestStatus, body.static-mode #backtestDisclaimerLines { di
 .dc-code { font-family: var(--font-mono); font-weight: 600; }
 .dc-name { color: var(--color-text-secondary); font-size: 13px; }
 .dc-priority { font-size: 12px; color: var(--color-text-secondary); font-family: var(--font-mono); white-space: nowrap; }
+.dc-price { font-size: 12px; color: var(--color-text-secondary); font-family: var(--font-mono); white-space: nowrap; }
 .dc-reason { flex: 1; min-width: 160px; font-size: 13px; }
 .dc-badges { display: flex; gap: 6px; flex-shrink: 0; }
 .action-badge { display: inline-block; font-size: 12px; padding: 3px 10px; border-radius: 4px; font-weight: 600; white-space: nowrap; }
@@ -299,6 +300,8 @@ function rowView(s) {
     ma60: d ? d.ma60_last : null,
     ofRatio: a && a.of ? a.of.ratio5 : null,
     vpPos: a ? ({above_va: 2, inside_va: 1, below_va: 0}[a.vp_position] ?? null) : null,
+    vpVah: a && a.vp ? a.vp.vah : null,
+    vpVal: a && a.vp ? a.vp.val : null,
     score: a ? a.score : null,
     label: a ? a.label : null,
     chipScore: a && a.chip ? a.chip.score : null,
@@ -546,6 +549,12 @@ function renderDecisionPanel(views) {
       ? `<span class="score-badge ${scoreClass(v.chipScore)}" title="籌碼分（${v.chipCoverage}/4 項資料）">籌碼 ${v.chipScore > 0 ? '+' : ''}${v.chipScore}</span>`
       : '<span class="score-badge score-n">籌碼 —</span>';
     const techBadge = `<span class="score-badge ${scoreClass(v.score)}">技術 ${v.score > 0 ? '+' : ''}${v.score}</span>`;
+    // Target price is not a forecast: it's the Volume Profile value-area edge
+    // (VAH for bullish score, VAL for bearish) already computed for the chart,
+    // reused here as a reference level -- see docs/archive/backtest_plan.md's
+    // explicit decision against building real entry/exit price suggestions.
+    const target = v.score > 0 ? v.vpVah : v.score < 0 ? v.vpVal : null;
+    const priceBadge = `<span class="dc-price" title="目標價＝Volume Profile 價值區${v.score > 0 ? '上緣 VAH' : v.score < 0 ? '下緣 VAL' : ''}，估算參考、非投資建議">現價 ${fmtP(v.price)}｜目標 ${target != null ? fmtP(target) : '—'}</span>`;
     // Confidence badge (Phase 5/6): backtest-only feature, hidden entirely in
     // static-snapshot mode (see docs/backtest_plan.md Phase 6 point 1).
     const confBadge = staticMode ? '' : (
@@ -558,6 +567,7 @@ function renderDecisionPanel(views) {
       <span class="dc-code">${v.code}</span>
       <span class="dc-name">${v.name}</span>
       <span class="dc-priority" title="行動優先級">P${v.priority}</span>
+      ${priceBadge}
       <span class="dc-reason">${v.reason || ''}</span>
       <span class="dc-badges">${techBadge}${chipBadge}${confBadge}</span>
     </div>`;
