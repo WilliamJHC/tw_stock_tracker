@@ -147,6 +147,22 @@ GitHub Actions（排程）
 2. 開 repo → `watchlist.json` → 編輯 → 加入或刪除股票 → commit 到 `main`
 3. 等下一次排程（最多約 20 分鐘），或到 Actions 頁手動 Run workflow（`mode=full`）立即生效
 
+## 全市場因子排名法（多因子擇股，`scripts/run_factor_backtest.py`）
+
+`src/finlab_factors.py` 的 `RANKING_WEIGHTS`（營收 YoY／ROE／動能）用哪組權重，
+不是拍腦袋定案——`.github/workflows/optimize.yml` 每月重跑一次 rank-IC 評估，
+把新算出的建議權重跟目前生效的權重做 purged walk-forward 比較，通過 DSR/PBO/
+高原三道門檻才自動套用（見 `docs/adr/0002-auto-apply-ranking-weights.md`）；
+套用後下一週期表現變差會自動退回前一組。**已知限制**：這個 workflow 只重新
+評估既有快取（`cache/factor_run/`，靠 `actions/cache` 跨執行留存），不會自己
+重抓資料——增量更新／季度全量重抛目前還沒做，要更新底層資料得手動跑
+`python scripts/run_factor_backtest.py --universe all`（見 `scripts/
+run_ranking_optimize.py` 檔頭 docstring 的 KNOWN GAP 說明）。
+
+Secrets 沿用「手機雲端版」同一個 Environment「Cloudflare」底下的
+`TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID`（跟 `deploy-worker.yml` 用同一組），
+不需要另外設定。
+
 ### 故障排查（Actions 紅燈看哪裡）
 
 點進失敗的 run → 展開紅色 ✕ 的那個 step 看訊息。目前遇過兩種：

@@ -17,6 +17,26 @@ per-rebalance-date exact check finlab_factors.liquidity_ok() does inside
 the backtest); only survivors get revenue+financials (3 more req/code) in
 Stage 2. A per-code JSON cache under cache/factor_run/ makes a killed run
 resumable -- rerun the same command and already-fetched codes are skipped.
+
+Phase 6a (docs/https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md)
+adds one more request per surviving code: a Yahoo Adj Close pull, ratioed
+against this module's own FinMind raw close, to stamp a "c_adj" key onto
+every bar (see _augment_bars_with_adj_factor()) -- Yahoo-ratio only, no TWSE
+table, no backtest.db write. finlab_factors.momentum_pct() reads c_adj when
+present. Best-effort: a code where the Yahoo pull fails, or where the
+detected steps fail adjust.py's invariant checks, just keeps raw close for
+that code (see _augment_bars_with_adj_factor()'s docstring) rather than
+aborting the run.
+
+Phase 6b adds one more Stage-2 request per surviving code (get_per_pbr()) --
+gross/operating margin trend ride along on the financials request already
+made (zero extra cost), but the PBR-based value candidate needs its own
+FinMind dataset. universe_data now also carries "value_series"/
+"gross_margin_trend_series"/"operating_margin_trend_series" (see
+finlab_factors.py's value_series()/gross_margin_trend_series()/
+operating_margin_trend_series()) for scripts/report_factor_ic.py to
+evaluate via factor_eval.evaluate_candidate_factor() -- these are NOT part
+of RANKING_WEIGHTS/composite_scores(), evaluation only.
 """
 import argparse
 import collections
@@ -27,9 +47,17 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
+import adjust  # noqa: E402
 import data_sources as ds  # noqa: E402
 import finlab_factors as ff  # noqa: E402
 import portfolio_backtest as pb  # noqa: E402
+
+# build_adj_factors.py lives in this same scripts/ directory (not src/ --
+# its Yahoo/yfinance path is the one place in the project allowed to pull
+# pandas, see that module's docstring) -- Python auto-adds a script's own
+# directory to sys.path, so this import works the same way "import adjust"
+# above does for src/.
+import build_adj_factors as baf  # noqa: E402
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN_CACHE_DIR = os.path.join(BASE_DIR, "cache", "factor_run")
@@ -106,6 +134,39 @@ def _daily_to_bars(daily):
     ]
 
 
+def _augment_bars_with_adj_factor(code, bars, limiter):
+    """bars (ascending [{date,c,v}]) -> same-length list with a "c_adj" key
+    added to every entry (docs/https-finlab-finance-blog-python-get-tai-
+    memoized-lighthouse.md Phase 6a). Yahoo-ratio only -- no TWSE table, no
+    backtest.db write, unlike scripts/build_adj_factors.py's watchlist-scale
+    pipeline -- so this covers TWSE and TPEX codes alike with the exact same
+    one extra request per code. finlab_factors.momentum_pct() reads c_adj
+    when present; liquidity_ok() keeps reading raw "c"/"v" untouched (same
+    bars list, both fields present).
+
+    Best-effort: a Yahoo fetch failure or an empty ratio series just returns
+    `bars` unchanged (no c_adj key added) -- momentum_pct() then falls back
+    to raw close for this code, same as before Phase 6a, rather than
+    aborting the whole run over one code's data gap."""
+    limiter.before_request()
+    yahoo_adj_close = baf.fetch_yahoo_adj_close(code, bars[0]["date"])
+    if not yahoo_adj_close:
+        return bars
+    ratio_series = baf.compute_yahoo_ratio_series(bars, yahoo_adj_close)
+    if not ratio_series:
+        return bars
+    steps = baf.detect_steps(sorted(ratio_series), ratio_series)
+    actions = [{"date": s["date"], "ratio": s["ratio"]} for s in steps if s["persists"]]
+    bar_dates = [b["date"] for b in bars]
+    factors = adjust.build_adj_factor(bar_dates, actions)
+    violations = adjust.validate_adj_factor(bar_dates, factors, [a["date"] for a in actions])
+    if violations:
+        print(f"  ⚠ {code} adj_factor 不變量違反（{len(violations)} 筆），本檔 momentum 退回原始價："
+              f"{violations[:3]}")
+        return bars
+    return [{**b, "c_adj": b["c"] * f} for b, f in zip(bars, factors)]
+
+
 def _passed_liquidity_ever(bars):
     """Cheap Stage-1 proxy: did this name's turnover ever clear the bar
     across its whole history? Filters out names that would never survive
@@ -119,7 +180,13 @@ def _passed_liquidity_ever(bars):
 
 def fetch_universe_data(codes, days, limiter):
     """Two-stage fetch. Returns {code: {bars, bar_dates, revenue_series,
-    roe_series}}, skipping codes with insufficient data at any stage."""
+    roe_series, value_series, gross_margin_trend_series,
+    operating_margin_trend_series}}, skipping codes with insufficient data
+    at any stage. The three Phase 6b keys can be empty lists (no signal
+    computable, e.g. margin data missing) but are always present -- only a
+    code loaded from a pre-Phase-6b cache entry that hasn't gone through
+    fetch/backfill yet could differ, and that only for the margin-trend
+    keys (see the "per_pbr_series"/c_adj backfill comments above)."""
     universe_data = {}
     n = len(codes)
     for i, code in enumerate(codes):
@@ -127,11 +194,43 @@ def fetch_universe_data(codes, days, limiter):
         if cached is not None:
             if cached.get("skip"):
                 continue
+            bars = cached["bars"]
+            cache_dirty = False
+            # Cache entries written before Phase 6a never got a "c_adj" key
+            # -- augment them in place (one extra Yahoo request, no re-fetch
+            # of daily/revenue/financials) and persist the upgraded cache so
+            # this only happens once per code, matching Phase 6a's "只需要
+            # 對每檔額外打一次 Yahoo Adj Close" cost claim.
+            if bars and "c_adj" not in bars[0]:
+                print(f"[{i + 1}/{n}] {code}（快取補算 adj_factor）")
+                bars = _augment_bars_with_adj_factor(code, bars, limiter)
+                cached = {**cached, "bars": bars}
+                cache_dirty = True
+            # per_pbr_series is a standalone 1-request fetch (unlike margin
+            # trend below, which rides on financials_rows already fetched
+            # only at first-fetch time) -- cheap enough to backfill into an
+            # old cache entry the same way c_adj is above.
+            if "per_pbr_series" not in cached:
+                limiter.before_request()
+                per_pbr_rows = ds.get_per_pbr(code, days=days, cache=False)
+                cached = {**cached, "per_pbr_series": ff.value_series(per_pbr_rows or [])}
+                cache_dirty = True
+            if cache_dirty:
+                _save_code_cache(code, cached)
             universe_data[code] = {
-                "bars": cached["bars"],
-                "bar_dates": [b["date"] for b in cached["bars"]],
+                "bars": bars,
+                "bar_dates": [b["date"] for b in bars],
                 "revenue_series": cached["revenue_series"],
                 "roe_series": cached["roe_series"],
+                "value_series": cached["per_pbr_series"],
+                # margin_trend_series is only ever populated at first-fetch
+                # time below (needs financials_rows re-fetched, not zero-
+                # cost) -- absent on any cache entry from before Phase 6b or
+                # never backfilled, factor_eval.evaluate_candidate_factor()
+                # tolerates a missing key per code (see that function's
+                # docstring), so this .get() default is enough.
+                "gross_margin_trend_series": cached.get("gross_margin_trend_series", []),
+                "operating_margin_trend_series": cached.get("operating_margin_trend_series", []),
             }
             continue
 
@@ -150,11 +249,15 @@ def fetch_universe_data(codes, days, limiter):
             _save_code_cache(code, {"skip": True, "days": days})
             continue
 
+        bars = _augment_bars_with_adj_factor(code, bars, limiter)
+
         limiter.before_request()
         revenue_rows = ds.get_monthly_revenue(code, days=days, cache=False)
         limiter.before_request()
         limiter.before_request()  # get_financials() issues 2 requests internally
         financials_rows = ds.get_financials(code, days=days, cache=False)
+        limiter.before_request()
+        per_pbr_rows = ds.get_per_pbr(code, days=days, cache=False)
 
         revenue_series = ff.revenue_yoy_series(revenue_rows or [])
         roe_series_ = ff.roe_series(financials_rows or [])
@@ -163,10 +266,23 @@ def fetch_universe_data(codes, days, limiter):
             _save_code_cache(code, {"skip": True, "days": days})
             continue
 
-        _save_code_cache(code, {"bars": bars, "revenue_series": revenue_series, "roe_series": roe_series_, "days": days})
+        # Zero extra requests -- financials_rows was already fetched above
+        # for roe_series() (docs/https-finlab-finance-blog-python-get-tai-
+        # memoized-lighthouse.md Phase 6b).
+        gross_margin_trend = ff.gross_margin_trend_series(financials_rows or [])
+        operating_margin_trend = ff.operating_margin_trend_series(financials_rows or [])
+        value_series_ = ff.value_series(per_pbr_rows or [])
+
+        _save_code_cache(code, {
+            "bars": bars, "revenue_series": revenue_series, "roe_series": roe_series_,
+            "per_pbr_series": value_series_, "gross_margin_trend_series": gross_margin_trend,
+            "operating_margin_trend_series": operating_margin_trend, "days": days,
+        })
         universe_data[code] = {
             "bars": bars, "bar_dates": [b["date"] for b in bars],
             "revenue_series": revenue_series, "roe_series": roe_series_,
+            "value_series": value_series_, "gross_margin_trend_series": gross_margin_trend,
+            "operating_margin_trend_series": operating_margin_trend,
         }
     return universe_data
 
@@ -183,9 +299,8 @@ def main():
 
     codes = _load_universe(args.universe)
     print(f"universe={args.universe} ({len(codes)} codes), days={args.days}")
-    print("提醒：這條路徑直接抓 FinMind 原始（未還原）股價，沒有套用 scripts/build_adj_factors.py "
-          "算出的除權息還原因子（見 src/finlab_factors.py module docstring 的 KNOWN LIMITATION）。"
-          "任一代碼在回測期間若有除權息或大額股票股利，momentum 因子在那個時點附近會算出失真的假報酬。")
+    print("提醒：momentum 因子已套用 Yahoo 比值法還原（Phase 6a），逐檔盡力而為——"
+          "任一代碼若 Yahoo 抓取失敗或還原序列未通過不變量檢查，該檔會退回原始價（見執行過程中的 ⚠ 警告）。")
 
     limiter = _RateLimiter()
     universe_data = fetch_universe_data(codes, args.days, limiter)

@@ -47,6 +47,15 @@ def load_cached_universe():
             "bar_dates": [b["date"] for b in data["bars"]],
             "revenue_series": data["revenue_series"],
             "roe_series": data["roe_series"],
+            # Phase 6b candidate-factor series -- absent on a cache entry
+            # from before Phase 6b existed and never backfilled (margin
+            # trend isn't retroactively backfilled, see
+            # run_factor_backtest.py's fetch_universe_data() docstring);
+            # .get() default keeps this report running on a mixed-vintage
+            # cache instead of crashing on the older entries.
+            "value_series": data.get("per_pbr_series", []),
+            "gross_margin_trend_series": data.get("gross_margin_trend_series", []),
+            "operating_margin_trend_series": data.get("operating_margin_trend_series", []),
         }
     return universe_data
 
@@ -77,6 +86,22 @@ def main():
     for factor_name in sorted(result):
         row = "".join(f"  {_fmt(result[factor_name][h]):>32}" for h in horizons)
         print(f"{factor_name:<10}{row}")
+
+    # Phase 6b candidate factors -- NOT part of RANKING_WEIGHTS, evaluation
+    # only (see finlab_factors.py's value_series()/gross_margin_trend_series()/
+    # operating_margin_trend_series() docstrings). Printed the same way so a
+    # human can eyeball whether any of them clears the same IC/ICIR bar the
+    # three adopted factors are held to.
+    candidates = {
+        "gross_margin_trend (候選)": ("gross_margin_trend_series", "trend_pct"),
+        "operating_margin_trend (候選)": ("operating_margin_trend_series", "trend_pct"),
+        "value/pbr (候選)": ("value_series", "value_score"),
+    }
+    print("\n候選因子（Phase 6b，先評估、不保證採用）：")
+    for label, (series_key, value_key) in candidates.items():
+        candidate_result = fe.evaluate_candidate_factor(universe_data, series_key, value_key, dates=dates, horizons=horizons)
+        row = "".join(f"  {_fmt(candidate_result[h]):>32}" for h in horizons)
+        print(f"{label:<28}{row}")
 
     print("\n目前 RANKING_WEIGHTS 建議（僅供參考，不自動套用）：")
     for horizon in horizons:

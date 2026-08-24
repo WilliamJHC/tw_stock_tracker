@@ -126,6 +126,57 @@ def evaluate_factors(universe_data, dates=None, horizons=DEFAULT_HORIZONS):
     return result
 
 
+def evaluate_candidate_factor(universe_data, series_key, value_key, dates=None, horizons=DEFAULT_HORIZONS):
+    """Rank-IC/ICIR/decay for ONE Phase 6b candidate factor (gross/operating
+    margin trend, PBR-based value -- see finlab_factors.py's
+    gross_margin_trend_series()/operating_margin_trend_series()/
+    value_series()) that is NOT one of the required revenue/roe/momentum
+    triplet evaluate_factors() above handles. Decoupled from that function
+    on purpose: composite_scores()'s "all three factors must be available"
+    filter doesn't apply here -- a code simply lacking `series_key` data for
+    a given date just doesn't contribute to that date's cross-section,
+    rather than being excluded from revenue/roe/momentum's IC too.
+
+    universe_data[code][series_key]: optional [{"usable_date", value_key:
+    float}, ...] ascending, same point-in-time shape as revenue_series/
+    roe_series -- absent entirely for a code scripts/run_factor_backtest.py
+    fetched before this candidate factor existed (Phase 6a-style cache
+    entries aren't retroactively upgraded for margin trend -- see that
+    script's fetch_universe_data() docstring). `dates` defaults to this
+    universe's own month-boundary rebalance dates (see rebalance_dates()).
+
+    Returns {horizon: ic_stats_dict} -- same per-horizon shape as one row of
+    evaluate_factors()'s result, so report_factor_ic.py can print it with
+    the same _fmt() helper. Never folded into RANKING_WEIGHTS/
+    composite_scores() by this function or any caller -- see
+    suggest_weights()'s docstring on why that decision is never automatic."""
+    dates = dates if dates is not None else rebalance_dates(universe_data)
+    result = {}
+    for horizon in horizons:
+        ic_series = []
+        for date in dates:
+            factor_values, forward_returns = [], []
+            for d in universe_data.values():
+                series = d.get(series_key)
+                if not series:
+                    continue
+                bars, bar_dates = d["bars"], d["bar_dates"]
+                idx = ff._bar_index_on_or_before(bar_dates, date)
+                if idx is None or not ff.liquidity_ok(bars, idx):
+                    continue
+                val = ff._as_of(series, date, value_key)
+                if val is None:
+                    continue
+                fr = _forward_return(bars, idx, horizon)
+                if fr is None:
+                    continue
+                factor_values.append(val)
+                forward_returns.append(fr)
+            ic_series.append(m.rank_ic(factor_values, forward_returns))
+        result[horizon] = m.ic_stats(ic_series)
+    return result
+
+
 def suggest_weights(evaluate_result, horizon=20, min_icir=0.0):
     """Proposal ONLY for finlab_factors.RANKING_WEIGHTS -- never applied
     automatically, a human decides whether to adopt it. Weights each factor

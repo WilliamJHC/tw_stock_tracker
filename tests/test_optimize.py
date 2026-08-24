@@ -161,6 +161,36 @@ def test_evaluate_decision_none_plateau_rejects():
     assert decision["accept"] is False
 
 
+# ---------------------------------- resolve_ranking_weights_action (6d) --
+
+def test_resolve_ranking_weights_action_keeps_when_rejected():
+    decision = {"accept": False, "reasons": ["PBO too high"]}
+    assert opt.resolve_ranking_weights_action(decision, winner="ic_suggested", has_previous=False) == "keep"
+
+
+def test_resolve_ranking_weights_action_keeps_when_active_wins():
+    decision = {"accept": True, "reasons": []}
+    assert opt.resolve_ranking_weights_action(decision, winner="active", has_previous=True) == "keep"
+
+
+def test_resolve_ranking_weights_action_adopts_suggested_when_it_wins():
+    decision = {"accept": True, "reasons": []}
+    assert opt.resolve_ranking_weights_action(decision, winner="ic_suggested", has_previous=False) == "adopt_suggested"
+
+
+def test_resolve_ranking_weights_action_rolls_back_when_previous_wins():
+    decision = {"accept": True, "reasons": []}
+    assert opt.resolve_ranking_weights_action(decision, winner="previous", has_previous=True) == "rollback_to_previous"
+
+
+def test_resolve_ranking_weights_action_no_rollback_without_a_real_previous_candidate():
+    # winner=="previous" should never happen when has_previous is False (it
+    # wasn't even in the candidate pool that cycle) -- guard against it
+    # anyway rather than trust the caller.
+    decision = {"accept": True, "reasons": []}
+    assert opt.resolve_ranking_weights_action(decision, winner="previous", has_previous=False) == "keep"
+
+
 # ------------------------------------------ sweep_param_walk_forward (e2e) --
 
 def _synthetic_bars(n=600, seed=13, p0=60.0):

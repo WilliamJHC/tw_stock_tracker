@@ -1,0 +1,78 @@
+name: optimize
+
+# Phase 6c/6d (docs/https-finlab-finance-blog-python-get-tai-memoized-
+# lighthouse.md, docs/adr/0002-auto-apply-ranking-weights.md): monthly
+# re-evaluation of finlab_factors.RANKING_WEIGHTS against a fresh rank-IC-
+# derived candidate, auto-applied/rolled-back by scripts/run_ranking_optimize.py.
+#
+# KNOWN GAP (not built in this pass, tracked honestly rather than silently
+# assumed): this job does NOT itself refresh cache/factor_run/*.json's
+# underlying daily bars/revenue/financials -- scripts/run_factor_backtest.py
+# has no incremental ("only fetch what changed since last run") fetch mode
+# yet, only a full ~19-22h --universe all pull (Phase 4). It re-evaluates
+# whatever the cache already holds, restored via actions/cache below. The
+# lighthouse.md Phase 6c plan's "每季全量重抛 universe 清單" step (new/
+# delisted codes) is the same gap -- until an incremental fetcher exists,
+# refreshing the underlying data is a manual `python scripts/
+# run_factor_backtest.py --universe all` run (or a scheduled one on a
+# runner with enough wall-clock budget), not something this workflow does.
+on:
+  schedule:
+    - cron: '0 22 1 * *'   # 每月 1 號台北 06:00（UTC 前一天 22:00）
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        type: boolean
+        description: '只評估、不寫 meta/optimization_runs、不發 Telegram'
+        default: false
+
+concurrency:
+  group: optimize
+  cancel-in-progress: false
+
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    # TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID 建在 Environment「Cloudflare」底下
+    # （沿用 deploy-worker.yml 的既有 secrets，同一組 Telegram bot）；沒有這行
+    # secrets.* 會全部解析成空字串（見 snapshot.yml 的同類註解）。
+    environment: Cloudflare
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: check secrets
+        run: |
+          missing=""
+          [ -z "$TELEGRAM_BOT_TOKEN" ] && missing="$missing TELEGRAM_BOT_TOKEN"
+          [ -z "$TELEGRAM_CHAT_ID" ] && missing="$missing TELEGRAM_CHAT_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::缺少或空白的 secrets:$missing（Settings → Environments → Cloudflare）"
+            exit 1
+          fi
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-actions.txt
+      - run: pip install -r requirements-actions.txt
+      # 唯一跨執行需要留存的狀態：run_factor_backtest.py 的 per-code JSON 快取
+      # 與 backtest.db（存 meta.active_ranking_weights/previous_ranking_weights
+      # 與 optimization_runs 試驗紀錄）。exact key 用 run id 保證每次都存一份
+      # 新的；restore-keys 前綴比對撈回上一次最新的內容。
+      - uses: actions/cache@v4
+        with:
+          path: |
+            cache/factor_run
+            src/data/backtest.db
+          key: optimize-state-${{ github.run_id }}
+          restore-keys: |
+            optimize-state-
+      - name: run_ranking_optimize
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python scripts/run_ranking_optimize.py --dry-run
+          else
+            python scripts/run_ranking_optimize.py
+          fi

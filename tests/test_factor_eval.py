@@ -138,3 +138,32 @@ def test_suggest_weights_min_icir_filter():
     result = {"revenue": {20: {"icir": 0.05}}, "roe": {20: {"icir": 0.8}}, "momentum": {20: {"icir": None}}}
     weights = fe.suggest_weights(result, horizon=20, min_icir=0.1)
     assert weights == {"roe": 1.0}
+
+
+# --------------------------------------------------- evaluate_candidate_factor --
+
+def test_evaluate_candidate_factor_detects_strong_signal():
+    universe = _synthetic_universe(n_codes=6, days=400)
+    for code, d in universe.items():
+        code_rank = int(code[1:])
+        d["value_series"] = [{"usable_date": "2022-01-01", "value_score": code_rank * 10.0}]
+    dates = universe["C0"]["bar_dates"][300:340:10]
+    result = fe.evaluate_candidate_factor(universe, "value_series", "value_score", dates=dates, horizons=(5, 20))
+    assert set(result) == {5, 20}
+    for stats in result.values():
+        assert set(stats) == {"mean_ic", "t_stat", "icir", "n"}
+    ics_20 = [ic for ic in [result[20]["mean_ic"]] if ic is not None]
+    assert ics_20 and ics_20[0] > 0.9  # same construction as momentum's strong-signal test above
+
+
+def test_evaluate_candidate_factor_skips_codes_without_the_series():
+    universe = _synthetic_universe(n_codes=3, days=400)
+    universe["C0"]["value_series"] = [{"usable_date": "2022-01-01", "value_score": 1.0}]
+    # C1/C2 never got a "value_series" key at all -- e.g. cache entries
+    # fetched before Phase 6b existed.
+    dates = universe["C0"]["bar_dates"][300:310]
+    result = fe.evaluate_candidate_factor(universe, "value_series", "value_score", dates=dates, horizons=(20,))
+    # A single-code cross-section has no spread to rank-IC on, so every date
+    # comes back None -- the point of this test is that it doesn't crash on
+    # C1/C2's missing key, not that it finds a signal.
+    assert result[20]["mean_ic"] is None

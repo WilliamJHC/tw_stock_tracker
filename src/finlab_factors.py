@@ -14,22 +14,24 @@ for monthly revenue and up to ~45-60 days after quarter-end for quarterly
 financials; REVENUE_LAG_DAYS/FINANCIALS_LAG_DAYS use the conservative end
 of that range rather than a per-filing lookup.
 
->>> KNOWN LIMITATION: momentum_pct() runs on UNADJUSTED close <<<
+>>> momentum_pct() prefers ADJUSTED close, falls back to raw <<<
 adjust.py's downstream rule (docs/archive/backtest_plan.md Phase 1c) says
 momentum must run on split/dividend-adjusted price levels, not raw ones.
-But the callers that build this module's `bars` (scripts/run_factor_backtest.py's
-fetch_universe_data(), via ds.get_daily() -> FinMind's raw TaiwanStockPrice)
-fetch directly from FinMind and never touch backtest.db, so
-scripts/build_adj_factors.py's TWSE/Yahoo-derived adj_factor -- computed
-per-code against daily_bars rows in that DB -- has nothing to attach to
-here. Building an equivalent corporate-action pipeline for this module's
-(potentially 2000+ code) universe would be a substantial new fetch
-subsystem, not a local fix, and hasn't been built. Net effect: at a
-rebalance date shortly after a stock split/large stock dividend,
-momentum_pct() computes a phantom return off the raw price jump, which
-composite_scores() and factor_eval.evaluate_factors() then rank/measure
-IC on as if it were real. liquidity_ok() is NOT affected -- it wants raw
-close*volume by design (adjust.py's own rule), not a bug.
+Phase 6a (docs/https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md)
+closed this gap for this module's (potentially 2000+ code) universe:
+scripts/run_factor_backtest.py's fetch_universe_data() now does its own
+lightweight per-code Yahoo-ratio adjustment (fetch_yahoo_adj_close() +
+compute_yahoo_ratio_series() + detect_steps(), reused from
+scripts/build_adj_factors.py, plus this project's own adjust.build_adj_factor())
+and stamps a "c_adj" key onto each bar dict -- no TWSE table, no DB write,
+just an in-memory factor applied straight onto the bars this module already
+receives. momentum_pct() below reads bars[i]["c_adj"] when present, its raw
+"c" otherwise. liquidity_ok() is NOT affected either way -- it wants raw
+close*volume by design (adjust.py's own rule), not a bug. A caller that
+builds `bars` without ever computing adj_factor (e.g. a hand-built fixture,
+or a future caller that skips the Yahoo augmentation step) still gets the
+old raw-close behavior -- the phantom-return risk near a split only remains
+where "c_adj" was never populated.
 """
 import bisect
 import datetime as dt
@@ -117,6 +119,80 @@ def roe_series(financials_rows):
     return out
 
 
+def _margin_trend_series(financials_rows, numerator_key):
+    """Shared implementation for gross_margin_trend_series()/
+    operating_margin_trend_series() -- financials_rows: [{date, revenue,
+    numerator_key, ...}] (ascending, quarterly, get_financials()'s extended
+    shape). Trend = this quarter's margin (numerator/revenue, %) minus the
+    SAME quarter one year ago's -- cancels seasonality the same way
+    revenue_yoy_series() does (exact calendar-year match, not position),
+    rather than comparing a raw margin level across quarters with different
+    seasonal mix. usable_date = quarter-end + FINANCIALS_LAG_DAYS, same
+    disclosure-lag convention as roe_series(). A quarter missing revenue or
+    `numerator_key` (get_financials() leaves these None rather than
+    dropping the row, so ROE stays computable even when a margin figure is
+    absent) is skipped for this factor without affecting roe_series()/
+    revenue_yoy_series() at all."""
+    if not financials_rows or len(financials_rows) < 5:
+        return []
+    by_date = {r["date"]: r for r in financials_rows}
+
+    def _margin_pct(row):
+        revenue, num = row.get("revenue"), row.get(numerator_key)
+        if not revenue or num is None:
+            return None
+        return num / revenue * 100
+
+    out = []
+    for r in financials_rows:
+        cur_margin = _margin_pct(r)
+        if cur_margin is None:
+            continue
+        cur_dt = dt.datetime.strptime(r["date"], "%Y-%m-%d")
+        prev_key = cur_dt.replace(year=cur_dt.year - 1).strftime("%Y-%m-%d")
+        prev = by_date.get(prev_key)
+        prev_margin = _margin_pct(prev) if prev else None
+        if prev_margin is None:
+            continue
+        out.append({
+            "usable_date": _shift_date(r["date"], FINANCIALS_LAG_DAYS),
+            "trend_pct": cur_margin - prev_margin,
+        })
+    return out
+
+
+def gross_margin_trend_series(financials_rows):
+    """YoY change in gross margin (GrossProfit/Revenue, pct points) -- see
+    _margin_trend_series(). Candidate quality factor, Phase 6b
+    (docs/https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md);
+    NOT part of RANKING_WEIGHTS/composite_scores() -- evaluate via
+    factor_eval.evaluate_candidate_factor() first, see that function's
+    docstring on why adoption is never automatic."""
+    return _margin_trend_series(financials_rows, "gross_profit")
+
+
+def operating_margin_trend_series(financials_rows):
+    """YoY change in operating margin (OperatingIncome/Revenue, pct points)
+    -- see _margin_trend_series(). Same candidate-factor status as
+    gross_margin_trend_series()."""
+    return _margin_trend_series(financials_rows, "operating_income")
+
+
+def value_series(per_pbr_rows):
+    """data_sources.get_per_pbr()'s [{date, per, pbr}] (ascending) ->
+    [{usable_date, value_score}]. value_score = -pbr so this factor's sign
+    convention matches every other factor here (higher raw value = more
+    attractive, fed straight into _pct_rank()) -- a LOWER price-to-book is
+    the conventionally "cheaper" (better value) stock, so its sign is
+    flipped. usable_date == date directly: FinMind's TaiwanStockPER series
+    is already trading-date-indexed (see get_per_pbr()'s docstring on why
+    no REVENUE_LAG_DAYS/FINANCIALS_LAG_DAYS-style lag is added here). Skips
+    a row with no pbr. Candidate value factor, Phase 6b -- same
+    evaluate-before-adopt status as the margin-trend functions above."""
+    return [{"usable_date": r["date"], "value_score": -r["pbr"]}
+            for r in per_pbr_rows if r.get("pbr")]
+
+
 def _as_of(series, date, key):
     """Latest `series` entry with usable_date <= date, or None. series must
     be sorted ascending by usable_date (both revenue_yoy_series() and
@@ -145,19 +221,26 @@ def liquidity_ok(bars, idx, min_turnover=LIQUIDITY_MIN_TURNOVER, window=LIQUIDIT
     return avg_turnover > min_turnover
 
 
+def _close(bar):
+    """bar["c_adj"] (split/dividend-adjusted) if present, else raw bar["c"]
+    -- see this module's docstring on who populates c_adj and why."""
+    c_adj = bar.get("c_adj")
+    return c_adj if c_adj is not None else bar["c"]
+
+
 def momentum_pct(bars, idx, days=MOMENTUM_DAYS):
     """`days`-bar percent return ending at bars[idx], or None if idx has
     fewer than `days` bars of history before it.
 
-    Runs on bars[idx]["c"] as-is, which today's callers only ever populate
-    with UNADJUSTED close -- see this module's docstring's KNOWN LIMITATION
-    section. Phantom near a split/large stock dividend."""
+    Prefers bars[i]["c_adj"] (see this module's docstring), falling back to
+    raw "c" for any bar that doesn't carry one -- phantom near a split/large
+    stock dividend only for the latter."""
     if idx - days < 0:
         return None
-    base = bars[idx - days]["c"]
+    base = _close(bars[idx - days])
     if not base:
         return None
-    return (bars[idx]["c"] - base) / base * 100
+    return (_close(bars[idx]) - base) / base * 100
 
 
 def _pct_rank(values):

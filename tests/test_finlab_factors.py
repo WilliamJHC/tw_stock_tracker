@@ -80,6 +80,64 @@ def test_roe_series_skips_non_positive_equity():
     assert ff.roe_series(rows) == []
 
 
+# ------------------------------------------------------- margin trend series --
+
+def test_gross_margin_trend_series_yoy_change():
+    rows = [
+        {"date": "2022-12-31", "net_income": 1.0, "equity": 1.0, "revenue": 1000.0, "gross_profit": 300.0, "operating_income": 100.0},
+        {"date": "2023-03-31", "net_income": 1.0, "equity": 1.0, "revenue": 100.0, "gross_profit": 100.0, "operating_income": 100.0},
+        {"date": "2023-06-30", "net_income": 1.0, "equity": 1.0, "revenue": 100.0, "gross_profit": 100.0, "operating_income": 100.0},
+        {"date": "2023-09-30", "net_income": 1.0, "equity": 1.0, "revenue": 100.0, "gross_profit": 100.0, "operating_income": 100.0},
+        {"date": "2023-12-31", "net_income": 1.0, "equity": 1.0, "revenue": 1000.0, "gross_profit": 400.0, "operating_income": 100.0},
+    ]
+    out = ff.gross_margin_trend_series(rows)
+    # 2023-12-31 gross margin 40% vs 2022-12-31's 30% -> +10pp
+    assert out == [{"usable_date": "2024-02-29", "trend_pct": 10.0}]
+
+
+def test_operating_margin_trend_series_yoy_change():
+    rows = [
+        {"date": "2022-12-31", "net_income": 1.0, "equity": 1.0, "revenue": 1000.0, "gross_profit": 100.0, "operating_income": 100.0},
+        {"date": "2023-03-31", "net_income": 1.0, "equity": 1.0, "revenue": 100.0, "gross_profit": 100.0, "operating_income": 100.0},
+        {"date": "2023-06-30", "net_income": 1.0, "equity": 1.0, "revenue": 100.0, "gross_profit": 100.0, "operating_income": 100.0},
+        {"date": "2023-09-30", "net_income": 1.0, "equity": 1.0, "revenue": 100.0, "gross_profit": 100.0, "operating_income": 100.0},
+        {"date": "2023-12-31", "net_income": 1.0, "equity": 1.0, "revenue": 1000.0, "gross_profit": 100.0, "operating_income": 150.0},
+    ]
+    out = ff.operating_margin_trend_series(rows)
+    # 2023-12-31 operating margin 15% vs 2022-12-31's 10% -> +5pp
+    assert out == [{"usable_date": "2024-02-29", "trend_pct": 5.0}]
+
+
+def test_margin_trend_series_skips_quarter_missing_numerator():
+    rows = [
+        {"date": "2022-12-31", "net_income": 1.0, "equity": 1.0, "revenue": 1000.0, "gross_profit": None, "operating_income": 100.0},
+        {"date": "2023-03-31", "net_income": 1.0, "equity": 1.0, "revenue": 100.0, "gross_profit": 100.0, "operating_income": 100.0},
+        {"date": "2023-06-30", "net_income": 1.0, "equity": 1.0, "revenue": 100.0, "gross_profit": 100.0, "operating_income": 100.0},
+        {"date": "2023-09-30", "net_income": 1.0, "equity": 1.0, "revenue": 100.0, "gross_profit": 100.0, "operating_income": 100.0},
+        {"date": "2023-12-31", "net_income": 1.0, "equity": 1.0, "revenue": 1000.0, "gross_profit": 400.0, "operating_income": 100.0},
+    ]
+    # 2022-12-31 has no gross_profit -> 2023-12-31's YoY comparison has no
+    # prior-year point either, so the whole series is empty (roe_series()
+    # over the same rows would still compute fine -- separate concerns).
+    assert ff.gross_margin_trend_series(rows) == []
+
+
+# -------------------------------------------------------------- value_series --
+
+def test_value_series_flips_pbr_sign():
+    rows = [{"date": "2024-01-02", "per": 17.17, "pbr": 4.59}, {"date": "2024-01-03", "per": 17.0, "pbr": 4.5}]
+    out = ff.value_series(rows)
+    assert out == [
+        {"usable_date": "2024-01-02", "value_score": -4.59},
+        {"usable_date": "2024-01-03", "value_score": -4.5},
+    ]
+
+
+def test_value_series_skips_missing_pbr():
+    rows = [{"date": "2024-01-02", "per": 17.17, "pbr": None}]
+    assert ff.value_series(rows) == []
+
+
 # ------------------------------------------------------------------ _as_of --
 
 def test_as_of_picks_latest_not_after_date():
@@ -119,6 +177,26 @@ def test_momentum_pct_hand_computed():
 def test_momentum_pct_none_when_insufficient_history():
     bars = _bars([100.0] * 10)
     assert ff.momentum_pct(bars, 9, days=60) is None
+
+
+def test_momentum_pct_prefers_c_adj_over_raw_c():
+    # Raw close jumps +300% (a phantom 1:4-split-shaped move); c_adj holds
+    # flat -- momentum_pct() must read c_adj, not the raw split artefact
+    # (docs/https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md
+    # Phase 6a).
+    bars = _bars([100.0] * 61)
+    bars[60]["c"] = 400.0
+    for b in bars:
+        b["c_adj"] = 100.0
+    assert ff.momentum_pct(bars, 60, days=60) == 0.0
+
+
+def test_momentum_pct_falls_back_to_raw_c_when_no_c_adj():
+    closes = [100.0] * 61
+    closes[60] = 110.0
+    bars = _bars(closes)
+    assert "c_adj" not in bars[0]
+    assert ff.momentum_pct(bars, 60, days=60) == 10.0
 
 
 # ------------------------------------------------------- composite_scores --

@@ -251,7 +251,7 @@ def test_get_financials_joins_income_and_equity_by_date():
     income_rows = [
         {"date": "2023-03-31", "type": "IncomeAfterTaxes", "value": 100.0},
         {"date": "2023-06-30", "type": "IncomeAfterTaxes", "value": 120.0},
-        {"date": "2023-06-30", "type": "GrossProfit", "value": 999.0},  # other type, ignored
+        {"date": "2023-06-30", "type": "GrossProfit", "value": 999.0},  # rides along, see below
     ]
     equity_rows = [
         {"date": "2023-03-31", "type": "Equity", "value": 1000.0},
@@ -262,9 +262,30 @@ def test_get_financials_joins_income_and_equity_by_date():
     ]):
         result = ds.get_financials("2330")
     assert result == [
-        {"date": "2023-03-31", "net_income": 100.0, "equity": 1000.0},
-        {"date": "2023-06-30", "net_income": 120.0, "equity": 1100.0},
+        {"date": "2023-03-31", "net_income": 100.0, "equity": 1000.0,
+         "revenue": None, "gross_profit": None, "operating_income": None},
+        {"date": "2023-06-30", "net_income": 120.0, "equity": 1100.0,
+         "revenue": None, "gross_profit": 999.0, "operating_income": None},
     ]
+
+
+def test_get_financials_margin_fields_ride_along_zero_extra_requests():
+    income_rows = [
+        {"date": "2023-03-31", "type": "IncomeAfterTaxes", "value": 100.0},
+        {"date": "2023-03-31", "type": "Revenue", "value": 500.0},
+        {"date": "2023-03-31", "type": "GrossProfit", "value": 200.0},
+        {"date": "2023-03-31", "type": "OperatingIncome", "value": 150.0},
+    ]
+    equity_rows = [{"date": "2023-03-31", "type": "Equity", "value": 1000.0}]
+    with patch("data_sources.requests.get", side_effect=[
+        _fake_response(data=income_rows), _fake_response(data=equity_rows),
+    ]) as mock_get:
+        result = ds.get_financials("2330")
+    assert mock_get.call_count == 2  # same 2 requests as before this extension
+    assert result == [{
+        "date": "2023-03-31", "net_income": 100.0, "equity": 1000.0,
+        "revenue": 500.0, "gross_profit": 200.0, "operating_income": 150.0,
+    }]
 
 
 def test_get_financials_drops_dates_missing_either_side():

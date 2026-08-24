@@ -219,6 +219,44 @@ def detect_plateau(values, scores, tolerance_frac=0.1):
     return {"range": (lo, hi), "center": (lo + hi) / 2, "width_frac": width_frac}
 
 
+def resolve_ranking_weights_action(decision, winner, has_previous):
+    """Pure decision logic for scripts/run_ranking_optimize.py's scheduled
+    run (docs/https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md
+    Phase 6d, docs/adr/0002-auto-apply-ranking-weights.md). Each scheduled
+    cycle runs sweep_ranking_weights_walk_forward() over up to 3 named
+    candidates -- "active" (whatever's live right now), "previous" (only
+    present the cycle right after a switch -- what "active" replaced,
+    Phase 6d's rollback target), "ic_suggested" (this cycle's fresh
+    rank-IC-derived proposal, absent if no factor clears suggest_weights()'s
+    bar) -- and this function turns that result's decision/winner into ONE
+    of three actions:
+
+    "keep": nothing changes. Either no candidate cleared evaluate_decision()'s
+    DSR/PBO/plateau gates (decision["accept"] is False -- absence of
+    evidence isn't evidence FOR switching either), or "active" itself won
+    (still the best-performing setting this cycle).
+
+    "rollback_to_previous": "previous" won AND cleared the gates -- Phase
+    6d's ADR: the setting "active" replaced has now demonstrably
+    outperformed it on a fresh out-of-sample cycle, so revert.
+    has_previous guards this from ever firing on a cycle where "previous"
+    isn't even a real candidate (sweep_ranking_weights_walk_forward()'s
+    "point_best" name space is just the `candidates` dict's keys -- there is
+    no scenario where winner=="previous" without has_previous being True in
+    practice, but the caller not being trusted to only pass real winner
+    names here keeps this function's contract self-contained).
+
+    "adopt_suggested": "ic_suggested" won AND cleared the gates -- this
+    cycle's fresh rank-IC proposal beat whatever's currently active."""
+    if not decision["accept"]:
+        return "keep"
+    if winner == "previous" and has_previous:
+        return "rollback_to_previous"
+    if winner == "ic_suggested":
+        return "adopt_suggested"
+    return "keep"
+
+
 def evaluate_decision(plateau, pbo_value, dsr_value, plateau_width_min_frac=PLATEAU_WIDTH_MIN_FRAC):
     """Applies docs/.../lighthouse.md Phase 5's three accept/reject rules.
     Returns {"accept": bool, "reasons": [str, ...]} -- reasons lists every

@@ -811,11 +811,24 @@ def get_monthly_revenue(code, days=760, cache=True):
 
 
 def get_financials(code, days=900, cache=True):
-    """Quarterly net income and total equity for ROE. Returns
-    [{date, net_income, equity}] ascending, date = quarter-end, or None.
+    """Quarterly net income, total equity, revenue, gross profit and
+    operating income. Returns [{date, net_income, equity, revenue,
+    gross_profit, operating_income}] ascending, date = quarter-end, or None.
     net_income (FinMind type IncomeAfterTaxes) is the single quarter's
     figure, not year-to-date cumulative -- spot-checked against 2330's
     2023 annual report (sum of 4 quarters ~= reported FY net income).
+
+    revenue/gross_profit/operating_income (FinMind types Revenue/GrossProfit/
+    OperatingIncome, confirmed present on 2330's TaiwanStockFinancialStatements
+    response) ride along on the SAME income_rows request that net_income
+    already reads -- zero extra requests (docs/https-finlab-finance-blog-
+    python-get-tai-memoized-lighthouse.md Phase 6b). They're None for a date
+    where that specific type is missing from the response, independent of
+    the net_income/equity intersection below -- finlab_factors.py's margin-
+    trend functions check for None themselves rather than this function
+    silently dropping an otherwise-usable ROE row over a missing margin
+    figure.
+
     cache=False skips the on-disk cache (see get_daily()'s docstring)."""
     cached = _cache_get(f"financials_{code}") if cache else None
     if cached is not None:
@@ -833,9 +846,25 @@ def get_financials(code, days=900, cache=True):
             r["date"]: float(r["value"]) for r in equity_rows
             if r.get("type") == "Equity" and r.get("value") is not None
         }
+        revenue_by_date = {
+            r["date"]: float(r["value"]) for r in income_rows
+            if r.get("type") == "Revenue" and r.get("value") is not None
+        }
+        gross_profit_by_date = {
+            r["date"]: float(r["value"]) for r in income_rows
+            if r.get("type") == "GrossProfit" and r.get("value") is not None
+        }
+        operating_income_by_date = {
+            r["date"]: float(r["value"]) for r in income_rows
+            if r.get("type") == "OperatingIncome" and r.get("value") is not None
+        }
         dates = sorted(set(income_by_date) & set(equity_by_date))
         out = [
-            {"date": d, "net_income": income_by_date[d], "equity": equity_by_date[d]}
+            {
+                "date": d, "net_income": income_by_date[d], "equity": equity_by_date[d],
+                "revenue": revenue_by_date.get(d), "gross_profit": gross_profit_by_date.get(d),
+                "operating_income": operating_income_by_date.get(d),
+            }
             for d in dates
         ]
         if out:
@@ -844,4 +873,32 @@ def get_financials(code, days=900, cache=True):
         result = None
     if cache:
         _cache_put(f"financials_{code}", result or [])
+    return result
+
+
+def get_per_pbr(code, days=900, cache=True):
+    """Daily PER/PBR/dividend yield from FinMind's TaiwanStockPER dataset.
+    Returns [{date, per, pbr}] ascending, or None. Already trading-date-
+    indexed off whatever EPS/book value FinMind treats as current knowledge
+    that day -- unlike get_monthly_revenue()/get_financials()'s period-end
+    dates, this needs no extra disclosure-lag applied by this project (see
+    finlab_factors.value_series()). cache=False skips the on-disk cache
+    (see get_daily()'s docstring)."""
+    cached = _cache_get(f"per_pbr_{code}") if cache else None
+    if cached is not None:
+        return cached or None
+    result = None
+    try:
+        start = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+        rows = _finmind("TaiwanStockPER", code, start)
+        out = [
+            {"date": r["date"], "per": r.get("PER"), "pbr": r.get("PBR")}
+            for r in rows if r.get("date")
+        ]
+        if out:
+            result = out
+    except (SourceError, requests.RequestException, ValueError, KeyError):
+        result = None
+    if cache:
+        _cache_put(f"per_pbr_{code}", result or [])
     return result
