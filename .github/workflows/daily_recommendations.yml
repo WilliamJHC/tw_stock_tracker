@@ -1,0 +1,90 @@
+name: daily-recommendations
+
+# Phase 1 (docs/dev_plan_recommendations.md): daily top-5 all-market
+# recommendation ranking, recomputed from whatever cache/factor_run/*.json
+# currently holds (kept <=1-2 weeks fresh by update_universe_bars_part1/2.yml,
+# Phase 0) and meta.active_ranking_weights (kept current by optimize.yml,
+# Phase 6d/ADR 0002). This job never fetches from FinMind/Yahoo itself --
+# composite_scores() is stdlib-only and cheap, safe to run daily even
+# though its inputs only refresh weekly/monthly.
+#
+# Cache wiring: cache/factor_run is restore-only, from the SAME
+# update-universe-bars-state- lineage Phase 0's workflows write to (NOT
+# bundled with backtest.db -- see optimize.yml's own comment on why
+# bundling two differently-owned paths under one actions/cache key causes
+# a full-archive-restore to clobber whichever one didn't just get
+# refreshed). backtest.db shares optimize.yml's own optimize-state- lineage
+# read-write, since that's the only source of meta.active_ranking_weights
+# and the only place meta.daily_recommendations needs to end up.
+on:
+  schedule:
+    - cron: '0 23 * * 0-4'   # 台北時間週一~週五 07:00（UTC 前一天 23:00），開盤前
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        type: boolean
+        description: '只計算並印出結果，不寫 meta，也不發 Telegram'
+        default: false
+      top_n:
+        type: string
+        description: '取前 N 檔（留空 = 5）'
+        default: ''
+
+concurrency:
+  group: daily-recommendations
+  cancel-in-progress: false
+
+jobs:
+  daily-recommendations:
+    runs-on: ubuntu-latest
+    # TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID 建在 Environment「Cloudflare」底下
+    # （沿用 optimize.yml/update_universe_bars_part1.yml 的既有 secrets，同一組
+    # Telegram bot）；沒有這行 secrets.* 會全部解析成空字串。
+    environment: Cloudflare
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: check secrets
+        run: |
+          missing=""
+          [ -z "$TELEGRAM_BOT_TOKEN" ] && missing="$missing TELEGRAM_BOT_TOKEN"
+          [ -z "$TELEGRAM_CHAT_ID" ] && missing="$missing TELEGRAM_CHAT_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::缺少或空白的 secrets:$missing（Settings → Environments → Cloudflare）"
+            exit 1
+          fi
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-actions.txt
+      - run: pip install -r requirements-actions.txt
+      # cache/factor_run 只讀，血統歸 update_universe_bars_part1/2.yml 管
+      # （Phase 0）——這個 job 從不寫回它，避免跟它們的儲存互相打架。
+      - uses: actions/cache/restore@v4
+        with:
+          path: cache/factor_run
+          key: update-universe-bars-state-${{ github.run_id }}
+          restore-keys: |
+            update-universe-bars-state-
+      # backtest.db 跟 optimize.yml 共用同一個 optimize-state- 血統：讀它寫的
+      # active_ranking_weights，寫自己的 daily_recommendations，兩者互不干擾
+      # （同一個 key 前綴，不同的 meta key，SQLite 檔案層級共用沒有衝突）。
+      - uses: actions/cache@v4
+        with:
+          path: src/data/backtest.db
+          key: optimize-state-${{ github.run_id }}
+          restore-keys: |
+            optimize-state-
+      - name: run_daily_recommendations
+        run: |
+          args=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            args="$args --dry-run"
+          fi
+          if [ -n "${{ inputs.top_n }}" ]; then
+            args="$args --top-n ${{ inputs.top_n }}"
+          fi
+          python scripts/run_daily_recommendations.py $args

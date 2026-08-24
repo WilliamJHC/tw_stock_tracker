@@ -5,17 +5,23 @@ name: optimize
 # re-evaluation of finlab_factors.RANKING_WEIGHTS against a fresh rank-IC-
 # derived candidate, auto-applied/rolled-back by scripts/run_ranking_optimize.py.
 #
-# KNOWN GAP (not built in this pass, tracked honestly rather than silently
-# assumed): this job does NOT itself refresh cache/factor_run/*.json's
-# underlying daily bars/revenue/financials -- scripts/run_factor_backtest.py
-# has no incremental ("only fetch what changed since last run") fetch mode
-# yet, only a full ~19-22h --universe all pull (Phase 4). It re-evaluates
-# whatever the cache already holds, restored via actions/cache below. The
-# lighthouse.md Phase 6c plan's "每季全量重抛 universe 清單" step (new/
-# delisted codes) is the same gap -- until an incremental fetcher exists,
-# refreshing the underlying data is a manual `python scripts/
-# run_factor_backtest.py --universe all` run (or a scheduled one on a
-# runner with enough wall-clock budget), not something this workflow does.
+# cache/factor_run/*.json's daily bars are kept fresh (<=1 week stale) by
+# .github/workflows/update_universe_bars_part1.yml/_part2.yml (Phase 0,
+# docs/dev_plan_recommendations.md) -- this job restores that lineage
+# read-only below (a separate actions/cache/restore@v4 step, distinct key
+# prefix) rather than re-fetching it itself. Before 2026-08-24 this job
+# bundled cache/factor_run into its OWN "optimize-state-" cache key
+# together with backtest.db, so it only ever saw whatever it had last
+# saved itself -- a self-referential snapshot that never advanced except
+# when this job ran (monthly), never actually refreshed. That was this
+# comment's original "KNOWN GAP" (kept in git history, not restated here
+# since it's now fixed).
+#
+# REMAINING GAP: revenue/financials (as opposed to daily bars) still have
+# no incremental fetcher -- scripts/run_factor_backtest.py's only path for
+# those is a full ~19-22h --universe all pull. Same for the lighthouse.md
+# Phase 6c "每季全量重抛 universe 清單" step (new/delisted codes). Both are
+# still manual/unscheduled.
 on:
   schedule:
     - cron: '0 22 1 * *'   # 每月 1 號台北 06:00（UTC 前一天 22:00）
@@ -57,15 +63,23 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-actions.txt
       - run: pip install -r requirements-actions.txt
-      # 唯一跨執行需要留存的狀態：run_factor_backtest.py 的 per-code JSON 快取
-      # 與 backtest.db（存 meta.active_ranking_weights/previous_ranking_weights
-      # 與 optimization_runs 試驗紀錄）。exact key 用 run id 保證每次都存一份
-      # 新的；restore-keys 前綴比對撈回上一次最新的內容。
+      # cache/factor_run 的血統歸 update_universe_bars_part1/2.yml 管（Phase 0）
+      # ——這個 job 只讀不寫，restore-only，避免跟它們的儲存互相打架（actions/cache
+      # 的 key 對應單一整包歸檔，還原時不分路徑，兩邊若共用同一個 key 存寫，
+      # 後存的會把先還原的整個蓋掉）。
+      - uses: actions/cache/restore@v4
+        with:
+          path: cache/factor_run
+          key: update-universe-bars-state-${{ github.run_id }}
+          restore-keys: |
+            update-universe-bars-state-
+      # backtest.db 存 meta.active_ranking_weights/previous_ranking_weights
+      # 與 optimization_runs 試驗紀錄，是這個 job 自己讀寫的狀態，跟上面
+      # cache/factor_run 的血統分開存（理由同上，避免整包互相覆蓋）。exact key
+      # 用 run id 保證每次都存一份新的；restore-keys 前綴比對撈回上一次最新的內容。
       - uses: actions/cache@v4
         with:
-          path: |
-            cache/factor_run
-            src/data/backtest.db
+          path: src/data/backtest.db
           key: optimize-state-${{ github.run_id }}
           restore-keys: |
             optimize-state-

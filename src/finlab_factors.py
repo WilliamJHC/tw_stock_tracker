@@ -262,13 +262,49 @@ def _pct_rank(values):
     return ranks
 
 
+def factor_ranks(universe_data, date):
+    """universe_data/date: same shape as composite_scores() below. Returns
+    {code: {"revenue": pct, "roe": pct, "momentum": pct}} -- the per-factor
+    percentile ranks (see _pct_rank()) for every code that passes the
+    liquidity filter and has all three factors available as of `date`.
+    composite_scores() is a weighted sum of exactly these three numbers;
+    factored out into its own function so a caller that wants the
+    per-factor breakdown (e.g. a recommendation card's "why this stock
+    ranked" detail, scripts/run_daily_recommendations.py) doesn't have to
+    duplicate this filter+rank logic."""
+    raw = {}
+    for code, d in universe_data.items():
+        bars, bar_dates = d["bars"], d["bar_dates"]
+        idx = _bar_index_on_or_before(bar_dates, date)
+        if idx is None or not liquidity_ok(bars, idx):
+            continue
+        mom = momentum_pct(bars, idx)
+        yoy = _as_of(d["revenue_series"], date, "yoy_pct")
+        roe = _as_of(d["roe_series"], date, "roe_pct")
+        if mom is None or yoy is None or roe is None:
+            continue
+        raw[code] = {"momentum": mom, "yoy": yoy, "roe": roe}
+
+    if not raw:
+        return {}
+
+    mom_rank = _pct_rank({c: v["momentum"] for c, v in raw.items()})
+    yoy_rank = _pct_rank({c: v["yoy"] for c, v in raw.items()})
+    roe_rank = _pct_rank({c: v["roe"] for c, v in raw.items()})
+    return {
+        code: {"revenue": yoy_rank[code], "roe": roe_rank[code], "momentum": mom_rank[code]}
+        for code in raw
+    }
+
+
 def composite_scores(universe_data, date, weights=None):
     """universe_data: {code: {"bars": [...], "bar_dates": [...],
     "revenue_series": [...], "roe_series": [...]}} (bar_dates = bars' date
     field pre-extracted, see _bar_index_on_or_before). Returns {code: score}
     for codes that pass the liquidity filter and have all three factors
     available as of `date` -- percentile ranks are computed within this
-    survivor set (filter, then rank).
+    survivor set (filter, then rank) via factor_ranks() above, then
+    weighted-summed here.
 
     weights: optional {"revenue","roe","momentum"} override for the module-
     level RANKING_WEIGHTS -- lets a caller compare candidate weightings
@@ -288,34 +324,13 @@ def composite_scores(universe_data, date, weights=None):
     universe_data, so a "whole universe" to rank against doesn't exist
     here. Treat the two strategies as comparable in spirit, not bit-for-bit
     identical rankings."""
-    raw = {}
-    for code, d in universe_data.items():
-        bars, bar_dates = d["bars"], d["bar_dates"]
-        idx = _bar_index_on_or_before(bar_dates, date)
-        if idx is None or not liquidity_ok(bars, idx):
-            continue
-        mom = momentum_pct(bars, idx)
-        yoy = _as_of(d["revenue_series"], date, "yoy_pct")
-        roe = _as_of(d["roe_series"], date, "roe_pct")
-        if mom is None or yoy is None or roe is None:
-            continue
-        raw[code] = {"momentum": mom, "yoy": yoy, "roe": roe}
-
-    if not raw:
+    ranks = factor_ranks(universe_data, date)
+    if not ranks:
         return {}
-
     w = weights if weights is not None else RANKING_WEIGHTS
-    mom_rank = _pct_rank({c: v["momentum"] for c, v in raw.items()})
-    yoy_rank = _pct_rank({c: v["yoy"] for c, v in raw.items()})
-    roe_rank = _pct_rank({c: v["roe"] for c, v in raw.items()})
-
     return {
-        code: (
-            yoy_rank[code] * w["revenue"]
-            + roe_rank[code] * w["roe"]
-            + mom_rank[code] * w["momentum"]
-        )
-        for code in raw
+        code: r["revenue"] * w["revenue"] + r["roe"] * w["roe"] + r["momentum"] * w["momentum"]
+        for code, r in ranks.items()
     }
 
 
