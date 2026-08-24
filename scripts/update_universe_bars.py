@@ -20,36 +20,48 @@ augment.
 Cost note (2026-08-24 decision -- see docs/dev_plan_recommendations.md
 Phase 0): _augment_bars_with_adj_factor() shares the SAME _RateLimiter
 instance as the get_daily() call (mirrors fetch_universe_data()'s own
-call pattern in run_factor_backtest.py), so each code consumes 2 limiter
-slots (1 real FinMind request + 1 Yahoo request throttled at the same
-550/hr rate), not 1. For ~2000 codes that's roughly 4000 slots / 550
-per hr =~ 7.3h -- well past the plan's original "~3.3h, FinMind-only"
-paper estimate, and past GitHub-hosted runners' 6h default job ceiling.
-The user explicitly chose to keep c_adj refresh despite this cost
-(2026-08-24 AskUserQuestion). To still approximate the Phase 0 goal
-("bars stay <=1 week stale") under that ceiling, `codes` is rotated by
-an ISO-week-based offset before processing, so a run truncated by the
-job timeout strands a DIFFERENT tail of codes each week rather than the
-same one forever -- worst case for any single code becomes ~2 weeks
-stale instead of never-refreshed. This is a mitigation, not a fix: if
-the real run confirms ~7h+, the honest fix is either narrowing
-LOOKBACK_DAYS's Yahoo cost (out of this script's scope) or splitting
-this into two workflow runs -- flagged for the user in the Phase 0
-report, not decided unilaterally here.
+call pattern in run_factor_backtest.py), so each LIVE code (one with
+actual bars, i.e. not a {"skip": true} entry -- those cost ~0, no
+network call at all) consumes 2 limiter slots (1 real FinMind request +
+1 Yahoo request, both throttled at the same 550/hr rate), not 1.
+Measured against the real cache (2026-08-24): 2148 cached codes, 427
+{"skip": true} (excluded by the liquidity/data filters, never touched
+here), so 1721 live codes -> ~3442 slots / 550 per hr =~ 6.3h for the
+FULL universe in one run -- past GitHub-hosted runners' 6h default job
+ceiling (this project's earlier back-of-envelope estimate used the raw
+2148 count and got ~7.3h; the real number is a bit better but still
+over the line). The user explicitly chose to keep c_adj refresh despite
+this cost (2026-08-24 AskUserQuestion), then asked (same day) whether
+splitting the run into two -- Saturday/Sunday -- would fix the timeout
+risk structurally rather than just mitigate it.
+
+It does: `--half {1,2}` splits the (sorted) cached-code list into two
+contiguous halves up front, so each half's run only ever touches ~860
+codes =~ 3.1h with the 6.3h-for-everything math above -- ~1.9x safety
+margin per run, same total weekly wall-clock/GitHub-Actions-minutes cost
+as one 6.3h run would have been, just spread across two scheduled runs
+that never individually approach the 6h ceiling. See
+.github/workflows/update_universe_bars_part1.yml (Saturday, --half 1)
+and _part2.yml (Sunday, --half 2). This replaces an earlier ISO-week
+rotation design (kept only in git history) that was a probabilistic
+mitigation (worst case ~2 weeks stale for a stranded code) rather than
+this deterministic full-coverage-per-week split.
 
 Other cache keys (revenue_series/roe_series/per_pbr_series/margin trend
 series/days) are left untouched -- this script only ever rewrites "bars".
 
 Usage:
-    python scripts/update_universe_bars.py [--dry-run] [--limit N]
+    python scripts/update_universe_bars.py [--half {1,2}] [--dry-run] [--limit N]
 
+--half {1,2} restricts the run to that contiguous half of the sorted
+cached-code list (omit to process the whole universe -- e.g. for a local
+full-universe dry run, or a manual one-off catch-up).
 --dry-run fetches/merges/augments but never writes cache/factor_run/*.json;
 prints a per-code before/after bar count and date range instead.
---limit N processes only the first N codes after rotation -- for a quick
-local sanity check without burning the full universe's request budget.
+--limit N processes only the first N codes of the selected half -- for a
+quick local sanity check without burning the full half's request budget.
 """
 import argparse
-import datetime as dt
 import glob
 import json
 import os
@@ -70,18 +82,16 @@ def _cached_codes():
     return [os.path.splitext(os.path.basename(p))[0] for p in paths]
 
 
-def _rotated(codes, today=None):
-    """Rotate the (sorted) code list by an ISO-week-based offset -- see
-    the cost note in this module's docstring for why: a run that gets
-    truncated by GitHub Actions' 6h job ceiling should strand a
-    different tail each week, not the same one every time."""
-    if not codes:
+def _split_half(codes, half):
+    """codes split into two contiguous halves by sorted order; `half` is
+    1 or 2 (None -- the whole list, unsplit). Skip/live status isn't
+    correlated with code-number order, so a plain positional split keeps
+    each half's real (non-skip) workload roughly even without needing to
+    inspect cache contents up front."""
+    if half is None:
         return codes
-    today = today or dt.date.today()
-    week = today.isocalendar()[1]
-    step = max(1, len(codes) * 2 // 3)  # advance ~2/3 of the universe per week
-    offset = (week * step) % len(codes)
-    return codes[offset:] + codes[:offset]
+    mid = (len(codes) + 1) // 2
+    return codes[:mid] if half == 1 else codes[mid:]
 
 
 def _merge_bars(existing_bars, new_bars):
@@ -137,14 +147,16 @@ def update_code(code, limiter, dry_run):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--half", type=int, choices=[1, 2], default=None,
+                     help="只跑排序後的前半（1）或後半（2）；不給則跑全部")
     ap.add_argument("--dry-run", action="store_true", help="抓取/合併/還原因子照跑，但不寫回 cache/factor_run/*.json")
-    ap.add_argument("--limit", type=int, default=None, help="只處理輪替後的前 N 檔，本機小樣本測試用")
+    ap.add_argument("--limit", type=int, default=None, help="只處理選定範圍的前 N 檔，本機小樣本測試用")
     args = ap.parse_args()
 
-    codes = _rotated(_cached_codes())
+    codes = _split_half(_cached_codes(), args.half)
     if args.limit:
         codes = codes[: args.limit]
-    print(f"{len(codes)} cached codes to refresh (lookback={LOOKBACK_DAYS} days, dry_run={args.dry_run})")
+    print(f"{len(codes)} cached codes to refresh (half={args.half}, lookback={LOOKBACK_DAYS} days, dry_run={args.dry_run})")
 
     limiter = rfb._RateLimiter()
     counts = {"updated": 0, "skipped": 0, "failed": 0}

@@ -1,22 +1,8 @@
-name: update-universe-bars
+name: update-universe-bars-part2
 
-# Phase 0 (docs/dev_plan_recommendations.md): weekly incremental refresh of
-# cache/factor_run/*.json's daily bars, so scripts/run_ranking_optimize.py
-# (via optimize.yml) and the new daily recommendation ranking
-# (scripts/run_daily_recommendations.py, Phase 1) don't keep re-evaluating
-# an ever-staler snapshot -- see optimize.yml's own "KNOWN GAP" comment,
-# which this workflow is the fix for.
-#
-# COST NOTE (honest, not silently assumed -- see
-# scripts/update_universe_bars.py's module docstring for the full
-# derivation): the plan's original estimate was ~3.3h (FinMind-only, 600
-# req/hr). Actual cost is closer to ~7.3h once the Yahoo adj-factor
-# refresh (accepted 2026-08-24 despite the cost) is counted, because it
-# shares the same rate limiter. That exceeds GitHub-hosted runners' 6h
-# default job ceiling, so a single run will likely NOT reach every code --
-# scripts/update_universe_bars.py rotates its code order by ISO week so a
-# truncated run strands a different tail each week (worst case ~2 weeks
-# stale for any one code) instead of permanently stalling on the same one.
+# Phase 0 (docs/dev_plan_recommendations.md): Sunday sibling of
+# _part1.yml -- see that file's header comment for the full "why split
+# into two" derivation. This half only differs by cron day and --half 2.
 on:
   schedule:
     - cron: '0 20 * * 0'   # 每週日 UTC 20:00 ≈ 台北週一 04:00，避開交易時段
@@ -28,7 +14,7 @@ on:
         default: false
       limit:
         type: string
-        description: '只處理輪替後的前 N 檔（留空 = 全部），本機外的小樣本測試用'
+        description: '只處理後半裡的前 N 檔（留空 = 整個後半），本機外的小樣本測試用'
         default: ''
 
 concurrency:
@@ -36,7 +22,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  update-universe-bars:
+  update-universe-bars-part2:
     runs-on: ubuntu-latest
     # TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID 建在 Environment「Cloudflare」底下
     # （沿用 optimize.yml/deploy-worker.yml 的既有 secrets，同一組 Telegram bot）；
@@ -63,17 +49,17 @@ jobs:
           cache-dependency-path: requirements-actions.txt
       - run: pip install -r requirements-actions.txt
       # 唯一跨執行需要留存的狀態：cache/factor_run 的 per-code JSON 快取本身
-      # （這支 workflow 不碰 backtest.db，只重寫 bars）。exact key 用 run id
-      # 保證每次都存一份新的；restore-keys 前綴比對撈回上一次最新的內容。
+      # （這支 workflow 不碰 backtest.db，只重寫 bars）。跟 _part1.yml 共用同一組
+      # restore-keys 前綴，確保兩邊都撈回對方最新寫入的內容，不會互相覆蓋。
       - uses: actions/cache@v4
         with:
           path: cache/factor_run
           key: update-universe-bars-state-${{ github.run_id }}
           restore-keys: |
             update-universe-bars-state-
-      - name: update_universe_bars
+      - name: update_universe_bars（後半）
         run: |
-          args=""
+          args="--half 2"
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             args="$args --dry-run"
           fi
