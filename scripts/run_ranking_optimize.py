@@ -84,6 +84,17 @@ def build_candidates(conn, universe_data, horizon=DEFAULT_HORIZON):
     dates = fe.rebalance_dates(universe_data)
     factor_result = fe.evaluate_factors(universe_data, dates=dates)
     suggested = fe.suggest_weights(factor_result, horizon=horizon)
+    # suggest_weights() only includes factors clearing its min_icir bar --
+    # a legitimate 1- or 2-factor dict for a human reading the report, but
+    # finlab_factors.composite_scores() indexes w["revenue"]/w["roe"]/
+    # w["momentum"] unconditionally and would KeyError on a partial dict.
+    # Every OTHER candidate here ("active"/"previous") is always a complete
+    # RANKING_WEIGHTS-shaped dict (persisted via meta or the module default),
+    # so this is the one place a partial dict could enter the walk-forward
+    # sweep -- skip it rather than crash the whole scheduled run.
+    if suggested is not None and set(suggested) != set(ff.RANKING_WEIGHTS):
+        print(f"  ic_suggested 缺少因子（{set(ff.RANKING_WEIGHTS) - set(suggested)}），本輪不納入候選")
+        suggested = None
 
     candidates = {"active": active}
     has_previous = previous is not None
@@ -155,10 +166,20 @@ def main():
         conn.close()
         return
 
-    winner = result["point_best"]["name"]
+    # plateau["most_common"] (the per-fold-argmax MAJORITY winner), not
+    # point_best["name"] (the highest-MEAN-OOS-return winner) -- decision
+    # was computed by evaluate_decision(plateau, ...), which validates
+    # plateau's stability (width_frac = fold win rate vs the chance-adjusted
+    # threshold), so "did the winner clear the gate" only holds together
+    # when "winner" IS the candidate that plateau describes. point_best can
+    # differ (one big-margin fold win can out-mean a candidate that lost
+    # every other fold by a little) and would then carry a decision that
+    # was never actually validated for it. See src/optimize.py's
+    # resolve_ranking_weights_action() docstring.
+    winner = result["plateau"]["most_common"]
     decision = result["decision"]
     action = opt.resolve_ranking_weights_action(decision, winner, has_previous)
-    print(f"winner={winner} decision={decision} action={action}")
+    print(f"winner={winner} (point_best={result['point_best']['name']}) decision={decision} action={action}")
 
     run_id = f"ranking_weights_{dt.date.today().isoformat()}"
     if args.dry_run:

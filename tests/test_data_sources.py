@@ -298,6 +298,26 @@ def test_get_financials_drops_dates_missing_either_side():
     assert result is None
 
 
+# -------------------------------------------------------------- get_per_pbr --
+
+def test_get_per_pbr_casts_string_numbers_to_float():
+    # FinMind's TaiwanStockPER can return PER/PBR as numeric strings (same
+    # reason get_pe() -- this module's other TaiwanStockPER caller -- casts
+    # explicitly); finlab_factors.value_series() does `-row["pbr"]`, which
+    # raises TypeError on an uncast str.
+    rows = [{"date": "2024-01-02", "PER": "17.17", "PBR": "4.59", "dividend_yield": "1.85"}]
+    with patch("data_sources.requests.get", return_value=_fake_response(data=rows)):
+        result = ds.get_per_pbr("2330")
+    assert result == [{"date": "2024-01-02", "per": 17.17, "pbr": 4.59}]
+
+
+def test_get_per_pbr_missing_values_become_none():
+    rows = [{"date": "2024-01-02", "PER": None, "PBR": None}]
+    with patch("data_sources.requests.get", return_value=_fake_response(data=rows)):
+        result = ds.get_per_pbr("2330")
+    assert result == [{"date": "2024-01-02", "per": None, "pbr": None}]
+
+
 # ------------------------------------------------------------ caching path --
 
 def test_get_margin_uses_same_day_cache_without_second_call():

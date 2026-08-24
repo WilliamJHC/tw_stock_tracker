@@ -147,26 +147,39 @@ def evaluate_candidate_factor(universe_data, series_key, value_key, dates=None, 
 
     Returns {horizon: ic_stats_dict} -- same per-horizon shape as one row of
     evaluate_factors()'s result, so report_factor_ic.py can print it with
-    the same _fmt() helper. Never folded into RANKING_WEIGHTS/
-    composite_scores() by this function or any caller -- see
-    suggest_weights()'s docstring on why that decision is never automatic."""
+    the same _fmt() helper. This function itself never folds a candidate
+    into RANKING_WEIGHTS/composite_scores() -- these three Phase 6b
+    candidates aren't even wired into suggest_weights()'s FACTOR_KEYS-based
+    proposal (that stays revenue/roe/momentum only), so Phase 6d's
+    auto-apply pipeline never sees them either; evaluation-only for now."""
     dates = dates if dates is not None else rebalance_dates(universe_data)
+    # (bars, idx, val) per liquid/available code, computed ONCE per date and
+    # reused across every horizon below -- mirrors evaluate_factors()'s
+    # raw_by_date cache; only _forward_return()'s horizon differs per
+    # (date, horizon) pair, everything else here is horizon-independent.
+    raw_by_date = {}
+    for date in dates:
+        raw = []
+        for d in universe_data.values():
+            series = d.get(series_key)
+            if not series:
+                continue
+            bars, bar_dates = d["bars"], d["bar_dates"]
+            idx = ff._bar_index_on_or_before(bar_dates, date)
+            if idx is None or not ff.liquidity_ok(bars, idx):
+                continue
+            val = ff._as_of(series, date, value_key)
+            if val is None:
+                continue
+            raw.append((bars, idx, val))
+        raw_by_date[date] = raw
+
     result = {}
     for horizon in horizons:
         ic_series = []
         for date in dates:
             factor_values, forward_returns = [], []
-            for d in universe_data.values():
-                series = d.get(series_key)
-                if not series:
-                    continue
-                bars, bar_dates = d["bars"], d["bar_dates"]
-                idx = ff._bar_index_on_or_before(bar_dates, date)
-                if idx is None or not ff.liquidity_ok(bars, idx):
-                    continue
-                val = ff._as_of(series, date, value_key)
-                if val is None:
-                    continue
+            for bars, idx, val in raw_by_date[date]:
                 fr = _forward_return(bars, idx, horizon)
                 if fr is None:
                     continue
@@ -178,14 +191,23 @@ def evaluate_candidate_factor(universe_data, series_key, value_key, dates=None, 
 
 
 def suggest_weights(evaluate_result, horizon=20, min_icir=0.0):
-    """Proposal ONLY for finlab_factors.RANKING_WEIGHTS -- never applied
-    automatically, a human decides whether to adopt it. Weights each factor
-    proportional to |ICIR| at `horizon` (20d matches this project's other
-    "hold ~1 month" default, see backtest.CONFIDENCE_HORIZON) among factors
-    whose |ICIR| clears `min_icir`. Returns None if no factor clears the
-    bar -- weighting by noise would be worse than keeping the current fixed
-    weights, so this function refuses to guess rather than return a
-    misleading answer."""
+    """A RANKING_WEIGHTS proposal, not a decision -- this function itself
+    never applies anything. Weights each factor proportional to |ICIR| at
+    `horizon` (20d matches this project's other "hold ~1 month" default, see
+    backtest.CONFIDENCE_HORIZON) among factors whose |ICIR| clears
+    `min_icir`. Returns None if no factor clears the bar -- weighting by
+    noise would be worse than keeping the current fixed weights, so this
+    function refuses to guess rather than return a misleading answer.
+
+    Phase 6d (docs/https-finlab-finance-blog-python-get-tai-memoized-
+    lighthouse.md, docs/adr/0002-auto-apply-ranking-weights.md) DOES apply
+    this proposal automatically on a schedule -- scripts/run_ranking_optimize.py
+    feeds this function's output into src/optimize.py's
+    sweep_ranking_weights_walk_forward() + resolve_ranking_weights_action(),
+    which only adopts it after it wins a purged walk-forward comparison AND
+    clears DSR/PBO/plateau gates (and can auto-rollback the next cycle). "No
+    human in the loop by default" is that pipeline's decision, not this
+    function's -- this function stays a pure proposal generator either way."""
     icirs = {}
     for factor_name, by_horizon in evaluate_result.items():
         icir = by_horizon.get(horizon, {}).get("icir")

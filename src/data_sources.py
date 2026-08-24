@@ -892,7 +892,11 @@ def get_per_pbr(code, days=900, cache=True):
         start = (dt.date.today() - dt.timedelta(days=days)).isoformat()
         rows = _finmind("TaiwanStockPER", code, start)
         out = [
-            {"date": r["date"], "per": r.get("PER"), "pbr": r.get("PBR")}
+            {
+                "date": r["date"],
+                "per": float(r["PER"]) if r.get("PER") else None,
+                "pbr": float(r["PBR"]) if r.get("PBR") else None,
+            }
             for r in rows if r.get("date")
         ]
         if out:

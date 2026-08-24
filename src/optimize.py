@@ -229,7 +229,17 @@ def resolve_ranking_weights_action(decision, winner, has_previous):
     Phase 6d's rollback target), "ic_suggested" (this cycle's fresh
     rank-IC-derived proposal, absent if no factor clears suggest_weights()'s
     bar) -- and this function turns that result's decision/winner into ONE
-    of three actions:
+    of three actions.
+
+    IMPORTANT: `winner` must be that result's plateau["most_common"] (the
+    per-fold-argmax MAJORITY winner), NOT point_best["name"] (the highest-
+    MEAN-OOS-return winner) -- the two can differ (one big-margin fold win
+    can out-mean a candidate that lost every other fold by a little), and
+    `decision` was computed by evaluate_decision(plateau, ...), which only
+    validates plateau's own stability. Passing point_best's name here would
+    let a candidate whose stability was never actually checked ride on a
+    decision computed for a different one. See
+    scripts/run_ranking_optimize.py's main() for the call site.
 
     "keep": nothing changes. Either no candidate cleared evaluate_decision()'s
     DSR/PBO/plateau gates (decision["accept"] is False -- absence of
@@ -240,11 +250,11 @@ def resolve_ranking_weights_action(decision, winner, has_previous):
     6d's ADR: the setting "active" replaced has now demonstrably
     outperformed it on a fresh out-of-sample cycle, so revert.
     has_previous guards this from ever firing on a cycle where "previous"
-    isn't even a real candidate (sweep_ranking_weights_walk_forward()'s
-    "point_best" name space is just the `candidates` dict's keys -- there is
-    no scenario where winner=="previous" without has_previous being True in
-    practice, but the caller not being trusted to only pass real winner
-    names here keeps this function's contract self-contained).
+    isn't even a real candidate (plateau["most_common"]'s name space is
+    just the `candidates` dict's keys -- there is no scenario where
+    winner=="previous" without has_previous being True in practice, but the
+    caller not being trusted to only pass real winner names here keeps this
+    function's contract self-contained).
 
     "adopt_suggested": "ic_suggested" won AND cleared the gates -- this
     cycle's fresh rank-IC proposal beat whatever's currently active."""
