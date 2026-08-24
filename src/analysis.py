@@ -354,6 +354,24 @@ def donchian_position(highs, lows, closes, period_short=55, period_long=120):
     return {"short": short, "long": long_}
 
 
+def target_price_for(score, vp, as_of):
+    """ADR 0001: pick the Value Area boundary a consumer should watch next.
+
+    score > 0 -> VAH (bullish bias, watch the upside acceptance edge),
+    score < 0 -> VAL, score == 0 or no Value Area (vp is None) -> None.
+    Deliberately excludes any "has price already crossed this level" check
+    -- callers already have both `level` and the current price in the same
+    payload (see ADR 0001's "為什麼這樣分界" section).
+    """
+    if not vp:
+        return None
+    if score > 0:
+        return {"level": vp["vah"], "basis": "VAH", "as_of": as_of}
+    if score < 0:
+        return {"level": vp["val"], "basis": "VAL", "as_of": as_of}
+    return None
+
+
 def ma20_deviation(price, ma20_value):
     """MA20 deviation %: (price - ma20) / ma20 * 100.
 
@@ -1016,6 +1034,8 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
     score = sum(components[k] * w[k] for k in w) + order_flow_override
     score = round(max(-100.0, min(100.0, score)))
     label = label_for(score)
+    as_of_date = dt.datetime.fromtimestamp(times[last]).date().isoformat()
+    target_price = target_price_for(score, vp, as_of_date)
 
     backtest = {}
     if with_backtest:
@@ -1033,6 +1053,7 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
         "sr": fractal_pivots(highs, lows, closes),
         "trend": trend,
         "vp": vp, "vp_source": vp_src if vp else None, "vp_position": vp_position,
+        "target_price": target_price,
         "of": of, "of_mode": of_mode,
         "atr": atr_val, "gaps": gaps,
         "bollinger_squeeze": squeeze, "donchian": donch, "ma20_deviation": ma20_dev,

@@ -97,6 +97,16 @@ def api_backtest(code: str):
     return result
 
 
+@app.get("/api/recommendations")
+def api_recommendations():
+    """All-market top-N recommendation cards (docs/dev_plan_recommendations.md
+    Phase 1/2). Degrades gracefully ({"recommendations": [], "as_of": None},
+    not a 404) when scripts/run_daily_recommendations.py hasn't run yet --
+    same stance as /api/suggestions. See pl.build_recommendations() for the
+    shared logic (also used by snapshot.py's static-mode build)."""
+    return pl.build_recommendations()
+
+
 @app.get("/api/config")
 def api_config():
     return {

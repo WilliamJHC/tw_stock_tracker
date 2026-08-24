@@ -250,3 +250,51 @@ def build_suggestions(codes=None):
 
     conn.close()
     return out
+
+
+def build_recommendations():
+    """All-market top-N recommendation cards (docs/dev_plan_recommendations.md
+    Phase 1/2): reads meta.daily_recommendations (written by
+    scripts/run_daily_recommendations.py) and enriches each code with a live
+    quote + target_price (ADR 0001) via build_watchlist_payloads() -- same
+    payload shape as the watchlist itself, not a separately reinvented one.
+    Shared by app.py's /api/recommendations (live) and snapshot.py's
+    run_full()/run_light() (static) so both modes stay identical in shape
+    (see the dev plan's Phase 3 note that the card and the watchlist tag use
+    "同一套算法，差別只在套用的股票清單").
+
+    Degrades gracefully ({"recommendations": [], "as_of": None}, not an
+    exception) before Phase 1 has ever run; a per-code build_stock_payload()
+    failure inside build_watchlist_payloads() (returns {"error": ...}) just
+    leaves that code's quote/target_price as None, matching
+    build_watchlist_payloads()'s own per-code try/except convention.
+    """
+    conn = db.connect()
+    db.init_db(conn)
+    db.migrate(conn)
+    raw = db.get_meta(conn, "daily_recommendations")
+    conn.close()
+    if not raw:
+        return {"recommendations": [], "as_of": None}
+
+    payload = json.loads(raw)
+    entries = payload.get("codes") or []
+    codes = [e["code"] for e in entries]
+    stocks = build_watchlist_payloads(codes) if codes else {}
+    tracked_codes = {s["code"] for s in load_watchlist()}
+
+    recommendations = []
+    for e in entries:
+        code = e["code"]
+        stock = stocks.get(code) or {}
+        analysis_out = stock.get("analysis") or {}
+        recommendations.append({
+            "code": code,
+            "name": e.get("name") or code,
+            "composite_score": e.get("composite_score"),
+            "factor_ranks": e.get("factor_ranks"),
+            "quote": stock.get("quote"),
+            "target_price": analysis_out.get("target_price"),
+            "tracked": code in tracked_codes,
+        })
+    return {"recommendations": recommendations, "as_of": payload.get("as_of")}

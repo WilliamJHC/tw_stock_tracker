@@ -444,3 +444,42 @@ def test_components_keys_match_score_weights():
     daily = _random_daily(seed=5)
     a = an.analyze(daily)
     assert set(a["components"]) == set(an.SCORE_WEIGHTS)
+
+
+# ------------------------------------------- target_price (ADR 0001) ----
+
+def test_target_price_for_positive_score_selects_vah():
+    vp = {"vah": 120.0, "val": 100.0}
+    assert an.target_price_for(1, vp, "2026-08-20") == {
+        "level": 120.0, "basis": "VAH", "as_of": "2026-08-20"}
+
+
+def test_target_price_for_negative_score_selects_val():
+    vp = {"vah": 120.0, "val": 100.0}
+    assert an.target_price_for(-1, vp, "2026-08-20") == {
+        "level": 100.0, "basis": "VAL", "as_of": "2026-08-20"}
+
+
+def test_target_price_for_zero_score_is_none():
+    vp = {"vah": 120.0, "val": 100.0}
+    assert an.target_price_for(0, vp, "2026-08-20") is None
+
+
+def test_target_price_for_no_value_area_is_none():
+    assert an.target_price_for(50, None, "2026-08-20") is None
+
+
+def test_analyze_wires_target_price_and_as_of():
+    """analyze() must actually call target_price_for() with its own score/vp/
+    as_of, not just leave the field stubbed -- covers the wiring the four
+    target_price_for() unit tests above don't (they call the pure function
+    directly)."""
+    daily = _random_daily(seed=11)
+    a = an.analyze(daily)
+    assert a["target_price"] == an.target_price_for(
+        a["score"], a["vp"],
+        __import__("datetime").datetime.fromtimestamp(daily["t"][-1]).date().isoformat())
+    if a["score"] > 0:
+        assert a["target_price"]["basis"] == "VAH"
+    elif a["score"] < 0:
+        assert a["target_price"]["basis"] == "VAL"

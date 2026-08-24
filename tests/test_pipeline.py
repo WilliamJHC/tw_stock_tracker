@@ -7,6 +7,8 @@ monkeypatched.
 """
 
 
+import json
+
 import data_sources as ds
 import db
 import pipeline as pl
@@ -149,3 +151,78 @@ def test_build_suggestions_wires_real_db_signal_stats_and_strategy(monkeypatch, 
     assert item["evidence"] == [{"signal": "均線多頭排列", "horizon": 20, "n": 40,
                                  "win_rate": 70.0, "avg_ret": 5.0}]
     assert item["data_as_of"] == "2024-12-31T00:00:00"
+
+
+# ------------------------------------- build_recommendations (Phase 2, ADR 0001) --
+
+def test_build_recommendations_no_meta_returns_empty_gracefully(monkeypatch, tmp_path):
+    """Before scripts/run_daily_recommendations.py has ever run,
+    meta.daily_recommendations doesn't exist -- must degrade to an empty
+    list + as_of=None, not raise."""
+    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "backtest.db"))
+    assert pl.build_recommendations() == {"recommendations": [], "as_of": None}
+
+
+def test_build_recommendations_enriches_with_quote_and_target_price(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "backtest.db"))
+    conn = db.connect()
+    db.init_db(conn)
+    db.set_meta(conn, "daily_recommendations", json.dumps({
+        "as_of": "2026-08-20",
+        "generated_at": "2026-08-24T07:00:00",
+        "codes": [
+            {"code": "2330", "name": "台積電", "composite_score": 0.9,
+             "factor_ranks": {"revenue": 0.9, "roe": 0.8, "momentum": 0.7}},
+        ],
+    }))
+    conn.close()
+
+    def fake_build_watchlist_payloads(codes):
+        assert codes == ["2330"]
+        return {"2330": {
+            "quote": {"price": 950.0, "name": "台積電"},
+            "analysis": {"target_price": {"level": 960.0, "basis": "VAH", "as_of": "2026-08-20"}},
+        }}
+    monkeypatch.setattr(pl, "build_watchlist_payloads", fake_build_watchlist_payloads)
+    monkeypatch.setattr(pl, "load_watchlist", lambda: [{"code": "2330", "name": "台積電"}])
+
+    out = pl.build_recommendations()
+    assert out["as_of"] == "2026-08-20"
+    assert len(out["recommendations"]) == 1
+    r = out["recommendations"][0]
+    assert r["code"] == "2330"
+    assert r["name"] == "台積電"
+    assert r["composite_score"] == 0.9
+    assert r["factor_ranks"] == {"revenue": 0.9, "roe": 0.8, "momentum": 0.7}
+    assert r["quote"]["price"] == 950.0
+    assert r["target_price"] == {"level": 960.0, "basis": "VAH", "as_of": "2026-08-20"}
+    assert r["tracked"] is True  # 2330 is in the (mocked) watchlist
+
+
+def test_build_recommendations_marks_untracked_code_and_degrades_on_per_code_failure(monkeypatch, tmp_path):
+    """A code that failed inside build_watchlist_payloads() comes back as
+    {"error": ...} (build_watchlist_payloads()'s own per-code try/except
+    convention) -- must not crash, just leave quote/target_price as None. A
+    code not in the watchlist must report tracked=False (docs/dev_plan_
+    recommendations.md scope decision 6: recommendations aren't excluded
+    from overlapping the watchlist, but an untracked one must say so)."""
+    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "backtest.db"))
+    conn = db.connect()
+    db.init_db(conn)
+    db.set_meta(conn, "daily_recommendations", json.dumps({
+        "as_of": "2026-08-20",
+        "generated_at": "2026-08-24T07:00:00",
+        "codes": [{"code": "9999", "name": "測試股", "composite_score": 0.5,
+                   "factor_ranks": {"revenue": 0.5, "roe": 0.5, "momentum": 0.5}}],
+    }))
+    conn.close()
+
+    monkeypatch.setattr(pl, "build_watchlist_payloads",
+                        lambda codes: {"9999": {"error": "抓不到日線資料"}})
+    monkeypatch.setattr(pl, "load_watchlist", lambda: [{"code": "2330", "name": "台積電"}])
+
+    out = pl.build_recommendations()
+    r = out["recommendations"][0]
+    assert r["quote"] is None
+    assert r["target_price"] is None
+    assert r["tracked"] is False

@@ -23,6 +23,16 @@ def _base():
             },
             "2317": {"error": "抓不到日線資料"},
         },
+        "recommendations": {
+            "as_of": "2026-08-20",
+            "recommendations": [
+                {"code": "2454", "name": "聯發科", "composite_score": 0.8,
+                 "factor_ranks": {"revenue": 0.8, "roe": 0.7, "momentum": 0.6},
+                 "quote": {"price": 800, "change_pct": 0.2, "name": "聯發科"},
+                 "target_price": {"level": 810.0, "basis": "VAH", "as_of": "2026-08-20"},
+                 "tracked": False},
+            ],
+        },
     }
 
 
@@ -59,6 +69,45 @@ def test_merge_light_does_not_mutate_base():
     snap.merge_light(base, quotes, "2026-07-17T09:07:00+08:00")
     assert base["stocks"]["2330"]["quote"]["price"] == 900
     assert base["mode"] == "full"
+
+
+# ---------------------------- merge_light: recommendation quotes (Phase 2) --
+# docs/dev_plan_recommendations.md Phase 2: "run_light() 也要對這 5 檔（若存在）
+# 刷新報價，不能只刷追蹤清單" -- recommendation cards get the same live-quote
+# refresh treatment as watchlist stocks in light mode.
+
+def test_merge_light_refreshes_recommendation_quote():
+    base = _base()
+    quotes = {"2454": {"price": 820, "change_pct": 2.5, "name": "聯發科"}}
+    out = snap.merge_light(base, quotes, "2026-07-17T09:07:00+08:00")
+    assert out["recommendations"]["recommendations"][0]["quote"]["price"] == 820
+
+
+def test_merge_light_leaves_recommendation_without_quote_untouched():
+    base = _base()
+    original_quote = base["recommendations"]["recommendations"][0]["quote"]
+    out = snap.merge_light(base, {}, "2026-07-17T09:07:00+08:00")
+    assert out["recommendations"]["recommendations"][0]["quote"] == original_quote
+
+
+def test_merge_light_keeps_recommendation_analysis_fields_untouched():
+    base = _base()
+    quotes = {"2454": {"price": 820, "change_pct": 2.5, "name": "聯發科"}}
+    out = snap.merge_light(base, quotes, "2026-07-17T09:07:00+08:00")
+    r = out["recommendations"]["recommendations"][0]
+    assert r["target_price"] == {"level": 810.0, "basis": "VAH", "as_of": "2026-08-20"}
+    assert r["composite_score"] == 0.8
+
+
+def test_merge_light_missing_recommendations_key_does_not_crash():
+    """A base predating Phase 2 (no "recommendations" key at all) must not
+    crash merge_light() -- graceful degradation, same stance as an empty
+    meta.daily_recommendations."""
+    base = _base()
+    del base["recommendations"]
+    out = snap.merge_light(base, {"2330": {"price": 910, "name": "台積電"}}, "2026-07-17T09:07:00+08:00")
+    assert out["stocks"]["2330"]["quote"]["price"] == 910
+    assert "recommendations" not in out
 
 
 # ---------------------------------------------------------------- load_base --

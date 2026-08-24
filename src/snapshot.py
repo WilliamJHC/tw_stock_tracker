@@ -91,6 +91,11 @@ def run_full(out_dir):
         "config": build_config(),
         "watchlist": watchlist,
         "stocks": stocks,
+        # docs/dev_plan_recommendations.md Phase 2: same shape as app.py's
+        # /api/recommendations ({"recommendations": [...], "as_of": ...}) so
+        # static and live mode read identically -- see
+        # pl.build_recommendations()'s docstring.
+        "recommendations": pl.build_recommendations(),
     }
 
     assemble_site(out_dir)
@@ -122,7 +127,12 @@ def load_base(base_file, base_url):
 
 def merge_light(base, quotes, now_iso):
     """Overwrite per-stock quote (and quote-carried name) only; set mode=light and
-    quotes_updated_at=now_iso; keep full_generated_at / analysis / attention / chart untouched."""
+    quotes_updated_at=now_iso; keep full_generated_at / analysis / attention / chart
+    untouched. Also refreshes each recommendation card's quote (Phase 2:
+    "run_light() 也要對這 5 檔（若存在）刷新報價，不能只刷追蹤清單") -- everything
+    else about a recommendation (composite_score/factor_ranks/target_price)
+    is analysis-derived and only changes on a full run, same as watchlist
+    stocks' analysis/attention/chart."""
     out = copy.deepcopy(base)
     out["mode"] = "light"
     out["quotes_updated_at"] = now_iso
@@ -134,15 +144,20 @@ def merge_light(base, quotes, now_iso):
             stock["quote"] = q
             if q.get("name"):
                 stock["name"] = q["name"]
+    for r in (out.get("recommendations") or {}).get("recommendations") or []:
+        q = quotes.get(r.get("code"))
+        if q:
+            r["quote"] = q
     return out
 
 
 def run_light(out_dir, base):
     watchlist = base.get("watchlist", [])
+    reco_entries = (base.get("recommendations") or {}).get("recommendations") or []
+    codes = sorted({s["code"] for s in watchlist} | {r["code"] for r in reco_entries})
     quotes = {}
     ok, fail = 0, 0
-    for s in watchlist:
-        code = s["code"]
+    for code in codes:
         try:
             q = ds.get_quote(code)
         except Exception:
@@ -151,14 +166,14 @@ def run_light(out_dir, base):
             quotes[code] = q
             ok += 1
         else:
-            fail += 1  # keep the stock's previous quote untouched
+            fail += 1  # keep the stock's/recommendation's previous quote untouched
 
     payload = merge_light(base, quotes, now_iso())
     assemble_site(out_dir)
     with open(os.path.join(out_dir, "data.json"), "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False)
 
-    return ok, fail, len(watchlist)
+    return ok, fail, len(codes)
 
 
 def main():
