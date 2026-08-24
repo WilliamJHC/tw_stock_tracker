@@ -251,6 +251,60 @@ Qlib 真正有價值的是 rank-IC 因子評估 + 滾動重訓，純 stdlib 約 
 
 ---
 
+## Phase 6：全市場因子擴充與自動化最佳化管線
+
+延續 Phase 5 的結論：8/18 那次搜尋正確地用 PBO 否決了單股引擎的過擬合候選，維持原設定——`optimize.py` 這套「防自欺」框架本身沒有問題。這個 Phase 把「持續優化」的對象換成 Phase 5 自己標記為「最缺證據支撐」的那組數字：`finlab_factors.RANKING_WEIGHTS`（營收YoY 0.4 / ROE 0.3 / 動能 0.3）背後的候選因子集合太窄，而且評估這些因子的動能序列本身還帶著已知偏誤。
+
+**範圍界定（2026-08-24 grill-me 收斂）**：這是純內部研究管線。`portfolio_backtest.py` 至今沒有被 `app.py` 引用過一次，選出的 `top_n` 清單目前沒有、這次也刻意不建任何出口送到網頁／Telegram——出口留給未來另一個決策。本 Phase 的 Telegram 通知只是「這次排程套用/拒絕/rollback 了什麼」的事件摘要，不是選股清單。
+
+### 6a：全市場還原因子（`momentum_pct()` 的前置修復）
+
+**必須排在 6b 之前**：`finlab_factors.momentum_pct()` 目前吃 `ds.get_daily()` 回傳的未還原收盤價，遇到除權息會算出假動能（模組 docstring 已記錄這個已知限制）。新因子的 rank-IC 評估如果跑在這份資料上，連帶把動能偏誤混進評估結論，順序反了等於做兩次工。
+
+- `scripts/build_adj_factors.py` 的還原邏輯（Yahoo `Adj Close` 除以 FinMind raw close 比值，`compute_yahoo_ratio_series()`/`detect_steps()`/`adjust.build_adj_factor()`）已經在 Phase 1 驗證過正確性（`0050` 2025-06-18 1:4 分割、`2327` 純股票股利兩個不變量測試案例），且已經跑在 `backtest.db` 的 `daily_bars.adj_factor` 欄位上，但那是 watchlist 規模（23 檔）。
+- 把 `build_code()` 的迴圈擴大到 `scripts/run_factor_backtest.py --universe all` 的全市場清單（約 2000 檔以上，Phase 4 已完成的抓取範圍，2148/2148 已知數字）；`fetch_universe_data()` 組 `bars` 時額外套用 `adj_factor`，讓 `momentum_pct()` 收到還原後的 close 序列。`liquidity_ok()` 維持吃原始價（`adjust.py` 既有規則，不受影響）。
+- 抓取成本：不需要重跑 Phase 4 的日線抓取本身（bars 已在快取/DB 裡），只需要對每檔額外打一次 Yahoo `Adj Close`（`fetch_yahoo_adj_close()`），沿用 `scripts/run_factor_backtest.py:40` 現成的 `_RateLimiter` 節流。
+
+驗證：`adjust.validate_adj_factor()` 對全市場每一碼的還原序列跑單調性檢查（沿用 Phase 1 的不變量測試），違規清單寫進 log 供人工判讀（既有的「不自動內插」原則，見下方「明確不做」）；抽樣重算 `0050`/`2327` 兩檔確認全市場規模下數字與 watchlist 規模時一致。
+
+### 6b：擴大候選因子集合
+
+先評估、不保證採用，用 Phase 4 已建好的 rank-IC/ICIR/衰減曲線框架（`scripts/report_factor_ic.py`）逐一檢定：
+
+| 類別 | 候選欄位 | 資料來源 | 備註 |
+|---|---|---|---|
+| 品質 | 毛利率／營益率趨勢 | `get_financials()`（與 `roe_series()` 同來源，`FINANCIALS_LAG_DAYS=60` 沿用） | 與現有 ROE 同屬基本面，抓取成本為 0（資料已在抓取範圍內） |
+| 價值 | 本益比、股價淨值比 | `get_financials()` + 日線收盤價 | 需要股本/淨值欄位，確認 FinMind 對應 dataset 覆蓋率 |
+
+IC 的 t-stat 未達顯著的因子標記排除，不進入候選池，這條規則跟 Phase 4 對既有三因子做的把關一致，不因為是「新」因子就放寬。
+
+通過篩選的因子計算函式加進 `src/finlab_factors.py`，跟現有 `revenue_yoy_series()`/`roe_series()` 並列（同樣是純函式、point-in-time 對齊沿用 `REVENUE_LAG_DAYS`/`FINANCIALS_LAG_DAYS` 的既有規則）——這是本 Phase 對 `finlab_factors.py` 唯一的程式碼變更；6d 提到的「保持不變」只針對 `RANKING_WEIGHTS` 常數本身與 override 機制，不代表整個檔案不動。
+
+### 6c：排程自動化
+
+新增 GitHub Actions workflow（`.github/workflows/optimize.yml`，比照 `snapshot.yml` 讀 `environment: Cloudflare` 的 secrets 模式，但這裡只需要 `FINMIND_TOKEN`／`TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID`，不涉及 Cloudflare）：
+
+- **平時（每月）**：對既有全市場代碼做增量更新（只抓上次抓取之後的新日線／新一期營收／新一期財報），成本量級接近 `snapshot.yml` 的 light 模式，不是 Phase 4 那次約 19 到 22 小時的全量抓取。
+- **定期（每季，未經使用者明講的預設，如有異議可調）**：完整重跑一次 universe 清單本身（`scripts/run_factor_backtest.py --universe all` 的股票代碼枚舉那一步，非日線歷史），補上新上市、清除已下市代碼，避免 universe 漸漸偏離「全市場」的定義。
+- 排程內容：重算 rank-IC，`sweep_ranking_weights_walk_forward()` 拿新候選（含 6b 通過篩選的因子）與現行 `RANKING_WEIGHTS` 比較，產生本輪結論。
+
+### 6d：自動套用與 rollback
+
+**沿用既有設計，不新增決策空間**：`sweep_ranking_weights_walk_forward()` 本來就是離散具名候選互相比較，這裡只是把「贏家要不要採用」從人工決定改成規則決定。不對 `RANKING_WEIGHTS` 三個數值做連續搜尋，Phase 5 文件已經寫過理由（同一批雜訊上重學一次），這次沒有理由推翻。
+
+- **持久化位置**：`RANKING_WEIGHTS` 模組常數維持原樣當 fallback default，override 機制維持「純函式、無 I/O」不變（`finlab_factors.py` 本身在 6b 有新增因子函式，但這個 override 掛鉤不因此改變設計）。實際生效的候選寫進 `db.py` 既有的 `meta` 表（`set_meta(conn, "active_ranking_weights", json.dumps({...}))`），呼叫端（`scripts/run_factor_backtest.py`／未來任何消費者）用 `get_meta()` 讀出後，透過 `composite_scores(weights=...)` 既有的 override 參數傳入，這個掛鉤 8/18 那次驗證就已經在用，不需要新增介面。
+- **套用條件**：候選必須同時通過 DSR ≥ 0.95、PBO ≤ 0.5、高原寬度 ≥ 搜尋範圍 20%（`optimize.py` 既有三道門檻，不新增不放寬）。
+- **rollback**：套用後的下一個排程週期（月），用該週期新產生的樣本外數據比較「新候選」vs「被取代的前一組設定」的 walk-forward 表現；新設定明顯更差（低於前一組，或低於同期買進持有）就把 `meta.active_ranking_weights` 寫回前一組，並將整個事件（採用時間、比較數字、rollback 判定）記進既有的 `optimization_runs` 表。
+- **通知**：每次排程跑完（不論結果是「維持現況」「採用新候選」「rollback」）都呼叫 `alerts.py` 現成的 `send_telegram()` 發一則事件摘要。這則通知是事件層級，不是選股清單，範圍已在 grilling 中排除選股清單出口。
+
+這個「拿掉人工審核關卡，靠自動 rollback 補償」的取捨記在 [`docs/adr/0002-auto-apply-ranking-weights.md`](adr/0002-auto-apply-ranking-weights.md)。
+
+驗證：用 8/18 那次已經跑過的一次性腳本（`sweep_ranking_weights_walk_forward()` + `evaluate_decision`）當回歸測試基準，新排程邏輯跑出的判定（採用/拒絕）必須與那次手動跑的結果一致，才能確認自動化沒有改變判定邏輯本身。
+
+風險：**中高**（與 Phase 5 同級，原因相同：框架本身若有 bug，自動套用會放大而非只是產生一次性的誤導結論）。緩解：rollback 機制、每次事件都留痕（`optimization_runs`）、Telegram 通知讓人有機會人工介入，即使沒有強制的人工審核關卡。
+
+---
+
 ## 明確不做
 
 | 項目 | 理由 | 替代 |
@@ -264,6 +318,8 @@ Qlib 真正有價值的是 rank-IC 因子評估 + 滾動重訓，純 stdlib 約 
 | **`exit_composite=-30`（全樣本 argmax）** | 307.8% 是高原 + 雜訊，各 fold argmax 不穩定 | 高原中心 -40 |
 | **自動內插缺漏 bar** | `momentum_pct` 與 `max_hold_days` 都數 bar 數，內插製造假資料 | 標記進 `meta`，人工判讀 |
 | **為接富果而降級 yfinance** | yfinance 是唯一免費的完整還原序列來源 | 富果插在 FinMind 之後、yfinance 之前 |
+| **Phase 6 順便幫多因子引擎補選股清單出口** | `portfolio_backtest.py` 至今沒被 `app.py` 引用過一次，範圍會擴大到 UI/報告設計，是規模不同的另一個決定 | 維持純內部研究管線，出口留給未來單獨評估 |
+| **Phase 6 每月全市場全量重抛** | Phase 4 實測全量抓取約 19 到 22 小時，`stock_tracker` 是 private repo，GitHub Actions 免費額度撐不住每月重複這個量級 | 平時增量更新，每季一次全量重抛只補 universe 清單本身（新上市/下市代碼） |
 
 ---
 
@@ -277,7 +333,8 @@ Qlib 真正有價值的是 rank-IC 因子評估 + 滾動重訓，純 stdlib 約 
 | 3 | 策略定位修正 | 0 | 4 | ~150 | 低 | 0,1 |
 | 4 | 全市場 + 富果 + rank-IC | 2 | 2 | ~480 | 中 | 1,2 |
 | 5 | 自我優化框架 | 3 | 1 | ~590 | **中高** | 全部 |
-| | **合計** | **10** | **~16** | **~2,500** | | |
+| 6 | 全市場還原因子 + 因子擴充 + 自動化最佳化管線 | 1 | 3 | ~400 | **中高** | 全部 |
+| | **合計** | **11** | **~19** | **~2,900** | | |
 
 **貫穿全程的驗證基準**：`pytest` 必須維持 **253 passed 全綠且 < 2 秒**（全 mock、無網路）。每個 Phase 完成後 commit 到本地（不 push），回報 branch 與 commit hash。
 
@@ -290,3 +347,6 @@ Qlib 真正有價值的是 rank-IC 因子評估 + 滾動重訓，純 stdlib 約 
 - `src/finlab_factors.py` — `:131` `momentum_pct()` 是動能偏誤來源；`:120` `liquidity_ok()` 的原始價陷阱；`:142` `_pct_rank()` 可複用做 Spearman；`:25` `RANKING_WEIGHTS` 最缺證據
 - `src/portfolio_backtest.py` — `:155` `_compute_metrics` 待抽進 `src/metrics.py`
 - `scripts/run_factor_backtest.py` — `:40` `_RateLimiter` 與 per-code cache，是全市場擴大的現成基礎設施
+- `scripts/build_adj_factors.py` — `build_code()` 目前只在 watchlist 規模跑過，Phase 6a 要把這個迴圈擴大到全市場
+- `src/finlab_factors.py` — 模組 docstring 記錄的「`momentum_pct()` 吃未還原收盤價」已知限制，Phase 6a 的修復對象；`composite_scores(weights=...)` 的 override 參數，Phase 6d 沿用
+- `src/db.py` — `set_meta()`/`get_meta()`，Phase 6d 存放 `active_ranking_weights` 的既有機制，不需要 schema migration
