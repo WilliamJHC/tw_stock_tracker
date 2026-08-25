@@ -1,0 +1,30 @@
+name: 'backtest.db cache'
+description: >
+  Restore (and optionally save) src/data/backtest.db through the shared
+  optimize-state- cache lineage. optimize.yml and daily_recommendations.yml
+  both read+write meta through this file and must save it back (save:
+  'true'); snapshot.yml only reads meta and must never save, or its restore
+  would race the writers' saves on the same key prefix (actions/cache has no
+  merge, just whole-file overwrite by save time).
+inputs:
+  save:
+    description: 'true to restore+save (writer jobs), false to restore-only (reader jobs)'
+    required: false
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - if: inputs.save == 'true'
+      uses: actions/cache@v4
+      with:
+        path: src/data/backtest.db
+        key: optimize-state-${{ github.run_id }}
+        restore-keys: |
+          optimize-state-
+    - if: inputs.save != 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: src/data/backtest.db
+        key: optimize-state-${{ github.run_id }}
+        restore-keys: |
+          optimize-state-

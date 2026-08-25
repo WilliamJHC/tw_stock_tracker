@@ -84,14 +84,11 @@ jobs:
             update-universe-bars-state-
       # backtest.db 存 meta.active_ranking_weights/previous_ranking_weights
       # 與 optimization_runs 試驗紀錄，是這個 job 自己讀寫的狀態，跟上面
-      # cache/factor_run 的血統分開存（理由同上，避免整包互相覆蓋）。exact key
-      # 用 run id 保證每次都存一份新的；restore-keys 前綴比對撈回上一次最新的內容。
-      - uses: actions/cache@v4
+      # cache/factor_run 的血統分開存（理由同上，避免整包互相覆蓋）。
+      # save: 'true' -- 這個 job 會寫回，見 .github/actions/backtest-db-cache/action.yml。
+      - uses: ./.github/actions/backtest-db-cache
         with:
-          path: src/data/backtest.db
-          key: optimize-state-${{ github.run_id }}
-          restore-keys: |
-            optimize-state-
+          save: 'true'
       - name: run_ranking_optimize
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
