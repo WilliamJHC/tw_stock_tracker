@@ -131,7 +131,13 @@ def update_code(code, limiter, dry_run):
 
     merged = _merge_bars(existing_bars, new_bars)
     augmented = rfb._augment_bars_with_adj_factor(code, merged, limiter)
-    has_c_adj = bool(augmented) and "c_adj" in augmented[0]
+    # Check the NEWEST bar, not the oldest: _merge_bars() strips c_adj only
+    # off newly-merged/overlapping-date bars, so an old untouched bar at
+    # augmented[0] keeps a stale c_adj from a prior successful run even when
+    # THIS run's augmentation fell back to raw close -- augmented[0] would
+    # then misreport "c_adj=yes" while the bars momentum_pct() actually
+    # reads (the newest ones) lack it.
+    has_c_adj = bool(augmented) and "c_adj" in augmented[-1]
 
     detail = (f"{len(existing_bars)}->{len(merged)} bars, "
               f"latest {existing_bars[-1]['date']}->{merged[-1]['date']}, "
