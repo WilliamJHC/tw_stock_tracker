@@ -31,7 +31,12 @@ on:
         default: ''
 
 concurrency:
-  group: daily-recommendations
+  # Shared with optimize.yml's group name on purpose -- see that file's
+  # concurrency comment. Both jobs read+write src/data/backtest.db through
+  # the same optimize-state- cache lineage; running concurrently risks one
+  # job's save silently overwriting the other's (actions/cache has no merge,
+  # just whole-file overwrite by save time).
+  group: backtest-db-state
   cancel-in-progress: false
 
 jobs:

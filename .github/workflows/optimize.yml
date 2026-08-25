@@ -33,7 +33,16 @@ on:
         default: false
 
 concurrency:
-  group: optimize
+  # Shared with daily_recommendations.yml's group name on purpose: both jobs
+  # read+write src/data/backtest.db through the same optimize-state- cache
+  # lineage (see the cache step comments below), so they must never run at
+  # the same time -- a concurrent save from either one would silently
+  # overwrite the other's write to a full-file cache blob (no merge). This
+  # serializes them (cancel-in-progress: false queues, doesn't cancel) at
+  # the cost of daily_recommendations.yml occasionally waiting for a
+  # same-day optimize.yml run to finish (only possible on day 1 of the
+  # month, when both are scheduled ~1 hour apart).
+  group: backtest-db-state
   cancel-in-progress: false
 
 jobs:
