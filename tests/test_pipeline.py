@@ -226,3 +226,67 @@ def test_build_recommendations_marks_untracked_code_and_degrades_on_per_code_fai
     assert r["quote"] is None
     assert r["target_price"] is None
     assert r["tracked"] is False
+
+
+def test_build_recommendations_reuses_prefetched_stocks_and_fetches_only_missing(monkeypatch, tmp_path):
+    """snapshot.py's run_full() already has a `stocks` dict for the whole
+    watchlist before calling build_recommendations() -- a recommended code
+    that's also tracked (the "已追蹤" overlap case, scope decision 6) must
+    reuse that entry instead of re-fetching it via build_watchlist_payloads()
+    a second time in the same run."""
+    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "backtest.db"))
+    conn = db.connect()
+    db.init_db(conn)
+    db.set_meta(conn, "daily_recommendations", json.dumps({
+        "as_of": "2026-08-20",
+        "generated_at": "2026-08-24T07:00:00",
+        "codes": [
+            {"code": "2330", "name": "台積電", "composite_score": 0.9,
+             "factor_ranks": {"revenue": 0.9, "roe": 0.8, "momentum": 0.7}},
+            {"code": "2454", "name": "聯發科", "composite_score": 0.8,
+             "factor_ranks": {"revenue": 0.8, "roe": 0.7, "momentum": 0.6}},
+        ],
+    }))
+    conn.close()
+
+    def fake_build_watchlist_payloads(codes):
+        assert codes == ["2454"]  # 2330 was prefetched, must not be re-fetched
+        return {"2454": {"quote": {"price": 700.0, "name": "聯發科"},
+                          "analysis": {"target_price": None}}}
+    monkeypatch.setattr(pl, "build_watchlist_payloads", fake_build_watchlist_payloads)
+    monkeypatch.setattr(pl, "load_watchlist", lambda: [{"code": "2330", "name": "台積電"}])
+
+    prefetched = {"2330": {"quote": {"price": 950.0, "name": "台積電"},
+                            "analysis": {"target_price": {"level": 960.0, "basis": "VAH", "as_of": "2026-08-20"}}}}
+    out = pl.build_recommendations(prefetched_stocks=prefetched)
+    by_code = {r["code"]: r for r in out["recommendations"]}
+    assert by_code["2330"]["quote"]["price"] == 950.0
+    assert by_code["2330"]["target_price"] == {"level": 960.0, "basis": "VAH", "as_of": "2026-08-20"}
+    assert by_code["2454"]["quote"]["price"] == 700.0
+
+
+def test_build_recommendations_no_prefetched_stocks_fetches_all_codes(monkeypatch, tmp_path):
+    """No prefetched_stocks argument (app.py's live endpoint call site) must
+    behave exactly as before -- every recommended code goes through
+    build_watchlist_payloads()."""
+    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "backtest.db"))
+    conn = db.connect()
+    db.init_db(conn)
+    db.set_meta(conn, "daily_recommendations", json.dumps({
+        "as_of": "2026-08-20",
+        "generated_at": "2026-08-24T07:00:00",
+        "codes": [{"code": "2330", "name": "台積電", "composite_score": 0.9,
+                   "factor_ranks": {"revenue": 0.9, "roe": 0.8, "momentum": 0.7}}],
+    }))
+    conn.close()
+
+    calls = []
+
+    def fake_build_watchlist_payloads(codes):
+        calls.append(codes)
+        return {"2330": {"quote": {"price": 950.0, "name": "台積電"}, "analysis": {}}}
+    monkeypatch.setattr(pl, "build_watchlist_payloads", fake_build_watchlist_payloads)
+    monkeypatch.setattr(pl, "load_watchlist", lambda: [])
+
+    pl.build_recommendations()
+    assert calls == [["2330"]]

@@ -252,7 +252,7 @@ def build_suggestions(codes=None):
     return out
 
 
-def build_recommendations():
+def build_recommendations(prefetched_stocks=None):
     """All-market top-N recommendation cards (docs/dev_plan_recommendations.md
     Phase 1/2): reads meta.daily_recommendations (written by
     scripts/run_daily_recommendations.py) and enriches each code with a live
@@ -262,6 +262,14 @@ def build_recommendations():
     run_full()/run_light() (static) so both modes stay identical in shape
     (see the dev plan's Phase 3 note that the card and the watchlist tag use
     "同一套算法，差別只在套用的股票清單").
+
+    prefetched_stocks: optional {code: build_watchlist_payloads() entry},
+    reused for any recommended code already present instead of re-fetching
+    it -- snapshot.py's run_full() passes its own watchlist `stocks` dict
+    here since a code can be both tracked and recommended (the "已追蹤"
+    badge case), and re-fetching it would double every FinMind/yfinance/
+    TWSE call for that code in the same run. app.py's live endpoint has
+    nothing to prefetch from, so it calls this with no argument.
 
     Degrades gracefully ({"recommendations": [], "as_of": None}, not an
     exception) before Phase 1 has ever run; a per-code build_stock_payload()
@@ -280,7 +288,10 @@ def build_recommendations():
     payload = json.loads(raw)
     entries = payload.get("codes") or []
     codes = [e["code"] for e in entries]
-    stocks = build_watchlist_payloads(codes) if codes else {}
+    prefetched_stocks = prefetched_stocks or {}
+    missing_codes = [c for c in codes if c not in prefetched_stocks]
+    fetched_stocks = build_watchlist_payloads(missing_codes) if missing_codes else {}
+    stocks = {**prefetched_stocks, **fetched_stocks}
     tracked_codes = {s["code"] for s in load_watchlist()}
 
     recommendations = []

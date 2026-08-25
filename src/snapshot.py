@@ -94,8 +94,9 @@ def run_full(out_dir):
         # docs/dev_plan_recommendations.md Phase 2: same shape as app.py's
         # /api/recommendations ({"recommendations": [...], "as_of": ...}) so
         # static and live mode read identically -- see
-        # pl.build_recommendations()'s docstring.
-        "recommendations": pl.build_recommendations(),
+        # pl.build_recommendations()'s docstring. Pass `stocks` so a code
+        # that's both tracked and recommended isn't fetched twice.
+        "recommendations": pl.build_recommendations(prefetched_stocks=stocks),
     }
 
     assemble_site(out_dir)
