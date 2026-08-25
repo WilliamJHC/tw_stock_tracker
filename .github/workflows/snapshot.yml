@@ -57,6 +57,21 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-actions.txt
       - run: pip install -r requirements-actions.txt
+      # src/data/backtest.db 進 .gitignore，只能靠 cache 傳遞：restore-only 讀
+      # optimize.yml/daily_recommendations.yml 寫入的 optimize-state- 血統，
+      # 拿到 meta.daily_recommendations（docs/dev_plan_recommendations.md
+      # Phase 1）與 meta.active_ranking_weights（Phase 6d/ADR 0002）。這個
+      # job 從不呼叫 db.set_meta()，所以只 restore、不用 actions/cache@v4
+      # 存回去——避免跟那兩個 job 的寫入互相打架（同一個 key 前綴，見
+      # daily_recommendations.yml 的同類註解）。沒補這步之前，src/snapshot.py
+      # 在全新 checkout 下永遠讀到空 meta，data.json 的 recommendations
+      # 永遠是空清單。
+      - uses: actions/cache/restore@v4
+        with:
+          path: src/data/backtest.db
+          key: optimize-state-${{ github.run_id }}
+          restore-keys: |
+            optimize-state-
       - id: mode
         # schedule 事件用 github.event.schedule 與 cron 字串精確比對（必須與 on.schedule 逐字一致）
         run: |
