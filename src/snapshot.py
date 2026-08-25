@@ -73,11 +73,16 @@ def assemble_site(out_dir):
 
 def run_full(out_dir):
     watchlist = pl.load_watchlist()
-    codes = [s["code"] for s in watchlist]
-    # build_watchlist_payloads() batches the whole watchlist together so it
-    # can compute 5-day relative-strength ranking across stocks (an.rs_ranking()),
-    # which a per-code build_stock_payload() call can't see on its own.
-    stocks = pl.build_watchlist_payloads(codes)
+    tracked_codes = [s["code"] for s in watchlist]
+    # build_watchlist_payloads() batches tracked AND recommended codes
+    # together in one call so 5-day relative-strength ranking
+    # (an.rs_ranking()) is computed across one consistent universe -- a code
+    # that's both tracked and recommended (or a recommendation-only code)
+    # gets ranked against the same batch as everyone else, instead of the
+    # tracked watchlist and the recommendation-only codes getting two
+    # separately-scoped (and differently-ranked) batches.
+    all_stocks = pl.build_watchlist_payloads(sorted(set(tracked_codes) | set(pl.get_recommended_codes())))
+    stocks = {code: all_stocks[code] for code in tracked_codes}
     ok = sum(1 for v in stocks.values() if "error" not in v)
     fail = len(stocks) - ok
 
@@ -94,9 +99,11 @@ def run_full(out_dir):
         # docs/dev_plan_recommendations.md Phase 2: same shape as app.py's
         # /api/recommendations ({"recommendations": [...], "as_of": ...}) so
         # static and live mode read identically -- see
-        # pl.build_recommendations()'s docstring. Pass `stocks` so a code
-        # that's both tracked and recommended isn't fetched twice.
-        "recommendations": pl.build_recommendations(prefetched_stocks=stocks),
+        # pl.build_recommendations()'s docstring. Pass `all_stocks` (already
+        # covers every recommended code, tracked or not, from the single
+        # batched fetch above) and `tracked_codes` so nothing is fetched or
+        # read from disk twice.
+        "recommendations": pl.build_recommendations(prefetched_stocks=all_stocks, tracked_codes=tracked_codes),
     }
 
     assemble_site(out_dir)

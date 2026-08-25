@@ -252,7 +252,32 @@ def build_suggestions(codes=None):
     return out
 
 
-def build_recommendations(prefetched_stocks=None):
+def _read_daily_recommendations_payload():
+    """Raw meta.daily_recommendations payload ({"as_of": ..., "codes": [...]})
+    or None before Phase 1 has ever run. Shared by build_recommendations()
+    and get_recommended_codes() so both read the same meta key through one
+    code path."""
+    conn = db.connect()
+    db.init_db(conn)
+    db.migrate(conn)
+    raw = db.get_meta(conn, "daily_recommendations")
+    conn.close()
+    return json.loads(raw) if raw else None
+
+
+def get_recommended_codes():
+    """Codes from the latest meta.daily_recommendations, or [] before Phase 1
+    has ever run. snapshot.py's run_full() uses this to batch-fetch
+    recommendation-only codes together with the watchlist in a single
+    build_watchlist_payloads() call, so RS ranking (an.rs_ranking()) is
+    computed across one consistent universe instead of two separately-scoped
+    batches (see build_recommendations()'s `prefetched_stocks` docstring)."""
+    payload = _read_daily_recommendations_payload()
+    entries = (payload or {}).get("codes") or []
+    return [e["code"] for e in entries]
+
+
+def build_recommendations(prefetched_stocks=None, tracked_codes=None):
     """All-market top-N recommendation cards (docs/dev_plan_recommendations.md
     Phase 1/2): reads meta.daily_recommendations (written by
     scripts/run_daily_recommendations.py) and enriches each code with a live
@@ -271,28 +296,29 @@ def build_recommendations(prefetched_stocks=None):
     TWSE call for that code in the same run. app.py's live endpoint has
     nothing to prefetch from, so it calls this with no argument.
 
+    tracked_codes: optional iterable of watchlist codes, for the "tracked"
+    flag below -- snapshot.py's run_full() already has this from its own
+    load_watchlist() call and passes it here to avoid reading watchlist.json
+    a second time in the same run. None (the default) calls load_watchlist()
+    itself, unchanged behavior for every existing caller.
+
     Degrades gracefully ({"recommendations": [], "as_of": None}, not an
     exception) before Phase 1 has ever run; a per-code build_stock_payload()
     failure inside build_watchlist_payloads() (returns {"error": ...}) just
     leaves that code's quote/target_price as None, matching
     build_watchlist_payloads()'s own per-code try/except convention.
     """
-    conn = db.connect()
-    db.init_db(conn)
-    db.migrate(conn)
-    raw = db.get_meta(conn, "daily_recommendations")
-    conn.close()
-    if not raw:
+    payload = _read_daily_recommendations_payload()
+    if payload is None:
         return {"recommendations": [], "as_of": None}
 
-    payload = json.loads(raw)
     entries = payload.get("codes") or []
     codes = [e["code"] for e in entries]
     prefetched_stocks = prefetched_stocks or {}
     missing_codes = [c for c in codes if c not in prefetched_stocks]
     fetched_stocks = build_watchlist_payloads(missing_codes) if missing_codes else {}
     stocks = {**prefetched_stocks, **fetched_stocks}
-    tracked_codes = {s["code"] for s in load_watchlist()}
+    tracked_codes = set(tracked_codes) if tracked_codes is not None else {s["code"] for s in load_watchlist()}
 
     recommendations = []
     for e in entries:

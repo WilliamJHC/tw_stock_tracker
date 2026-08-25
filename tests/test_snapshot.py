@@ -3,6 +3,7 @@
 import json
 import sys
 
+import pipeline as pl
 import snapshot as snap
 
 
@@ -150,3 +151,43 @@ def test_main_falls_back_to_full_when_base_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(snap, "run_light", lambda out_dir, base: calls.append("light") or (0, 0, 0))
     snap.main()
     assert calls == ["full"]
+
+
+# ------------------------------------------------------------------ run_full --
+# run_full() must batch tracked AND recommended codes into a SINGLE
+# build_watchlist_payloads() call so 5-day RS ranking (an.rs_ranking()) is
+# computed across one consistent universe, instead of the tracked watchlist
+# and the recommendation-only codes getting two separately-scoped (and
+# differently-ranked) batches (altitude review finding on the
+# prefetched_stocks fix, see pipeline.build_recommendations()'s docstring).
+
+def test_run_full_batches_tracked_and_recommended_codes_in_one_call(monkeypatch, tmp_path):
+    monkeypatch.setattr(pl, "load_watchlist", lambda: [{"code": "2330", "name": "台積電"}])
+    monkeypatch.setattr(pl, "get_recommended_codes", lambda: ["2330", "2454"])
+
+    batch_calls = []
+
+    def fake_build_watchlist_payloads(codes):
+        batch_calls.append(sorted(codes))
+        return {c: {"code": c, "quote": {"price": 1.0}, "analysis": {}} for c in codes}
+    monkeypatch.setattr(pl, "build_watchlist_payloads", fake_build_watchlist_payloads)
+
+    reco_calls = []
+
+    def fake_build_recommendations(prefetched_stocks=None, tracked_codes=None):
+        reco_calls.append((set(prefetched_stocks), set(tracked_codes)))
+        return {"recommendations": [], "as_of": None}
+    monkeypatch.setattr(pl, "build_recommendations", fake_build_recommendations)
+
+    monkeypatch.setattr(snap.ds, "tick_tier_available", lambda: False)
+    monkeypatch.setattr(snap.ds, "data_tier", lambda: "free")
+
+    out_dir = tmp_path / "dist"
+    ok, fail, total = snap.run_full(str(out_dir))
+
+    assert batch_calls == [["2330", "2454"]]  # one batched call, union of tracked+recommended
+    assert reco_calls == [({"2330", "2454"}, {"2330"})]
+    assert (ok, fail, total) == (1, 0, 1)  # ok/fail/total stay scoped to the tracked watchlist
+
+    data = json.loads((out_dir / "data.json").read_text(encoding="utf-8"))
+    assert set(data["stocks"].keys()) == {"2330"}  # payload["stocks"] stays watchlist-scoped

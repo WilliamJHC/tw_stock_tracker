@@ -163,6 +163,32 @@ def test_build_recommendations_no_meta_returns_empty_gracefully(monkeypatch, tmp
     assert pl.build_recommendations() == {"recommendations": [], "as_of": None}
 
 
+def test_get_recommended_codes_no_meta_returns_empty_list(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "backtest.db"))
+    assert pl.get_recommended_codes() == []
+
+
+def test_get_recommended_codes_reads_same_meta_as_build_recommendations(monkeypatch, tmp_path):
+    """snapshot.py's run_full() calls this to batch-fetch tracked and
+    recommended codes together in one build_watchlist_payloads() call
+    (consistent RS-ranking universe) -- it must see exactly the codes
+    build_recommendations() itself would enrich, not a stale or
+    differently-shaped read of meta.daily_recommendations."""
+    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "backtest.db"))
+    conn = db.connect()
+    db.init_db(conn)
+    db.set_meta(conn, "daily_recommendations", json.dumps({
+        "as_of": "2026-08-20",
+        "codes": [{"code": "2330", "name": "台積電", "composite_score": 0.9,
+                   "factor_ranks": {"revenue": 0.9, "roe": 0.8, "momentum": 0.7}},
+                  {"code": "2454", "name": "聯發科", "composite_score": 0.8,
+                   "factor_ranks": {"revenue": 0.8, "roe": 0.7, "momentum": 0.6}}],
+    }))
+    conn.close()
+
+    assert pl.get_recommended_codes() == ["2330", "2454"]
+
+
 def test_build_recommendations_enriches_with_quote_and_target_price(monkeypatch, tmp_path):
     monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "backtest.db"))
     conn = db.connect()
