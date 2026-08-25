@@ -1,4 +1,4 @@
-# 台股追蹤器 v2（本地 Python 版）
+# 台股追蹤器 v3.0（本地 Python 版）
 
 ## 功能
 
@@ -18,7 +18,7 @@
 **全程用完整路徑（`.venv\Scripts\python`），不要打裸 `python`／`pip`**：本機 PATH 上還有另一個專案（`report_generator`）的 venv 排在前面，裸 `python` 會跑到那個環境去，裝套件、建 venv 都會用錯環境。
 
 ```powershell
-cd C:\Users\william.chen\claude\stock_tracker
+cd C:\Users\william.chen\claude\tw_stock_tracker
 
 # 第一次：用系統內建的 base Python 建 venv（不要用 .venv 自己的 python.exe 重建自己，
 # 也不要用裸 python——理由見上一段與下方「疑難排解」）
@@ -58,7 +58,7 @@ $env:PYTHONIOENCODING='utf-8'
 ## 目錄結構
 
 ```
-stock_tracker/
+tw_stock_tracker/
 ├─ src/              應用程式碼（app / analysis / data_sources / monitor / snapshot …）
 │  └─ realtime/      即時報價來源（MIS、KGI、Binance）
 ├─ tests/            pytest（conftest.py 負責把 src/ 掛上 sys.path）
@@ -90,8 +90,8 @@ stock_tracker/
 # 1. 把家用 Wi-Fi 從 Public 改為 Private（比在 Public 網路開 port 安全；公司/公共 Wi-Fi 不要改）
 Set-NetConnectionProfile -Name "chenfamily" -NetworkCategory Private
 
-# 2. 開放 8932 port（只對 Private 網路生效；日後移除：netsh advfirewall firewall delete rule name="stock-tracker-8932"）
-netsh advfirewall firewall add rule name="stock-tracker-8932" dir=in action=allow protocol=TCP localport=8932 profile=private
+# 2. 開放 8932 port（只對 Private 網路生效；日後移除：netsh advfirewall firewall delete rule name="tw-stock-tracker-8932"）
+netsh advfirewall firewall add rule name="tw-stock-tracker-8932" dir=in action=allow protocol=TCP localport=8932 profile=private
 ```
 
 **手機連不上時，依序檢查：**
@@ -262,7 +262,7 @@ Secrets 沿用「手機雲端版」同一個 Environment「Cloudflare」底下�
 **啟動方式**：
 
 ```powershell
-cd C:\Users\william.chen\claude\stock_tracker
+cd C:\Users\william.chen\claude\tw_stock_tracker
 .venv\Scripts\python src\monitor.py
 ```
 

@@ -18,7 +18,7 @@ import pipeline as pl
 # one level up from src/.
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-app = FastAPI(title="台股追蹤器 v2")
+app = FastAPI(title="台股追蹤器 v3.0")
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 
 
