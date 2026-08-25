@@ -258,6 +258,27 @@ def test_composite_scores_weights_override_can_flip_ranking():
     assert ff.RANKING_WEIGHTS == {"revenue": 0.4, "roe": 0.3, "momentum": 0.3}
 
 
+def test_composite_scores_reuses_precomputed_ranks_instead_of_recomputing():
+    """scripts/run_daily_recommendations.py calls factor_ranks() itself for
+    the per-factor breakdown, then passes it into composite_scores() so the
+    liquidity-filter + percentile-rank pass isn't paid for twice. Passing
+    `ranks` must skip the internal factor_ranks() call and use exactly what
+    was given, even if it disagrees with what factor_ranks() would compute."""
+    universe = {
+        "A": _universe_entry(100, 1.0),
+        "B": _universe_entry(50, 0.2),
+    }
+    date = universe["A"]["bar_dates"][-1]
+    real_ranks = ff.factor_ranks(universe, date)
+
+    fake_ranks = {"A": {"revenue": 0.1, "roe": 0.1, "momentum": 0.1},
+                  "B": {"revenue": 0.9, "roe": 0.9, "momentum": 0.9}}
+    assert fake_ranks != real_ranks
+
+    scores = ff.composite_scores(universe, date, ranks=fake_ranks)
+    assert scores["B"] > scores["A"]  # follows fake_ranks, not real_ranks (which favors A)
+
+
 # -------------------------------------------------------------------- top_n --
 
 def test_top_n_descending_and_truncated():

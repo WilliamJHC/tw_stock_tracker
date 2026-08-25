@@ -80,8 +80,11 @@ def build_recommendations(conn, universe_data, top_n):
         return None
 
     weights = _read_weights(conn)
-    scores = ff.composite_scores(universe_data, as_of, weights=weights)
+    # factor_ranks() computed once and reused by composite_scores() below --
+    # it's the full liquidity-filter + percentile-rank pass over the whole
+    # cached universe, no reason to pay for it twice on every daily run.
     ranks = ff.factor_ranks(universe_data, as_of)
+    scores = ff.composite_scores(universe_data, as_of, weights=weights, ranks=ranks)
     top_codes = ff.top_n(scores, top_n)
 
     universe = ds.get_universe(cache=True) or []

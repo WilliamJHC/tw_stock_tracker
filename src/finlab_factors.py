@@ -297,7 +297,7 @@ def factor_ranks(universe_data, date):
     }
 
 
-def composite_scores(universe_data, date, weights=None):
+def composite_scores(universe_data, date, weights=None, ranks=None):
     """universe_data: {code: {"bars": [...], "bar_dates": [...],
     "revenue_series": [...], "roe_series": [...]}} (bar_dates = bars' date
     field pre-extracted, see _bar_index_on_or_before). Returns {code: score}
@@ -313,6 +313,13 @@ def composite_scores(universe_data, date, weights=None):
     global state. None (the default) uses RANKING_WEIGHTS, unchanged
     behavior for every existing caller.
 
+    ranks: optional pre-computed factor_ranks(universe_data, date) result --
+    lets a caller that also needs the per-factor breakdown (e.g.
+    scripts/run_daily_recommendations.py's recommendation cards) reuse the
+    same liquidity-filter + percentile-rank pass instead of this function
+    recomputing it. None (the default) computes it here, unchanged behavior
+    for every existing caller.
+
     This is NOT the same rank order as finlab_strategy.py's FinLab-backed
     ranking_position(), which ranks over the WHOLE fetched universe first
     and applies the liquidity/availability filter after
@@ -324,7 +331,7 @@ def composite_scores(universe_data, date, weights=None):
     universe_data, so a "whole universe" to rank against doesn't exist
     here. Treat the two strategies as comparable in spirit, not bit-for-bit
     identical rankings."""
-    ranks = factor_ranks(universe_data, date)
+    ranks = ranks if ranks is not None else factor_ranks(universe_data, date)
     if not ranks:
         return {}
     w = weights if weights is not None else RANKING_WEIGHTS
