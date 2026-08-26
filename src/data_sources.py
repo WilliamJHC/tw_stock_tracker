@@ -403,7 +403,17 @@ def _mis_num(item, key):
 def _mis_book_levels(item, price_key, vol_key, limit=5):
     """Parse an MIS '_'-joined price/vol depth string (e.g. item['b']/item['g'])
     into aligned float/int lists, dropping trailing empty slots (MIS pads
-    unused levels with '_')."""
+    unused levels with '_').
+
+    Also drops a leading 0.0000 price slot -- confirmed live 2026-08-26 on
+    limit-up stocks (3653/3443): when one side of the book is completely
+    empty (no sellers at limit-up), MIS pads that side with '-' as expected,
+    but can place a bogus 0.0000 in the *other* side's best-level slot ahead
+    of the real resting orders (e.g. bid "0.0000_5725.0000_..." with 5725
+    being the actual best bid). A 0 price is never a real order, so callers
+    that fall back to prices[0] as "best level" (parse_mis_item()) would
+    otherwise treat this placeholder as the current price.
+    """
     raw_p = (item.get(price_key) or "").split("_")
     raw_v = (item.get(vol_key) or "").split("_")
     prices, vols = [], []
@@ -412,10 +422,14 @@ def _mis_book_levels(item, price_key, vol_key, limit=5):
         if not p or not v:
             continue
         try:
-            prices.append(float(p))
-            vols.append(int(float(v)))
+            fp = float(p)
+            fv = int(float(v))
         except ValueError:
             continue
+        if fp <= 0:
+            continue
+        prices.append(fp)
+        vols.append(fv)
         if len(prices) >= limit:
             break
     return prices, vols
