@@ -1,9 +1,10 @@
 name: optimize
 
 # Phase 6c/6d (docs/https-finlab-finance-blog-python-get-tai-memoized-
-# lighthouse.md, docs/adr/0002-auto-apply-ranking-weights.md): monthly
-# re-evaluation of finlab_factors.RANKING_WEIGHTS against a fresh rank-IC-
-# derived candidate, auto-applied/rolled-back by scripts/run_ranking_optimize.py.
+# lighthouse.md, docs/adr/0002-auto-apply-ranking-weights.md): biweekly
+# (1st and 15th of each month) re-evaluation of finlab_factors.RANKING_WEIGHTS
+# against a fresh rank-IC-derived candidate, auto-applied/rolled-back by
+# scripts/run_ranking_optimize.py.
 #
 # cache/factor_run/*.json's daily bars are kept fresh (<=1 week stale) by
 # .github/workflows/update_universe_bars_part1.yml/_part2.yml (Phase 0,
@@ -13,7 +14,7 @@ name: optimize
 # bundled cache/factor_run into its OWN "optimize-state-" cache key
 # together with backtest.db, so it only ever saw whatever it had last
 # saved itself -- a self-referential snapshot that never advanced except
-# when this job ran (monthly), never actually refreshed. That was this
+# when this job ran (then monthly, now biweekly), never actually refreshed. That was this
 # comment's original "KNOWN GAP" (kept in git history, not restated here
 # since it's now fixed).
 #
@@ -24,7 +25,9 @@ name: optimize
 # still manual/unscheduled.
 on:
   schedule:
-    - cron: '0 22 1 * *'   # 每月 1 號台北 06:00（UTC 前一天 22:00）
+    - cron: '0 22 1,15 * *'   # 每月 1、15 號台北 06:00（UTC 前一天 22:00），近似雙週一次
+    # 注意：月底到下月 1 號的實際間隔不是固定 14 天（可能只隔 13~16 天），
+    # 這是 cron 本身無法表示「每 14 天」區間之下的近似取捨，非 bug。
   workflow_dispatch:
     inputs:
       dry_run:
@@ -40,8 +43,8 @@ concurrency:
   # overwrite the other's write to a full-file cache blob (no merge). This
   # serializes them (cancel-in-progress: false queues, doesn't cancel) at
   # the cost of daily_recommendations.yml occasionally waiting for a
-  # same-day optimize.yml run to finish (only possible on day 1 of the
-  # month, when both are scheduled ~1 hour apart).
+  # same-day optimize.yml run to finish (only possible on the 1st/15th of
+  # the month, when both are scheduled ~1 hour apart).
   group: backtest-db-state
   cancel-in-progress: false
 
