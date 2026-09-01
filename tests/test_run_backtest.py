@@ -1,8 +1,21 @@
 # -*- coding: utf-8 -*-
-"""Unit tests for run_backtest.py's _adjusted_bars()."""
+"""Unit tests for run_backtest.py's _adjusted_bars() and chip-row merge/split."""
 import pytest
 
 import run_backtest as rb
+
+
+def test_split_chip_rows_round_trips_dealer_net():
+    """_chip_rows()' by_date merge and _split_chip_rows()' inverse must
+    carry the dealer bucket through, same as foreign/trust."""
+    chip_rows = [{
+        "date": "2026-01-05", "foreign_net": 100, "trust_net": -50, "dealer_net": 25,
+        "margin_balance": None, "margin_delta": None, "short_balance": None, "short_delta": None,
+        "foreign_ratio": None, "foreign_shares": None,
+        "sbl_balance": None, "sbl_sales": None, "sbl_returns": None,
+    }]
+    inst, margin, shareholding, sbl = rb._split_chip_rows(chip_rows)
+    assert inst == [{"date": "2026-01-05", "foreign": 100, "trust": -50, "dealer": 25}]
 
 
 def _bar(date, c, adj_factor):

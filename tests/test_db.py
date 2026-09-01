@@ -82,6 +82,49 @@ def test_chip_daily_round_trip(tmp_path):
     conn.close()
 
 
+def test_chip_daily_round_trip_with_dealer_net(tmp_path):
+    conn = _conn(tmp_path)
+    row = {"date": "2024-01-01", "foreign_net": 1000, "trust_net": -500, "dealer_net": 200,
+           "margin_balance": 2000, "margin_delta": 10, "short_balance": 300, "short_delta": -5,
+           "foreign_ratio": 0.75, "foreign_shares": 500000, "sbl_balance": 100, "sbl_sales": 20,
+           "sbl_returns": 5}
+    db.upsert_chip_daily(conn, "2330", [row])
+    out = db.query_chip_daily(conn, "2330")
+    assert len(out) == 1 and out[0]["dealer_net"] == 200
+    conn.close()
+
+
+def test_migrate_adds_dealer_net_column_to_old_chip_daily(tmp_path):
+    """A DB created before the 三大法人 dealer split (chip_daily without
+    dealer_net) must gain the column via migrate() without losing existing
+    rows, and existing rows read dealer_net as NULL until the next
+    --refresh-data re-import backfills it."""
+    conn = _conn(tmp_path)
+    conn.execute(
+        """
+        CREATE TABLE chip_daily_old (
+            code TEXT NOT NULL, date TEXT NOT NULL, foreign_net REAL, trust_net REAL,
+            margin_balance REAL, margin_delta REAL, short_balance REAL, short_delta REAL,
+            foreign_ratio REAL, foreign_shares REAL, sbl_balance REAL, sbl_sales REAL,
+            sbl_returns REAL, PRIMARY KEY (code, date)
+        )
+        """
+    )
+    conn.execute("DROP TABLE chip_daily")
+    conn.execute("ALTER TABLE chip_daily_old RENAME TO chip_daily")
+    conn.execute(
+        "INSERT INTO chip_daily (code, date, foreign_net) VALUES ('2330', '2024-01-01', 1000)"
+    )
+    conn.commit()
+    db.migrate(conn)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(chip_daily)").fetchall()}
+    assert "dealer_net" in cols
+    row = conn.execute("SELECT * FROM chip_daily WHERE code='2330'").fetchone()
+    assert row["foreign_net"] == 1000
+    assert row["dealer_net"] is None
+    conn.close()
+
+
 def test_score_history_round_trip(tmp_path):
     conn = _conn(tmp_path)
     row = {"date": "2024-01-01", "tech_score": 60, "chip_score": 55, "composite": 58,

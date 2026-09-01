@@ -23,7 +23,7 @@ DAILY_DAYS = 3900
 CHIP_DAYS = 3650
 
 _CHIP_COLUMNS = (
-    "foreign_net", "trust_net", "margin_balance", "margin_delta",
+    "foreign_net", "trust_net", "dealer_net", "margin_balance", "margin_delta",
     "short_balance", "short_delta", "foreign_ratio", "foreign_shares",
     "sbl_balance", "sbl_sales", "sbl_returns",
 )
@@ -92,6 +92,7 @@ def _chip_rows(code):
     for r in inst:
         by_date.setdefault(r["date"], {})["foreign_net"] = r["foreign"]
         by_date[r["date"]]["trust_net"] = r["trust"]
+        by_date[r["date"]]["dealer_net"] = r.get("dealer")
     for r in margin:
         slot = by_date.setdefault(r["date"], {})
         slot["margin_balance"] = r["margin_balance"]
@@ -120,7 +121,8 @@ def _split_chip_rows(chip_rows):
     missing a given source's fields (e.g. an ETF with no margin data, or a
     date margin/shareholding/SBL hasn't published for yet -- see Phase 4's
     "籌碼延遲一個交易日" note) is simply excluded from that source's list."""
-    inst = [{"date": r["date"], "foreign": r["foreign_net"], "trust": r["trust_net"]}
+    inst = [{"date": r["date"], "foreign": r["foreign_net"], "trust": r["trust_net"],
+             "dealer": r["dealer_net"]}
             for r in chip_rows if r["foreign_net"] is not None and r["trust_net"] is not None]
     margin = [{"date": r["date"], "margin_balance": r["margin_balance"],
                "margin_delta": r["margin_delta"], "short_balance": r["short_balance"],

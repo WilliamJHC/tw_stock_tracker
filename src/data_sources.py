@@ -632,7 +632,9 @@ def tick_tier_available(probe_code="2330"):
 def get_institutional(code, days=40, cache=True):
     """Recent institutional investors net buy/sell per day (FinMind, free).
 
-    Returns list of {date, foreign, trust} in shares, oldest first, or None.
+    Returns list of {date, foreign, trust, dealer} in shares, oldest first,
+    or None. `dealer` sums FinMind's two self-trade/hedging rows
+    (Dealer_self / Dealer_Hedging) into one bucket.
     cache=False skips the on-disk cache (see get_daily()'s docstring)."""
     cached = _cache_get(f"inst_{code}") if cache else None
     if cached is not None:
@@ -646,11 +648,13 @@ def get_institutional(code, days=40, cache=True):
             d = r.get("date")
             name = (r.get("name") or "").lower()
             net = int(r.get("buy") or 0) - int(r.get("sell") or 0)
-            slot = by_date.setdefault(d, {"date": d, "foreign": 0, "trust": 0})
+            slot = by_date.setdefault(d, {"date": d, "foreign": 0, "trust": 0, "dealer": 0})
             if "foreign" in name:
                 slot["foreign"] += net
             elif "investment_trust" in name:
                 slot["trust"] += net
+            elif "dealer" in name:
+                slot["dealer"] += net
         if by_date:
             result = [by_date[d] for d in sorted(by_date)]
     except (SourceError, requests.RequestException, ValueError, KeyError):

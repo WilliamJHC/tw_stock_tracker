@@ -64,6 +64,7 @@ def init_db(conn):
             date TEXT NOT NULL,
             foreign_net REAL,
             trust_net REAL,
+            dealer_net REAL,
             margin_balance REAL,
             margin_delta REAL,
             short_balance REAL,
@@ -179,10 +180,18 @@ def migrate(conn):
     analyze() adds ON TOP of that dot product (not proportional to any
     SCORE_WEIGHTS entry, so it isn't one of the 9 c_* component columns) --
     without persisting it, reconstructing score from the c_* columns alone
-    silently drops it whenever a divergence signal fired that day."""
+    silently drops it whenever a divergence signal fired that day.
+    dealer_net (breakout_strategy.py's 三大法人 dealer bucket) reads NULL for
+    every existing row until the next --refresh-data re-import recomputes
+    chip_daily fresh per code -- upsert_chip_daily() is INSERT OR REPLACE on
+    (code, date), so a full re-import naturally backfills it, no separate
+    backfill script needed."""
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(daily_bars)").fetchall()}
     if "adj_factor" not in cols:
         conn.execute("ALTER TABLE daily_bars ADD COLUMN adj_factor REAL")
+    chip_daily_cols = {row["name"] for row in conn.execute("PRAGMA table_info(chip_daily)").fetchall()}
+    if "dealer_net" not in chip_daily_cols:
+        conn.execute("ALTER TABLE chip_daily ADD COLUMN dealer_net REAL")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS corporate_actions (
@@ -275,20 +284,22 @@ def query_daily_bars(conn, code, start_date=None, end_date=None):
 def upsert_chip_daily(conn, code, rows):
     """`rows`: iterable of dicts with keys date/foreign_net/trust_net/
     margin_balance/margin_delta/short_balance/short_delta/foreign_ratio/
-    foreign_shares/sbl_balance/sbl_sales/sbl_returns."""
+    foreign_shares/sbl_balance/sbl_sales/sbl_returns, and optionally
+    dealer_net (defaults to NULL if a row omits it -- keeps existing
+    callers/hand-built rows that predate the dealer split working)."""
     conn.executemany(
         """
         INSERT OR REPLACE INTO chip_daily (
-            code, date, foreign_net, trust_net, margin_balance, margin_delta,
+            code, date, foreign_net, trust_net, dealer_net, margin_balance, margin_delta,
             short_balance, short_delta, foreign_ratio, foreign_shares,
             sbl_balance, sbl_sales, sbl_returns
         ) VALUES (
-            :code, :date, :foreign_net, :trust_net, :margin_balance, :margin_delta,
+            :code, :date, :foreign_net, :trust_net, :dealer_net, :margin_balance, :margin_delta,
             :short_balance, :short_delta, :foreign_ratio, :foreign_shares,
             :sbl_balance, :sbl_sales, :sbl_returns
         )
         """,
-        ({**r, "code": code} for r in rows),
+        ({**r, "code": code, "dealer_net": r.get("dealer_net")} for r in rows),
     )
     conn.commit()
 

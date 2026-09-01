@@ -98,6 +98,27 @@ def test_data_tier_reflects_token_presence(monkeypatch):
     assert ds.data_tier() == "free"
 
 
+# ------------------------------------------------------- get_institutional --
+
+def test_get_institutional_splits_foreign_trust_dealer():
+    rows = [
+        {"date": "2026-01-05", "name": "Foreign_Investor", "buy": 1000, "sell": 200},
+        {"date": "2026-01-05", "name": "Investment_Trust", "buy": 300, "sell": 100},
+        {"date": "2026-01-05", "name": "Dealer_self", "buy": 500, "sell": 400},
+        {"date": "2026-01-05", "name": "Dealer_Hedging", "buy": 200, "sell": 250},
+    ]
+    with patch("data_sources.requests.get", return_value=_fake_response(data=rows)):
+        result = ds.get_institutional("2330")
+    # dealer sums BOTH Dealer_self (500-400=100) and Dealer_Hedging (200-250=-50) into one bucket
+    assert result == [{"date": "2026-01-05", "foreign": 800, "trust": 200, "dealer": 50}]
+
+
+def test_get_institutional_no_data_returns_none():
+    with patch("data_sources.requests.get", return_value=_fake_response(data=[])):
+        result = ds.get_institutional("2330")
+    assert result is None
+
+
 # -------------------------------------------------------------- get_margin --
 
 def test_get_margin_parses_and_converts_lots_to_shares():
