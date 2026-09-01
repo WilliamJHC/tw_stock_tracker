@@ -62,6 +62,7 @@ prints a per-code before/after bar count and date range instead.
 quick local sanity check without burning the full half's request budget.
 """
 import argparse
+import datetime as dt
 import glob
 import json
 import os
@@ -94,6 +95,36 @@ def _split_half(codes, half):
     return codes[:mid] if half == 1 else codes[mid:]
 
 
+def _twse_years_for(codes):
+    """Earliest bars[0]["date"] across live (non-skip) cached codes -> the
+    year range _fetch_twse_table() must cover so _augment_bars_with_adj_factor()'s
+    FULL-history recompute (see module docstring: it is NOT incremental, it
+    recomputes c_adj from bars[0] every call) has TWSE dividend/split
+    coverage back to the oldest bar any code holds. LOOKBACK_DAYS (30d) is
+    only the new-bar fetch window and is NOT enough for this -- a merged
+    history commonly spans years. Falls back to a 5y-back default if no
+    live code has bars yet (mirrors run_factor_backtest.py's own --days
+    1800 default), which shouldn't occur in practice since this script only
+    ever runs against an already-populated cache."""
+    earliest = None
+    for code in codes:
+        try:
+            with open(rfb._code_cache_path(code), encoding="utf-8") as f:
+                cached = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if cached.get("skip"):
+            continue
+        bars = cached.get("bars") or []
+        if not bars:
+            continue
+        d = bars[0]["date"]
+        if earliest is None or d < earliest:
+            earliest = d
+    start_year = int(earliest[:4]) if earliest else dt.date.today().year - 5
+    return range(start_year, dt.date.today().year + 1)
+
+
 def _merge_bars(existing_bars, new_bars):
     """existing_bars/new_bars: ascending [{date,c,v}, ...]. New fetch wins
     on a shared date (fresher pull, e.g. late settlement corrections).
@@ -105,7 +136,7 @@ def _merge_bars(existing_bars, new_bars):
     return [by_date[d] for d in sorted(by_date)]
 
 
-def update_code(code, limiter, dry_run):
+def update_code(code, limiter, dry_run, market, twse_events):
     """Returns {"status": "updated"|"skipped"|"failed", "detail": str}.
     Never raises -- a per-code failure is best-effort, matching
     fetch_universe_data()'s pattern, so one bad code can't kill the run."""
@@ -130,7 +161,10 @@ def update_code(code, limiter, dry_run):
     new_bars = rfb._daily_to_bars(daily)
 
     merged = _merge_bars(existing_bars, new_bars)
-    augmented = rfb._augment_bars_with_adj_factor(code, merged, limiter)
+    try:
+        augmented = rfb._augment_bars_with_adj_factor(code, merged, limiter, market, twse_events)
+    except Exception as e:
+        return {"status": "failed", "detail": f"augment error: {e}"}
     # Check the NEWEST bar, not the oldest: _merge_bars() strips c_adj only
     # off newly-merged/overlapping-date bars, so an old untouched bar at
     # augmented[0] keeps a stale c_adj from a prior successful run even when
@@ -164,11 +198,19 @@ def main():
         codes = codes[: args.limit]
     print(f"{len(codes)} cached codes to refresh (half={args.half}, lookback={LOOKBACK_DAYS} days, dry_run={args.dry_run})")
 
+    universe = ds.get_universe(cache=True) or []
+    market_by_code = {u["code"]: u["market"] for u in universe}
+    years = _twse_years_for(codes)
+    print(f"抓取 TWSE 除權息表（市場層級，{years[0]}-{years[-1]}，共 {len(years)} 個 request）...")
+    twse_by_code = rfb._fetch_twse_table(years, codes)
+
     limiter = rfb._RateLimiter()
     counts = {"updated": 0, "skipped": 0, "failed": 0}
     failures = []
     for i, code in enumerate(codes):
-        result = update_code(code, limiter, args.dry_run)
+        market = market_by_code.get(code, "twse")
+        twse_events = twse_by_code.get(code, [])
+        result = update_code(code, limiter, args.dry_run, market, twse_events)
         counts[result["status"]] = counts.get(result["status"], 0) + 1
         print(f"[{i + 1}/{len(codes)}] {code}: {result['status']} -- {result['detail']}")
         if result["status"] == "failed":
