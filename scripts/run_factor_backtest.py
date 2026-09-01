@@ -166,11 +166,25 @@ def _augment_bars_with_adj_factor(code, bars, limiter, market, twse_events):
     own docstring -- so this is the one place feeding both the ranking
     factor AND the P&L.
 
-    Best-effort: only an adj_factor invariant violation (adjust.py's
-    validate_adj_factor()) falls back to raw close for this code (c_adj ==
-    c, factor 1.0 throughout) rather than aborting the whole run."""
+    Best-effort, with one exception that must NOT be treated as "resolved":
+    when this code has no TWSE coverage (TPEX, or a TWSE code with no event
+    rows this window) the adjustment depends entirely on the Yahoo pull, and
+    fetch_universe_data()'s cache-backfill re-augments a code only while its
+    cached bars still lack a "c_adj" key at all (`if bars and "c_adj" not in
+    bars[0]`) -- so a Yahoo call that failed here (network blip, rate limit)
+    must return `bars` UNCHANGED, not a bars list that already carries a
+    (wrongly empty) "c_adj", or the failure gets cached as a permanent,
+    silent "confirmed no adjustment" that a later successful run can never
+    correct. An adj_factor invariant violation (adjust.py's
+    validate_adj_factor()) is a different, already-resolved case -- it DOES
+    fall back to raw close for this code (c_adj == c, factor 1.0
+    throughout) rather than aborting the whole run, since that failure mode
+    doesn't depend on a transient network call succeeding next time."""
     limiter.before_request()
-    actions, _counters = baf.resolve_adjustment_actions(code, market, bars, twse_events)
+    actions, counters = baf.resolve_adjustment_actions(code, market, bars, twse_events)
+    relies_solely_on_yahoo = market == "tpex" or not twse_events
+    if relies_solely_on_yahoo and not counters["yahoo_ok"]:
+        return bars
     bar_dates = [b["date"] for b in bars]
     factors = adjust.build_adj_factor(bar_dates, actions)
     violations = adjust.validate_adj_factor(bar_dates, factors, [a["date"] for a in actions])

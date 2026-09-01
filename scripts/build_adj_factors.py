@@ -218,9 +218,15 @@ def resolve_adjustment_actions(code, market, bars, twse_events):
     (no DB) so the two paths can't drift apart.
 
     Returns (actions, counters) where counters = {n_events, n_twse,
-    n_yahoo_supplement, n_warnings} -- same fields build_code() used to
-    return directly, minus `violations` (caller runs
-    adjust.validate_adj_factor() itself once it has bar_dates+factors)."""
+    n_yahoo_supplement, n_warnings, yahoo_ok} -- the first four are the
+    fields build_code() used to return directly (minus `violations`, which
+    the caller derives itself once it has bar_dates+factors). yahoo_ok is
+    False when fetch_yahoo_adj_close() came back empty (network failure OR
+    genuinely no Yahoo data for this code -- indistinguishable, same as
+    before this function existed) -- a caller relying solely on Yahoo (no
+    TWSE coverage for this code) needs this to tell "confirmed no
+    adjustment" apart from "couldn't check," see
+    scripts/run_factor_backtest.py's _augment_bars_with_adj_factor()."""
     bar_dates = [b["date"] for b in bars]
     yahoo_adj_close = fetch_yahoo_adj_close(code, min(bar_dates))
     yahoo_ratio_series = compute_yahoo_ratio_series(bars, yahoo_adj_close)
@@ -252,6 +258,7 @@ def resolve_adjustment_actions(code, market, bars, twse_events):
     return actions, {
         "n_events": len(actions), "n_twse": n_twse,
         "n_yahoo_supplement": n_yahoo_supplement, "n_warnings": n_warnings,
+        "yahoo_ok": bool(yahoo_adj_close),
     }
 
 

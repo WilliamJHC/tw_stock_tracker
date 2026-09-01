@@ -72,6 +72,33 @@ def test_revenue_yoy_series_ignores_announce_date_before_its_own_period():
     assert out[0]["usable_date"] == "2023-02-10"
 
 
+def test_revenue_yoy_series_ignores_announce_date_within_its_own_period():
+    # "2023-01-15" is after the 2023-01 period's START but still inside the
+    # period itself -- revenue for a month that hasn't finished yet can't
+    # have been disclosed. Checking only >= period-start would wrongly
+    # accept this.
+    rows = [{"date": f"2022-{m:02d}-01", "revenue": 100.0} for m in range(1, 13)]
+    rows += [{"date": f"2023-{m:02d}-01", "revenue": 120.0, "announce_date": None} for m in range(1, 13)]
+    rows[12]["announce_date"] = "2023-01-15"
+    out = ff.revenue_yoy_series(rows)
+    assert out[0]["usable_date"] == "2023-02-10"
+
+
+def test_revenue_yoy_series_usable_date_stays_monotonic_after_restatement():
+    # get_monthly_revenue() dedups by keeping whichever row FinMind lists
+    # LAST for a period -- a restated period's surviving announce_date can
+    # land after a LATER period's own on-time announce_date. _as_of()
+    # bisects assuming ascending usable_date, so this must not regress.
+    rows = [{"date": f"2022-{m:02d}-01", "revenue": 100.0} for m in range(1, 13)]
+    rows += [{"date": f"2023-{m:02d}-01", "revenue": 120.0, "announce_date": None} for m in range(1, 13)]
+    rows.append({"date": "2024-01-01", "revenue": 130.0, "announce_date": "2024-02-10"})  # on-time
+    rows[23]["announce_date"] = "2024-03-15"  # 2023-12's restated disclosure, later than 2024-01's
+    out = ff.revenue_yoy_series(rows)
+    dates = [row["usable_date"] for row in out]
+    assert dates == sorted(dates)
+    assert dates[-2:] == ["2024-03-15", "2024-03-15"]  # 2024-01 clamped forward to 2023-12's late date
+
+
 # -------------------------------------------------------------- roe_series --
 
 def test_roe_series_ttm_over_latest_equity():

@@ -62,19 +62,27 @@ def _month_end_lag_date(month_start_str, lag_days):
     return (next_month_first + dt.timedelta(days=lag_days - 1)).strftime("%Y-%m-%d")
 
 
+def _month_end(month_start_str):
+    """"YYYY-MM-01" -> that same month's last calendar day, as a datetime."""
+    d = dt.datetime.strptime(month_start_str, "%Y-%m-%d")
+    next_month_first = d.replace(year=d.year + 1, month=1) if d.month == 12 else d.replace(month=d.month + 1)
+    return next_month_first - dt.timedelta(days=1)
+
+
 def _sane_announce_date(announce_date, period_start_date):
-    """announce_date usable as-is only if it parses and isn't before the
-    revenue period it's supposedly disclosing (a real disclosure can't
-    precede the period it reports on) -- guards against a malformed or
-    stale value slipping past get_monthly_revenue()'s own filtering.
-    Returns announce_date or None."""
+    """announce_date usable as-is only if it parses and isn't before that
+    revenue PERIOD'S OWN END (a real disclosure can't happen before the
+    month being reported on has even finished -- checking only >= period
+    START would let through an impossible mid-month date). Guards against a
+    malformed or stale value slipping past get_monthly_revenue()'s own
+    filtering. Returns announce_date or None."""
     if not announce_date:
         return None
     try:
         d = dt.datetime.strptime(announce_date, "%Y-%m-%d")
     except (ValueError, TypeError):
         return None
-    if d < dt.datetime.strptime(period_start_date, "%Y-%m-%d"):
+    if d <= _month_end(period_start_date):
         return None
     return announce_date
 
@@ -91,11 +99,24 @@ def revenue_yoy_series(revenue_rows):
     gap in the input -- get_monthly_revenue() doesn't backfill missing
     months -- skips that point instead of silently comparing non-adjacent
     months. Needs >=13 months of input to produce a single point (one year
-    of comparison + the point itself); shorter input yields []."""
+    of comparison + the point itself); shorter input yields [].
+
+    usable_date is clamped to be non-decreasing across the output (a running
+    max, in input/period order) -- factor_ranks()/composite_scores() reach
+    this series through _as_of(), which bisects assuming ascending
+    usable_date. A restated period's surviving row (get_monthly_revenue()
+    keeps whichever row FinMind lists LAST for that period, not necessarily
+    the on-time one) can carry an announce_date from well after that
+    period's original disclosure -- late enough, in the worst case, to land
+    after a LATER period's own on-time announce_date, which would otherwise
+    break that ordering. The clamp is a one-directional pushback (never
+    pulls a date earlier), so it can only make an usable_date more
+    conservative, never introduce lookahead."""
     if not revenue_rows or len(revenue_rows) < 13:
         return []
     by_date = {r["date"]: r["revenue"] for r in revenue_rows}
     out = []
+    last_usable_dt = None
     for r in revenue_rows:
         cur_dt = dt.datetime.strptime(r["date"], "%Y-%m-%d")
         prev_key = cur_dt.replace(year=cur_dt.year - 1).strftime("%Y-%m-%d")
@@ -104,6 +125,11 @@ def revenue_yoy_series(revenue_rows):
             continue
         usable_date = (_sane_announce_date(r.get("announce_date"), r["date"])
                         or _month_end_lag_date(r["date"], REVENUE_LAG_DAYS))
+        usable_dt = dt.datetime.strptime(usable_date, "%Y-%m-%d")
+        if last_usable_dt is not None and usable_dt < last_usable_dt:
+            usable_date = last_usable_dt.strftime("%Y-%m-%d")
+        else:
+            last_usable_dt = usable_dt
         out.append({
             "usable_date": usable_date,
             "yoy_pct": (r["revenue"] - prev) / abs(prev) * 100,
