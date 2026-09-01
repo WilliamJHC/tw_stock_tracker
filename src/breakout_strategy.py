@@ -81,7 +81,13 @@ def technical_signal(ctx, highs, lows, i, params=None):
                 "vol_surge": False, "big_candle": None, "confirmed": False}
 
     ma_bull = ma5[i] > ma20[i] > ma60[i]
-    donch = an.donchian_position(highs[:i + 1], lows[:i + 1], ctx["closes"][:i + 1],
+    # donchian_position() only ever reads its last `period` elements
+    # (highs[-period:]/lows[-period:]) -- slice just that trailing window
+    # instead of the full highs[:i+1]/lows[:i+1] prefix, or replay_breakout()'s
+    # per-bar loop degrades to O(n^2) prefix copies across a multi-year replay.
+    window_start = max(0, i + 1 - p["donchian_period"])
+    donch = an.donchian_position(highs[window_start:i + 1], lows[window_start:i + 1],
+                                  ctx["closes"][window_start:i + 1],
                                   period_short=p["donchian_period"], period_long=p["donchian_period"])
     donchian_pct = donch["short"] if donch else None
     breakout = donchian_pct is not None and donchian_pct >= p["donchian_breakout_pct"]
