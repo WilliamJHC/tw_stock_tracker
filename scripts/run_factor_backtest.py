@@ -40,6 +40,7 @@ of RANKING_WEIGHTS/composite_scores(), evaluation only.
 """
 import argparse
 import collections
+import datetime as dt
 import json
 import os
 import sys
@@ -134,36 +135,49 @@ def _daily_to_bars(daily):
     ]
 
 
-def _augment_bars_with_adj_factor(code, bars, limiter):
-    """bars (ascending [{date,c,v}]) -> same-length list with a "c_adj" key
-    added to every entry (docs/https-finlab-finance-blog-python-get-tai-
-    memoized-lighthouse.md Phase 6a). Yahoo-ratio only -- no TWSE table, no
-    backtest.db write, unlike scripts/build_adj_factors.py's watchlist-scale
-    pipeline -- so this covers TWSE and TPEX codes alike with the exact same
-    one extra request per code. finlab_factors.momentum_pct() reads c_adj
-    when present; liquidity_ok() keeps reading raw "c"/"v" untouched (same
-    bars list, both fields present).
+def _fetch_twse_table(years, codes):
+    """One TWSE request per calendar year for the WHOLE market's corporate
+    actions (baf.fetch_twse_year()), filtered down to `codes`. O(years)
+    requests, not O(codes) -- unlike every other per-code fetch in this
+    module, so this is cheap even at full-universe scale. Not subject to
+    the FinMind _RateLimiter (this hits TWSE's own site, a separate quota).
+    Returns baf.parse_twse_rows()'s {code: [{date, pre_close, ref_price,
+    ratio, kind}, ...]} shape, ready for baf.resolve_adjustment_actions()."""
+    all_rows = []
+    for year in years:
+        rows = baf.fetch_twse_year(year)
+        all_rows.extend(rows)
+        print(f"  TWSE {year}: {len(rows)} 筆")
+        time.sleep(0.3)
+    return baf.parse_twse_rows(all_rows, set(codes))
 
-    Best-effort: a Yahoo fetch failure or an empty ratio series just returns
-    `bars` unchanged (no c_adj key added) -- momentum_pct() then falls back
-    to raw close for this code, same as before Phase 6a, rather than
-    aborting the whole run over one code's data gap."""
+
+def _augment_bars_with_adj_factor(code, bars, limiter, market, twse_events):
+    """bars (ascending [{date,c,v}]) -> same-length list with a "c_adj" key
+    added to every entry -- a TRUE total-return-style back-adjustment (both
+    splits AND cash/stock dividends), combining `twse_events` (this code's
+    rows from _fetch_twse_table(), authoritative for TWSE-listed codes) with
+    a Yahoo-ratio cross-check via baf.resolve_adjustment_actions() -- the
+    same combine-and-validate logic scripts/build_adj_factors.py uses for
+    the watchlist/backtest.db pipeline, applied here without a DB write.
+    finlab_factors.momentum_pct() reads c_adj when present; liquidity_ok()
+    keeps reading raw "c"/"v" untouched (same bars list, both fields
+    present). portfolio_backtest.simulate() also trades on c_adj -- see its
+    own docstring -- so this is the one place feeding both the ranking
+    factor AND the P&L.
+
+    Best-effort: only an adj_factor invariant violation (adjust.py's
+    validate_adj_factor()) falls back to raw close for this code (c_adj ==
+    c, factor 1.0 throughout) rather than aborting the whole run."""
     limiter.before_request()
-    yahoo_adj_close = baf.fetch_yahoo_adj_close(code, bars[0]["date"])
-    if not yahoo_adj_close:
-        return bars
-    ratio_series = baf.compute_yahoo_ratio_series(bars, yahoo_adj_close)
-    if not ratio_series:
-        return bars
-    steps = baf.detect_steps(sorted(ratio_series), ratio_series)
-    actions = [{"date": s["date"], "ratio": s["ratio"]} for s in steps if s["persists"]]
+    actions, _counters = baf.resolve_adjustment_actions(code, market, bars, twse_events)
     bar_dates = [b["date"] for b in bars]
     factors = adjust.build_adj_factor(bar_dates, actions)
     violations = adjust.validate_adj_factor(bar_dates, factors, [a["date"] for a in actions])
     if violations:
-        print(f"  ⚠ {code} adj_factor 不變量違反（{len(violations)} 筆），本檔 momentum 退回原始價："
+        print(f"  ⚠ {code} adj_factor 不變量違反（{len(violations)} 筆），本檔退回原始價："
               f"{violations[:3]}")
-        return bars
+        return [{**b, "c_adj": b["c"]} for b in bars]
     return [{**b, "c_adj": b["c"] * f} for b, f in zip(bars, factors)]
 
 
@@ -178,7 +192,7 @@ def _passed_liquidity_ever(bars):
     return False
 
 
-def fetch_universe_data(codes, days, limiter):
+def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
     """Two-stage fetch. Returns {code: {bars, bar_dates, revenue_series,
     roe_series, value_series, gross_margin_trend_series,
     operating_margin_trend_series}}, skipping codes with insufficient data
@@ -186,24 +200,31 @@ def fetch_universe_data(codes, days, limiter):
     computable, e.g. margin data missing) but are always present -- only a
     code loaded from a pre-Phase-6b cache entry that hasn't gone through
     fetch/backfill yet could differ, and that only for the margin-trend
-    keys (see the "per_pbr_series"/c_adj backfill comments above)."""
+    keys (see the "per_pbr_series"/c_adj backfill comments above).
+
+    market_by_code/twse_by_code: main()'s ds.get_universe()-derived market
+    lookup and _fetch_twse_table()'s market-wide dividend/split events,
+    threaded through to _augment_bars_with_adj_factor() so it can combine
+    TWSE's authoritative table with the per-code Yahoo cross-check."""
     universe_data = {}
     n = len(codes)
     for i, code in enumerate(codes):
+        market = market_by_code.get(code, "twse")
+        twse_events = twse_by_code.get(code, [])
         cached = _load_code_cache(code, days)
         if cached is not None:
             if cached.get("skip"):
                 continue
             bars = cached["bars"]
             cache_dirty = False
-            # Cache entries written before Phase 6a never got a "c_adj" key
-            # -- augment them in place (one extra Yahoo request, no re-fetch
-            # of daily/revenue/financials) and persist the upgraded cache so
-            # this only happens once per code, matching Phase 6a's "只需要
-            # 對每檔額外打一次 Yahoo Adj Close" cost claim.
+            # A cache entry from before c_adj became a TWSE-table+Yahoo
+            # combine (or before Phase 6a at all) never got a real "c_adj"
+            # -- augment/upgrade it in place (one extra Yahoo request, no
+            # re-fetch of daily/revenue/financials) and persist the result
+            # so this only happens once per code.
             if bars and "c_adj" not in bars[0]:
                 print(f"[{i + 1}/{n}] {code}（快取補算 adj_factor）")
-                bars = _augment_bars_with_adj_factor(code, bars, limiter)
+                bars = _augment_bars_with_adj_factor(code, bars, limiter, market, twse_events)
                 cached = {**cached, "bars": bars}
                 cache_dirty = True
             # per_pbr_series is a standalone 1-request fetch (unlike margin
@@ -249,7 +270,7 @@ def fetch_universe_data(codes, days, limiter):
             _save_code_cache(code, {"skip": True, "days": days})
             continue
 
-        bars = _augment_bars_with_adj_factor(code, bars, limiter)
+        bars = _augment_bars_with_adj_factor(code, bars, limiter, market, twse_events)
 
         limiter.before_request()
         revenue_rows = ds.get_monthly_revenue(code, days=days, cache=False)
@@ -299,11 +320,18 @@ def main():
 
     codes = _load_universe(args.universe)
     print(f"universe={args.universe} ({len(codes)} codes), days={args.days}")
-    print("提醒：momentum 因子已套用 Yahoo 比值法還原（Phase 6a），逐檔盡力而為——"
-          "任一代碼若 Yahoo 抓取失敗或還原序列未通過不變量檢查，該檔會退回原始價（見執行過程中的 ⚠ 警告）。")
+    print("提醒：c_adj（動能因子排名 + 損益計算都用它）結合 TWSE 除權息表與 Yahoo 比值交叉驗證，"
+          "逐檔盡力而為——任一代碼若不變量檢查未過，該檔會退回原始價（見執行過程中的 ⚠ 警告）。")
+
+    universe = ds.get_universe(cache=True) or []
+    market_by_code = {u["code"]: u["market"] for u in universe}
+    start_year = (dt.date.today() - dt.timedelta(days=args.days)).year
+    years = range(start_year, dt.date.today().year + 1)
+    print(f"抓取 TWSE 除權息表（市場層級，{years[0]}-{years[-1]}，共 {len(years)} 個 request）...")
+    twse_by_code = _fetch_twse_table(years, codes)
 
     limiter = _RateLimiter()
-    universe_data = fetch_universe_data(codes, args.days, limiter)
+    universe_data = fetch_universe_data(codes, args.days, limiter, market_by_code, twse_by_code)
     print(f"\n{len(universe_data)}/{len(codes)} codes usable after liquidity + fundamentals filters")
 
     if not universe_data:

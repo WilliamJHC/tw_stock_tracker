@@ -62,15 +62,36 @@ def _month_end_lag_date(month_start_str, lag_days):
     return (next_month_first + dt.timedelta(days=lag_days - 1)).strftime("%Y-%m-%d")
 
 
+def _sane_announce_date(announce_date, period_start_date):
+    """announce_date usable as-is only if it parses and isn't before the
+    revenue period it's supposedly disclosing (a real disclosure can't
+    precede the period it reports on) -- guards against a malformed or
+    stale value slipping past get_monthly_revenue()'s own filtering.
+    Returns announce_date or None."""
+    if not announce_date:
+        return None
+    try:
+        d = dt.datetime.strptime(announce_date, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+    if d < dt.datetime.strptime(period_start_date, "%Y-%m-%d"):
+        return None
+    return announce_date
+
+
 def revenue_yoy_series(revenue_rows):
-    """[{date, revenue}] (ascending, monthly) -> [{usable_date, yoy_pct}].
-    usable_date = revenue month-end + REVENUE_LAG_DAYS. Matches each row
-    against the entry exactly 12 calendar months earlier by date (not by
-    position), so a gap in the input -- get_monthly_revenue() doesn't
-    backfill missing months -- skips that point instead of silently
-    comparing non-adjacent months. Needs >=13 months of input to produce a
-    single point (one year of comparison + the point itself); shorter input
-    yields []."""
+    """[{date, revenue, announce_date}] (ascending, monthly) -> [{usable_date,
+    yoy_pct}]. usable_date = announce_date (get_monthly_revenue()'s real
+    FinMind-reported disclosure date) when present and sane, else the old
+    revenue month-end + REVENUE_LAG_DAYS fallback -- see
+    get_monthly_revenue()'s docstring: only recent months carry a real
+    announce_date, so most of any historical backtest still runs on the
+    fixed-lag assumption exactly as before. Matches each row against the
+    entry exactly 12 calendar months earlier by date (not by position), so a
+    gap in the input -- get_monthly_revenue() doesn't backfill missing
+    months -- skips that point instead of silently comparing non-adjacent
+    months. Needs >=13 months of input to produce a single point (one year
+    of comparison + the point itself); shorter input yields []."""
     if not revenue_rows or len(revenue_rows) < 13:
         return []
     by_date = {r["date"]: r["revenue"] for r in revenue_rows}
@@ -81,8 +102,10 @@ def revenue_yoy_series(revenue_rows):
         prev = by_date.get(prev_key)
         if not prev:
             continue
+        usable_date = (_sane_announce_date(r.get("announce_date"), r["date"])
+                        or _month_end_lag_date(r["date"], REVENUE_LAG_DAYS))
         out.append({
-            "usable_date": _month_end_lag_date(r["date"], REVENUE_LAG_DAYS),
+            "usable_date": usable_date,
             "yoy_pct": (r["revenue"] - prev) / abs(prev) * 100,
         })
     return out

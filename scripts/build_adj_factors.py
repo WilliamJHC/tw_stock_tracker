@@ -208,18 +208,20 @@ def _matches_any(date, other_dates, tolerance_days=DATE_MATCH_TOLERANCE_DAYS):
 
 # ------------------------------------------------------------- per-code --
 
-def build_code(conn, code, market, bars=None):
-    """Resolves one code's corporate_actions + adj_factor and writes them.
-    Returns a dict of counters for the summary report: n_events (final,
-    written), n_twse, n_yahoo_supplement, n_warnings, violations (from
-    adjust.validate_adj_factor(), should be [])."""
-    if bars is None:
-        bars = db.query_daily_bars(conn, code)
-    if not bars:
-        return {"n_events": 0, "n_twse": 0, "n_yahoo_supplement": 0, "n_warnings": 0, "violations": ["no bars"]}
-    bar_dates = [b["date"] for b in bars]
+def resolve_adjustment_actions(code, market, bars, twse_events):
+    """DB-free core of build_code(): combine `twse_events` (this code's rows
+    from parse_twse_rows(), [] if none/not TWSE-listed) with a Yahoo-ratio
+    cross-check, same source-selection rules build_code() has always used
+    (TWSE authoritative for 上市 codes when available, Yahoo-ratio-only for
+    TPEX/no-TWSE-coverage). Used both by build_code() (DB-backed, watchlist
+    scale) and scripts/run_factor_backtest.py's market-wide c_adj pipeline
+    (no DB) so the two paths can't drift apart.
 
-    twse_events = TWSE_BY_CODE.get(code, [])
+    Returns (actions, counters) where counters = {n_events, n_twse,
+    n_yahoo_supplement, n_warnings} -- same fields build_code() used to
+    return directly, minus `violations` (caller runs
+    adjust.validate_adj_factor() itself once it has bar_dates+factors)."""
+    bar_dates = [b["date"] for b in bars]
     yahoo_adj_close = fetch_yahoo_adj_close(code, min(bar_dates))
     yahoo_ratio_series = compute_yahoo_ratio_series(bars, yahoo_adj_close)
     yahoo_steps = detect_steps(sorted(yahoo_ratio_series), yahoo_ratio_series) if yahoo_ratio_series else []
@@ -247,17 +249,32 @@ def build_code(conn, code, market, bars=None):
                                  "ref_price": None, "kind": None, "source": "yahoo_ratio"})
 
     n_yahoo_supplement = len(actions) - n_twse
+    return actions, {
+        "n_events": len(actions), "n_twse": n_twse,
+        "n_yahoo_supplement": n_yahoo_supplement, "n_warnings": n_warnings,
+    }
+
+
+def build_code(conn, code, market, bars=None):
+    """Resolves one code's corporate_actions + adj_factor and writes them.
+    Returns a dict of counters for the summary report: n_events (final,
+    written), n_twse, n_yahoo_supplement, n_warnings, violations (from
+    adjust.validate_adj_factor(), should be [])."""
+    if bars is None:
+        bars = db.query_daily_bars(conn, code)
+    if not bars:
+        return {"n_events": 0, "n_twse": 0, "n_yahoo_supplement": 0, "n_warnings": 0, "violations": ["no bars"]}
+    bar_dates = [b["date"] for b in bars]
+
+    twse_events = TWSE_BY_CODE.get(code, [])
+    actions, counters = resolve_adjustment_actions(code, market, bars, twse_events)
     db.upsert_corporate_actions(conn, code, actions)
 
     factors = adjust.build_adj_factor(bar_dates, actions)
     db.update_adj_factors(conn, code, dict(zip(bar_dates, factors)))
 
     violations = adjust.validate_adj_factor(bar_dates, factors, [a["date"] for a in actions])
-    return {
-        "n_events": len(actions), "n_twse": n_twse,
-        "n_yahoo_supplement": n_yahoo_supplement, "n_warnings": n_warnings,
-        "violations": violations,
-    }
+    return {**counters, "violations": violations}
 
 
 TWSE_BY_CODE = {}

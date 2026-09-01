@@ -48,6 +48,30 @@ def test_revenue_yoy_series_skips_zero_prior_year():
     assert ff.revenue_yoy_series(rows) == []
 
 
+def test_revenue_yoy_series_prefers_real_announce_date_over_fixed_lag():
+    rows = [{"date": f"2022-{m:02d}-01", "revenue": 100.0} for m in range(1, 13)]
+    rows += [{"date": f"2023-{m:02d}-01", "revenue": 120.0, "announce_date": None} for m in range(1, 13)]
+    # 2023-01's real disclosure landed on the 8th -- 2 days earlier than the
+    # REVENUE_LAG_DAYS=10 fallback (2023-02-10, see the hand-computed test
+    # above) would assume.
+    rows[12]["announce_date"] = "2023-02-08"
+    out = ff.revenue_yoy_series(rows)
+    assert out[0] == {"usable_date": "2023-02-08", "yoy_pct": 20.0}
+    # every other month has no announce_date -- still falls back untouched.
+    assert out[1]["usable_date"] == "2023-03-10"
+
+
+def test_revenue_yoy_series_ignores_announce_date_before_its_own_period():
+    rows = [{"date": f"2022-{m:02d}-01", "revenue": 100.0} for m in range(1, 13)]
+    rows += [{"date": f"2023-{m:02d}-01", "revenue": 120.0, "announce_date": None} for m in range(1, 13)]
+    # Malformed/stale value earlier than the revenue period itself -- can't
+    # be a real disclosure of that period, must fall back instead of being
+    # trusted as-is.
+    rows[12]["announce_date"] = "2022-12-01"
+    out = ff.revenue_yoy_series(rows)
+    assert out[0]["usable_date"] == "2023-02-10"
+
+
 # -------------------------------------------------------------- roe_series --
 
 def test_roe_series_ttm_over_latest_equity():

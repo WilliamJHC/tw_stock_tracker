@@ -793,14 +793,24 @@ def get_universe(cache=True):
 
 def get_monthly_revenue(code, days=760, cache=True):
     """Monthly revenue history (>=24mo so callers can derive YoY growth).
-    Returns [{date, revenue}] ascending, date = 1st of the revenue month
-    (built from revenue_year/revenue_month, not FinMind's raw 'date' field --
-    that field is an announcement-batch marker, not the revenue period), or
-    None. Deduplicates by (year, month) keeping the last row FinMind returns
-    for that period -- restated revenue figures are a real occurrence, and
-    without this a period could otherwise produce two output rows sharing
-    one date. cache=False skips the on-disk cache (see get_daily()'s
-    docstring)."""
+    Returns [{date, revenue, announce_date}] ascending, date = 1st of the
+    revenue month (built from revenue_year/revenue_month, not FinMind's raw
+    'date' field -- that field is an announcement-BATCH marker, not the
+    revenue period, and not the same thing as announce_date below), or None.
+    announce_date is FinMind's raw 'create_time' when non-empty -- close to
+    the real disclosure date for RECENT periods (TWSE's "by the 10th of the
+    following month" deadline), None for older rows: spot-checked on 2330
+    back to 2013, create_time is "" for every row before ~2026-03's revenue
+    period -- FinMind only started populating it recently, it is not a
+    backfilled historical field. finlab_factors.revenue_yoy_series() uses it
+    when present and falls back to the fixed REVENUE_LAG_DAYS lag otherwise,
+    so this is a real point-in-time improvement only for months this recent;
+    the rest of any historical backtest still runs on the fixed-lag
+    assumption exactly as before. Deduplicates by (year, month) keeping the
+    last row FinMind returns for that period -- restated revenue figures are
+    a real occurrence, and without this a period could otherwise produce two
+    output rows sharing one date. cache=False skips the on-disk cache (see
+    get_daily()'s docstring)."""
     cached = _cache_get(f"revenue_{code}") if cache else None
     if cached is not None:
         return cached or None
@@ -814,7 +824,7 @@ def get_monthly_revenue(code, days=760, cache=True):
             if rev is None or not year or not month:
                 continue
             date = f"{int(year):04d}-{int(month):02d}-01"
-            by_date[date] = {"date": date, "revenue": float(rev)}
+            by_date[date] = {"date": date, "revenue": float(rev), "announce_date": r.get("create_time") or None}
         if by_date:
             result = [by_date[d] for d in sorted(by_date)]
     except (SourceError, requests.RequestException, ValueError, KeyError):

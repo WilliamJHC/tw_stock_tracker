@@ -234,8 +234,23 @@ def test_get_monthly_revenue_builds_date_from_year_month_not_raw_date():
     with patch("data_sources.requests.get", return_value=_fake_response(data=rows)):
         result = ds.get_monthly_revenue("2330")
     assert result == [
-        {"date": "2023-11-01", "revenue": 150000000000.0},
-        {"date": "2023-12-01", "revenue": 176299866000.0},
+        {"date": "2023-11-01", "revenue": 150000000000.0, "announce_date": None},
+        {"date": "2023-12-01", "revenue": 176299866000.0, "announce_date": None},
+    ]
+
+
+def test_get_monthly_revenue_picks_up_nonempty_create_time_as_announce_date():
+    rows = [
+        {"date": "2024-01-01", "revenue_year": 2023, "revenue_month": 12, "revenue": 176299866000,
+         "create_time": "2024-01-10"},
+        {"date": "2023-12-01", "revenue_year": 2023, "revenue_month": 11, "revenue": 150000000000,
+         "create_time": ""},
+    ]
+    with patch("data_sources.requests.get", return_value=_fake_response(data=rows)):
+        result = ds.get_monthly_revenue("2330")
+    assert result == [
+        {"date": "2023-11-01", "revenue": 150000000000.0, "announce_date": None},
+        {"date": "2023-12-01", "revenue": 176299866000.0, "announce_date": "2024-01-10"},
     ]
 
 

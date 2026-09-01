@@ -71,6 +71,40 @@ def test_simulate_equity_grows_when_selected_names_trend_up():
     assert result["summary"]["cagr_pct"] > 0
 
 
+def test_simulate_prices_pnl_off_c_adj_when_present():
+    # Raw close never moves (no price-only return); c_adj rises steadily,
+    # simulating a total-return series where the gain comes entirely from
+    # cash/stock dividends baked into the back-adjustment. If simulate()
+    # priced P&L off raw "c" (the pre-fix bug), equity would stay flat.
+    d0 = dt.date(2022, 1, 1)
+    days = 400
+    bars = [
+        {
+            "date": (d0 + dt.timedelta(days=i)).isoformat(),
+            "c": 100.0,
+            "c_adj": 100.0 + i * 0.5,
+            "v": 500_000,
+        }
+        for i in range(days)
+    ]
+    universe = {"A": {
+        "bars": bars,
+        "bar_dates": [b["date"] for b in bars],
+        "revenue_series": [{"usable_date": "2022-01-01", "yoy_pct": 10}],
+        "roe_series": [{"usable_date": "2022-01-01", "roe_pct": 10}],
+    }}
+    result = pb.simulate(universe, params={"top_n": 1, "initial_capital": 1_000_000})
+    assert result["summary"]["total_return_pct"] > 10  # c_adj roughly doubles over the window
+
+
+def test_simulate_falls_back_to_raw_close_when_c_adj_absent():
+    # Same shape as the c_adj test above but with no c_adj key at all --
+    # must reproduce the pre-fix flat-equity result, not error out.
+    universe = {"A": _entry(100, 0.0, days=400)}
+    result = pb.simulate(universe, params={"top_n": 1, "initial_capital": 1_000_000})
+    assert abs(result["summary"]["total_return_pct"]) < 1
+
+
 def test_simulate_carries_forward_price_through_a_halt_day():
     # B has no bar on day index 2 (simulated halt/no print). Equity that
     # day must reflect B's last known price, not zero-fill it -- a

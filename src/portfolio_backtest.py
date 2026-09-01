@@ -8,6 +8,17 @@ single-position/single-code; this module is the portfolio-level
 counterpart needed for "hold N names at once, rebalance monthly" (the thing
 backtest.py deliberately doesn't do -- see its module docstring).
 
+Trading/valuation price: c_adj when a bar has it (split+dividend back-
+adjusted, same convention as finlab_factors.momentum_pct() -- see adjust.py's
+module docstring), else falls back to the raw close. This makes the equity
+curve a total-return series: cash and stock dividends are captured as part
+of the strategy's own return, not just price appreciation, the same way
+they already were for the momentum ranking factor. Whole-lot sizing then
+operates on adjusted-price-implied quantities rather than literal share
+counts once a code has any historical corporate action behind it -- a minor,
+accepted approximation at the lot-rounding granularity (same style of
+named simplification as lot_size/slippage_pct below).
+
 Simplifications (recorded, not hidden -- every threshold below is a named
 product-judgment default):
   - Whole-lot (張, 1000-share) rounding: PORTFOLIO_PARAMS["lot_size"]. Every
@@ -116,7 +127,10 @@ def simulate(universe_data, params=None):
         return {"equity_curve": [], "trades": [], "summary": {}}
     rebalance_dates = set(_rebalance_dates(calendar))
 
-    prices = {code: {b["date"]: b["c"] for b in d["bars"]} for code, d in universe_data.items()}
+    prices = {
+        code: {b["date"]: (b["c_adj"] if b.get("c_adj") is not None else b["c"]) for b in d["bars"]}
+        for code, d in universe_data.items()
+    }
     bar_dates = {code: d["bar_dates"] for code, d in universe_data.items()}
 
     cash = p["initial_capital"]
