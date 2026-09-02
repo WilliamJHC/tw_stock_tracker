@@ -736,20 +736,24 @@ def compute_attention(tech_score, chip, result):
     composite = 0.6 * tech_score + 0.4 * chip_score if chip_score is not None else tech_score
 
     signals = result.get("signals") or []
-    bt_set = {s.get("bt") for s in signals if s.get("bt")}
+    # keyed by bt tag rather than a plain set, so the trigger reason below
+    # reuses analyze()'s own signal text verbatim instead of re-deriving a
+    # second copy that can drift out of wording sync with it (e.g. 爆量 used
+    # to lose analyze()'s actual multiple-of-average-volume figure here).
+    signal_text_by_bt = {s["bt"]: s["text"] for s in signals if s.get("bt")}
     of = result.get("of")
 
     triggers = []  # (points, reason text), in spec order
-    if "突破站上MA60" in bt_set:
-        triggers.append((15, "今日突破站上 60 日均線"))
-    if "跌破MA60" in bt_set:
-        triggers.append((15, "今日跌破 60 日均線"))
+    if "突破站上MA60" in signal_text_by_bt:
+        triggers.append((15, signal_text_by_bt["突破站上MA60"]))
+    if "跌破MA60" in signal_text_by_bt:
+        triggers.append((15, signal_text_by_bt["跌破MA60"]))
     if of and of.get("divergence"):
         text = ("量價背離：近10日價格上漲但主動賣盤佔優（出貨嫌疑）" if of["divergence"] == "bearish"
                 else "量價背離：近10日價格下跌但主動買盤佔優（吸籌嫌疑）")
         triggers.append((15, text))
-    if "爆量(>2倍均量)" in bt_set:
-        triggers.append((10, "爆量：今日量能達 20 日均量 2 倍以上"))
+    if "爆量(>2倍均量)" in signal_text_by_bt:
+        triggers.append((10, signal_text_by_bt["爆量(>2倍均量)"]))
     of_streak = of["streak"] if of else 0
     foreign_streak = 0
     inst_comp = (chip or {}).get("components", {}).get("institutional")
@@ -973,14 +977,17 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
         signals.append({"text": f"近5日主動{side}淨額佔總量 {abs(pct):.1f}%（{tag}）",
                         "bias": 1 if of["delta5"] > 0 else -1 if of["delta5"] < 0 else 0, "bt": None})
         if abs(of["streak"]) >= 3:
-            side = "買超" if of["streak"] > 0 else "賣超"
+            # same "買盤/賣盤" vocabulary as the ratio5 sentence above (and as
+            # compute_attention()'s matching trigger text) -- this used to say
+            # "買超/賣超" here only, a wording split with no reason behind it.
+            side = "買盤" if of["streak"] > 0 else "賣盤"
             signals.append({"text": f"主動{side}已連續 {abs(of['streak'])} 個交易日",
                             "bias": 1 if of["streak"] > 0 else -1, "bt": None})
         # divergence is a flat +-10 score override, not proportional to
         # w["orderFlow"] -- see the components["orderFlow"] comment above for
         # why it's added to order_flow_override instead of folded in here.
         if of["divergence"] == "bearish":
-            signals.append({"text": "⚠ 量價背離：近10日價格上漲但主動賣盤佔優（出貨嫌疑）", "bias": -1, "bt": None})
+            signals.append({"text": "量價背離：近10日價格上漲但主動賣盤佔優（出貨嫌疑）", "bias": -1, "bt": None})
             order_flow_override = -10.0
         elif of["divergence"] == "bullish":
             signals.append({"text": "量價背離：近10日價格下跌但主動買盤佔優（吸籌嫌疑）", "bias": 1, "bt": None})

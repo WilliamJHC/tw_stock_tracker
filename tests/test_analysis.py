@@ -483,3 +483,56 @@ def test_analyze_wires_target_price_and_as_of():
         assert a["target_price"]["basis"] == "VAH"
     elif a["score"] < 0:
         assert a["target_price"]["basis"] == "VAL"
+
+
+# --------------------------- analyze()/compute_attention() text agreement ----
+# These two used to independently write their own display text for the same
+# underlying event and silently drift apart (爆量 lost its real ratio figure,
+# 買超/賣超 vs 買盤/賣盤 wording split, a stray "⚠ " prefix only one side
+# carried) -- see the architecture-review candidate that fixed this.
+
+def test_compute_attention_reuses_analyze_signal_text_for_bt_tagged_events():
+    """MA60/爆量 trigger reasons must come verbatim from analyze()'s own
+    signals[].text (matched by bt tag), not a second hand-written copy --
+    proves the real 爆量 ratio figure survives into the trigger reason."""
+    result = {
+        "signals": [
+            {"text": "今日突破站上 60 日均線", "bias": 1, "bt": "突破站上MA60"},
+            {"text": "爆量：今日量為 20 日均量 2.7 倍", "bias": 0, "bt": "爆量(>2倍均量)"},
+        ],
+        "of": None,
+        "vp_position": None,
+    }
+    att = an.compute_attention(tech_score=10, chip=None, result=result)
+    assert "今日突破站上 60 日均線" in att["triggers"]
+    assert "爆量：今日量為 20 日均量 2.7 倍" in att["triggers"]
+
+
+def test_analyze_and_compute_attention_agree_on_of_streak_and_divergence_wording():
+    import datetime as dt
+    n = 15
+    closes = [100.0 + i * 1.5 for i in range(n)]  # steady rise -> price leg of "bearish" divergence
+    daily = {
+        "t": [1_700_000_000 + i * 86400 for i in range(n)],
+        "o": closes[:], "h": [c * 1.01 for c in closes], "l": [c * 0.99 for c in closes],
+        "c": closes, "v": [100_000] * n,
+    }
+    dates = [dt.datetime.fromtimestamp(t).date().isoformat() for t in daily["t"]]
+    # Aggressive selling every day of the last 10 -> both a >=3-day streak
+    # signal and a bearish divergence signal (price rising, sellers dominant).
+    tick_days = {d: [{"volume": 100, "TickType": 1}] for d in dates[-10:]}
+
+    a = an.analyze(daily, tick_days=tick_days)
+    assert abs(a["of"]["streak"]) >= 3  # sanity: must actually exercise the streak signal
+    assert a["of"]["divergence"] == "bearish"  # sanity: must actually exercise the divergence signal
+
+    streak_texts = [s["text"] for s in a["signals"] if s["bt"] is None and "已連續" in s["text"]]
+    divergence_texts = [s["text"] for s in a["signals"] if "量價背離" in s["text"]]
+    assert len(streak_texts) == 1
+    assert len(divergence_texts) == 1
+    assert not divergence_texts[0].startswith("⚠")  # the stray prefix is gone
+
+    att = an.compute_attention(tech_score=0, chip=None,
+                                result={"signals": a["signals"], "of": a["of"], "vp_position": None})
+    assert streak_texts[0] in att["triggers"]
+    assert divergence_texts[0] in att["triggers"]
