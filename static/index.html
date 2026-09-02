@@ -273,6 +273,11 @@ const scoreClass = score => {
   return score >= b[0] ? 'score-sb' : score >= b[1] ? 'score-b' : score > b[2] ? 'score-n' : score > b[3] ? 'score-s' : 'score-ss';
 };
 const fmtPct = v => v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(1) + '%';
+// ADR 0001 / CONTEXT.md「目標價」詞條：target_price 不含「是否已突破」判斷，
+// 消費端自行比較 -- basis VAH 時現價需仍在 level 前方（< level）才算目標仍
+// 有效，VAL 反之。單一定義，供 renderRecommendations()/renderTable() 共用
+// （曾經各寫一份、字面重複，見 788e207 的教訓）。
+const isTargetValid = (tp, price) => tp && price != null && (tp.basis === 'VAH' ? price < tp.level : price > tp.level);
 
 // ---- data access helpers for sorting/cells ----
 function rowView(s) {
@@ -538,11 +543,8 @@ function renderRecommendations() {
   const card = r => {
     const tp = r.target_price;
     const price = r.quote ? r.quote.price : null;
-    // ADR 0001 / CONTEXT.md「目標價」詞條：target_price 不含「是否已突破」
-    // 判斷，消費端自行比較 -- basis VAH 時現價需仍在 level 前方（< level）
-    // 才算目標仍有效，VAL 反之。同一條規則 788e207 曾在舊版決策面板修過。
     const basisLabel = tp ? (tp.basis === 'VAH' ? '上緣 VAH' : '下緣 VAL') : '';
-    const targetValid = tp && price != null && (tp.basis === 'VAH' ? price < tp.level : price > tp.level);
+    const targetValid = isTargetValid(tp, price);
     const fr = r.factor_ranks || {};
     const factor = (label, v) => `<span class="tag" style="background:#eaeaea;color:#666;">${label} ${v != null ? Math.round(v * 100) : '—'}</span>`;
     const factors = factor('營收', fr.revenue) + factor('ROE', fr.roe) + factor('動能', fr.momentum);
@@ -659,8 +661,7 @@ function renderTable() {
       const cls = ACTION_CLASS[v.action] || 'action-observe';
       const confPart = v.confidence != null ? `、信心 ${Math.round(v.confidence)}%（n=${v.sampleN}）` : '';
       const tp = v.targetPrice;
-      // 同 renderRecommendations() 的 targetValid 規則（ADR 0001 / CONTEXT.md）。
-      const targetValid = tp && v.price != null && (tp.basis === 'VAH' ? v.price < tp.level : v.price > tp.level);
+      const targetValid = isTargetValid(tp, v.price);
       const title = `優先級 P${v.priority}、${v.reason || ''}、目標 ${targetValid ? fmtP(tp.level) : '—'}${confPart}`;
       tag = `<span class="action-badge ${cls}" title="${title}">${v.action}</span>`;
     }
