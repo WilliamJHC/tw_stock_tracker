@@ -218,6 +218,42 @@ def deflated_sharpe_ratio(observed_sharpe, n_trials, n_obs, skew=0.0, kurtosis=3
     return _norm_cdf((observed_sharpe - sr0) / sigma_sr)
 
 
+def fmt_pct(x, width=9):
+    """Right-aligned percentage string for a fixed-width terminal report
+    column, or a same-width dash when `x` is None. Shared by
+    scripts/report_backtest.py and scripts/run_breakout_backtest.py's
+    per-code tables -- each used to carry a byte-identical private copy."""
+    return f"{x:>{width}.1f}%" if x is not None else " " * (width - 1) + "-"
+
+
+def exit_reason_breakdown(trades):
+    """trades: [{"exit_reason", "ret_pct", ...}, ...] -- report_backtest.py's
+    DB-sourced strategy_runs trades and run_breakout_backtest.py's
+    JSON-shaped breakout trades both carry these two keys. Returns
+    per-exit_reason win rate/mean/median return, sorted by trade count
+    descending: [{"reason", "n", "win_rate", "mean", "median"}, ...]."""
+    by_reason = {}
+    for t in trades:
+        by_reason.setdefault(t["exit_reason"], []).append(t["ret_pct"])
+    rows = []
+    for reason, rets in sorted(by_reason.items(), key=lambda kv: -len(kv[1])):
+        n = len(rets)
+        wins = sum(1 for x in rets if x > 0)
+        rows.append({
+            "reason": reason, "n": n, "win_rate": wins / n * 100,
+            "mean": sum(rets) / n, "median": statistics.median(rets),
+        })
+    return rows
+
+
+def print_exit_reason_table(rows):
+    """Prints exit_reason_breakdown()'s output as a fixed-width table."""
+    print(f"{'exit_reason':<16}{'n':>6}{'win':>8}{'mean':>10}{'median':>10}")
+    for row in rows:
+        print(f"{row['reason']:<16}{row['n']:>6}{row['win_rate']:>7.1f}%"
+              f"{row['mean']:>9.2f}%{row['median']:>9.2f}%")
+
+
 def pbo(returns_matrix, n_blocks=8):
     """Probability of Backtest Overfitting via Combinatorially Symmetric
     Cross-Validation (Bailey, Borwein, Lopez de Prado & Zhu 2015).

@@ -17,7 +17,6 @@ import argparse
 import datetime as dt
 import json
 import os
-import statistics
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
@@ -29,10 +28,6 @@ import pipeline as pl  # noqa: E402
 import run_backtest as rb  # noqa: E402
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cache", "breakout_backtest")
-
-
-def _fmt_pct(x, width=9):
-    return f"{x:>{width}.1f}%" if x is not None else " " * (width - 1) + "-"
 
 
 def run_one(conn, code):
@@ -76,15 +71,7 @@ def build_report(conn, codes):
     bh_rets = [r["buy_hold_return"] for r in per_code if r["buy_hold_return"] is not None]
 
     all_trades = [t for r in per_code for t in r["trades"]]
-    by_reason = {}
-    for t in all_trades:
-        by_reason.setdefault(t["exit_reason"], []).append(t["ret_pct"])
-    reason_rows = []
-    for reason, vals in sorted(by_reason.items(), key=lambda kv: -len(kv[1])):
-        n = len(vals)
-        wins = sum(1 for x in vals if x > 0)
-        reason_rows.append({"reason": reason, "n": n, "win_rate": wins / n * 100,
-                             "mean": sum(vals) / n, "median": statistics.median(vals)})
+    reason_rows = metrics.exit_reason_breakdown(all_trades)
 
     summary = {
         "n_codes": len(per_code),
@@ -101,8 +88,8 @@ def build_report(conn, codes):
 def print_report(report):
     print(f"{'code':<8}{'trades':>8}{'total_ret':>12}{'buy&hold':>12}{'exposure':>10}")
     for r in report["per_code"]:
-        print(f"{r['code']:<8}{r['n_trades']:>8}{_fmt_pct(r['total_return'], 11)}"
-              f"{_fmt_pct(r['buy_hold_return'], 11)}{_fmt_pct(r['exposure'])}")
+        print(f"{r['code']:<8}{r['n_trades']:>8}{metrics.fmt_pct(r['total_return'], 11)}"
+              f"{metrics.fmt_pct(r['buy_hold_return'], 11)}{metrics.fmt_pct(r['exposure'])}")
 
     s = report["summary"]
     print()
@@ -115,10 +102,7 @@ def print_report(report):
 
     if report["by_reason"]:
         print()
-        print(f"{'exit_reason':<16}{'n':>6}{'win':>8}{'mean':>10}{'median':>10}")
-        for row in report["by_reason"]:
-            print(f"{row['reason']:<16}{row['n']:>6}{row['win_rate']:>7.1f}%"
-                  f"{row['mean']:>9.2f}%{row['median']:>9.2f}%")
+        metrics.print_exit_reason_table(report["by_reason"])
 
 
 def main():

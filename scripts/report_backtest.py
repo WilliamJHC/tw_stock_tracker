@@ -14,7 +14,6 @@ would have produced, per docs/backtest_plan.md Phase 0's expected values.
 """
 import argparse
 import os
-import statistics
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
@@ -28,10 +27,6 @@ def _latest_run_id(conn):
         "SELECT run_id FROM strategy_runs ORDER BY computed_at DESC LIMIT 1"
     ).fetchone()
     return row["run_id"] if row else None
-
-
-def _fmt_pct(x, width=9):
-    return f"{x:>{width}.1f}%" if x is not None else " " * (width - 1) + "-"
 
 
 def build_report(conn, run_id):
@@ -81,20 +76,7 @@ def build_report(conn, run_id):
         "exposure": metrics.exposure_pct(total_hold_days, total_span_days),
     }
 
-    by_reason = {}
-    for t in trades:
-        by_reason.setdefault(t["exit_reason"], []).append(t["ret_pct"])
-    reason_rows = []
-    for reason, rets in sorted(by_reason.items(), key=lambda kv: -len(kv[1])):
-        n = len(rets)
-        wins = sum(1 for x in rets if x > 0)
-        reason_rows.append({
-            "reason": reason,
-            "n": n,
-            "win_rate": wins / n * 100,
-            "mean": sum(rets) / n,
-            "median": statistics.median(rets),
-        })
+    reason_rows = metrics.exit_reason_breakdown(trades)
 
     return {"per_code": per_code, "summary": summary, "by_reason": reason_rows}
 
@@ -104,8 +86,8 @@ def print_report(report):
     for r in report["per_code"]:
         mark = "*" if r["beat"] else ""
         print(
-            f"{r['code']:<8}{_fmt_pct(r['total_return'])}{_fmt_pct(r['buy_hold_return'])}"
-            f"{_fmt_pct(r['exposure'])}  {mark}"
+            f"{r['code']:<8}{metrics.fmt_pct(r['total_return'])}{metrics.fmt_pct(r['buy_hold_return'])}"
+            f"{metrics.fmt_pct(r['exposure'])}  {mark}"
         )
 
     s = report["summary"]
@@ -116,12 +98,7 @@ def print_report(report):
     print(f"exposure {s['exposure']:.1f}%")
 
     print()
-    print(f"{'exit_reason':<16}{'n':>6}{'win':>8}{'mean':>10}{'median':>10}")
-    for row in report["by_reason"]:
-        print(
-            f"{row['reason']:<16}{row['n']:>6}{row['win_rate']:>7.1f}%"
-            f"{row['mean']:>9.2f}%{row['median']:>9.2f}%"
-        )
+    metrics.print_exit_reason_table(report["by_reason"])
 
 
 def main():
