@@ -226,7 +226,7 @@ def resolve_adjustment_actions(code, market, bars, twse_events):
     before this function existed) -- a caller relying solely on Yahoo (no
     TWSE coverage for this code) needs this to tell "confirmed no
     adjustment" apart from "couldn't check," see
-    scripts/run_factor_backtest.py's _augment_bars_with_adj_factor()."""
+    scripts/run_factor_backtest.py's augment_bars_with_adj_factor()."""
     bar_dates = [b["date"] for b in bars]
     yahoo_adj_close = fetch_yahoo_adj_close(code, min(bar_dates))
     yahoo_ratio_series = compute_yahoo_ratio_series(bars, yahoo_adj_close)

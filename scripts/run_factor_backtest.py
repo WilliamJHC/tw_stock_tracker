@@ -21,11 +21,11 @@ resumable -- rerun the same command and already-fetched codes are skipped.
 Phase 6a (docs/https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md)
 adds one more request per surviving code: a Yahoo Adj Close pull, ratioed
 against this module's own FinMind raw close, to stamp a "c_adj" key onto
-every bar (see _augment_bars_with_adj_factor()) -- Yahoo-ratio only, no TWSE
+every bar (see augment_bars_with_adj_factor()) -- Yahoo-ratio only, no TWSE
 table, no backtest.db write. finlab_factors.momentum_pct() reads c_adj when
 present. Best-effort: a code where the Yahoo pull fails, or where the
 detected steps fail adjust.py's invariant checks, just keeps raw close for
-that code (see _augment_bars_with_adj_factor()'s docstring) rather than
+that code (see augment_bars_with_adj_factor()'s docstring) rather than
 aborting the run.
 
 Phase 6b adds one more Stage-2 request per surviving code (get_per_pbr()) --
@@ -66,11 +66,15 @@ FINMIND_HOURLY_LIMIT = 600
 RATE_LIMIT_BUFFER = 550  # stay under the real cap with headroom for the app's own calls
 
 
-class _RateLimiter:
+class RateLimiter:
     """Leaky-bucket over a rolling 1h window, tracked by wall-clock request
     timestamps. Sleeps just enough to keep the count under
     RATE_LIMIT_BUFFER -- avoids _finmind()'s fail-fast-on-429 path (see
-    data_sources.py's comment on why 429 isn't retried)."""
+    data_sources.py's comment on why 429 isn't retried).
+
+    Public interface: also used directly by scripts/update_universe_bars.py
+    (import run_factor_backtest as rfb) -- see that script's module
+    docstring for why the two scripts must stay in sync (8a504f0)."""
 
     def __init__(self, limit=RATE_LIMIT_BUFFER, window=3600):
         self.limit = limit
@@ -88,7 +92,8 @@ class _RateLimiter:
         self.timestamps.append(time.monotonic())
 
 
-def _code_cache_path(code):
+def code_cache_path(code):
+    """Public interface: also used directly by scripts/update_universe_bars.py."""
     return os.path.join(RUN_CACHE_DIR, f"{code}.json")
 
 
@@ -98,7 +103,7 @@ def _load_code_cache(code, days):
     a longer/shorter --days would silently reuse bars/fundamentals (or a
     cached "skip" verdict) computed for the wrong history length."""
     try:
-        with open(_code_cache_path(code), encoding="utf-8") as f:
+        with open(code_cache_path(code), encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError):
         return None
@@ -107,9 +112,10 @@ def _load_code_cache(code, days):
     return data
 
 
-def _save_code_cache(code, data):
+def save_code_cache(code, data):
+    """Public interface: also used directly by scripts/update_universe_bars.py."""
     os.makedirs(RUN_CACHE_DIR, exist_ok=True)
-    with open(_code_cache_path(code), "w", encoding="utf-8") as f:
+    with open(code_cache_path(code), "w", encoding="utf-8") as f:
         json.dump(data, f)
 
 
@@ -126,8 +132,9 @@ def _load_universe(name):
     raise ValueError(f"unknown universe: {name!r}")
 
 
-def _daily_to_bars(daily):
-    """data_sources.get_daily()'s {t,o,h,l,c,v} -> [{date,c,v}, ...] ascending."""
+def daily_to_bars(daily):
+    """data_sources.get_daily()'s {t,o,h,l,c,v} -> [{date,c,v}, ...] ascending.
+    Public interface: also used directly by scripts/update_universe_bars.py."""
     import datetime as dt
     return [
         {"date": dt.datetime.fromtimestamp(daily["t"][i]).date().isoformat(), "c": daily["c"][i], "v": daily["v"][i]}
@@ -135,14 +142,16 @@ def _daily_to_bars(daily):
     ]
 
 
-def _fetch_twse_table(years, codes):
+def fetch_twse_table(years, codes):
     """One TWSE request per calendar year for the WHOLE market's corporate
     actions (baf.fetch_twse_year()), filtered down to `codes`. O(years)
     requests, not O(codes) -- unlike every other per-code fetch in this
     module, so this is cheap even at full-universe scale. Not subject to
-    the FinMind _RateLimiter (this hits TWSE's own site, a separate quota).
+    the FinMind RateLimiter (this hits TWSE's own site, a separate quota).
     Returns baf.parse_twse_rows()'s {code: [{date, pre_close, ref_price,
-    ratio, kind}, ...]} shape, ready for baf.resolve_adjustment_actions()."""
+    ratio, kind}, ...]} shape, ready for baf.resolve_adjustment_actions().
+
+    Public interface: also used directly by scripts/update_universe_bars.py."""
     all_rows = []
     for year in years:
         rows = baf.fetch_twse_year(year)
@@ -152,11 +161,16 @@ def _fetch_twse_table(years, codes):
     return baf.parse_twse_rows(all_rows, set(codes))
 
 
-def _augment_bars_with_adj_factor(code, bars, limiter, market, twse_events):
-    """bars (ascending [{date,c,v}]) -> same-length list with a "c_adj" key
+def augment_bars_with_adj_factor(code, bars, limiter, market, twse_events):
+    """Public interface: also used directly by scripts/update_universe_bars.py
+    (import run_factor_backtest as rfb) -- its exact 5-arg call shape must
+    stay in sync with this signature, see that script's module docstring
+    (commit 8a504f0: a prior 3-vs-5-arg drift crashed the weekly refresh).
+
+    bars (ascending [{date,c,v}]) -> same-length list with a "c_adj" key
     added to every entry -- a TRUE total-return-style back-adjustment (both
     splits AND cash/stock dividends), combining `twse_events` (this code's
-    rows from _fetch_twse_table(), authoritative for TWSE-listed codes) with
+    rows from fetch_twse_table(), authoritative for TWSE-listed codes) with
     a Yahoo-ratio cross-check via baf.resolve_adjustment_actions() -- the
     same combine-and-validate logic scripts/build_adj_factors.py uses for
     the watchlist/backtest.db pipeline, applied here without a DB write.
@@ -217,8 +231,8 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
     keys (see the "per_pbr_series"/c_adj backfill comments above).
 
     market_by_code/twse_by_code: main()'s ds.get_universe()-derived market
-    lookup and _fetch_twse_table()'s market-wide dividend/split events,
-    threaded through to _augment_bars_with_adj_factor() so it can combine
+    lookup and fetch_twse_table()'s market-wide dividend/split events,
+    threaded through to augment_bars_with_adj_factor() so it can combine
     TWSE's authoritative table with the per-code Yahoo cross-check."""
     universe_data = {}
     n = len(codes)
@@ -238,7 +252,7 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
             # so this only happens once per code.
             if bars and "c_adj" not in bars[0]:
                 print(f"[{i + 1}/{n}] {code}（快取補算 adj_factor）")
-                bars = _augment_bars_with_adj_factor(code, bars, limiter, market, twse_events)
+                bars = augment_bars_with_adj_factor(code, bars, limiter, market, twse_events)
                 cached = {**cached, "bars": bars}
                 cache_dirty = True
             # per_pbr_series is a standalone 1-request fetch (unlike margin
@@ -251,7 +265,7 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
                 cached = {**cached, "per_pbr_series": ff.value_series(per_pbr_rows or [])}
                 cache_dirty = True
             if cache_dirty:
-                _save_code_cache(code, cached)
+                save_code_cache(code, cached)
             universe_data[code] = {
                 "bars": bars,
                 "bar_dates": [b["date"] for b in bars],
@@ -275,16 +289,16 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
             daily = ds.get_daily(code, days=days, cache=False)
         except Exception as e:
             print(f"  daily FAILED: {e}")
-            _save_code_cache(code, {"skip": True, "days": days})
+            save_code_cache(code, {"skip": True, "days": days})
             continue
-        bars = _daily_to_bars(daily)
+        bars = daily_to_bars(daily)
 
         if not _passed_liquidity_ever(bars):
             print("  never liquid -- skipping fundamentals fetch")
-            _save_code_cache(code, {"skip": True, "days": days})
+            save_code_cache(code, {"skip": True, "days": days})
             continue
 
-        bars = _augment_bars_with_adj_factor(code, bars, limiter, market, twse_events)
+        bars = augment_bars_with_adj_factor(code, bars, limiter, market, twse_events)
 
         limiter.before_request()
         revenue_rows = ds.get_monthly_revenue(code, days=days, cache=False)
@@ -298,7 +312,7 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
         roe_series_ = ff.roe_series(financials_rows or [])
         if not revenue_series or not roe_series_:
             print("  insufficient revenue/financials history -- skipping")
-            _save_code_cache(code, {"skip": True, "days": days})
+            save_code_cache(code, {"skip": True, "days": days})
             continue
 
         # Zero extra requests -- financials_rows was already fetched above
@@ -308,7 +322,7 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
         operating_margin_trend = ff.operating_margin_trend_series(financials_rows or [])
         value_series_ = ff.value_series(per_pbr_rows or [])
 
-        _save_code_cache(code, {
+        save_code_cache(code, {
             "bars": bars, "revenue_series": revenue_series, "roe_series": roe_series_,
             "per_pbr_series": value_series_, "gross_margin_trend_series": gross_margin_trend,
             "operating_margin_trend_series": operating_margin_trend, "days": days,
@@ -342,9 +356,9 @@ def main():
     start_year = (dt.date.today() - dt.timedelta(days=args.days)).year
     years = range(start_year, dt.date.today().year + 1)
     print(f"抓取 TWSE 除權息表（市場層級，{years[0]}-{years[-1]}，共 {len(years)} 個 request）...")
-    twse_by_code = _fetch_twse_table(years, codes)
+    twse_by_code = fetch_twse_table(years, codes)
 
-    limiter = _RateLimiter()
+    limiter = RateLimiter()
     universe_data = fetch_universe_data(codes, args.days, limiter, market_by_code, twse_by_code)
     print(f"\n{len(universe_data)}/{len(codes)} codes usable after liquidity + fundamentals filters")
 

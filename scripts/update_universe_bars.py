@@ -11,14 +11,14 @@ For every code already cached under cache/factor_run/ (skipping
 filters and stay excluded), pulls a small `LOOKBACK_DAYS`-day trailing
 window via data_sources.get_daily(), merges it into the existing `bars`
 array by date (dedup, new fetch wins on overlap), then re-runs
-run_factor_backtest.py's _augment_bars_with_adj_factor() over the FULL
+run_factor_backtest.py's augment_bars_with_adj_factor() over the FULL
 merged history to refresh every bar's "c_adj" key -- that function
 recomputes from bars[0]'s date every call (it is NOT incremental), so
 this is one extra Yahoo request per code, same shape as a first-time
 augment.
 
 Cost note (2026-08-24 decision -- see docs/dev_plan_recommendations.md
-Phase 0): _augment_bars_with_adj_factor() shares the SAME _RateLimiter
+Phase 0): augment_bars_with_adj_factor() shares the SAME RateLimiter
 instance as the get_daily() call (mirrors fetch_universe_data()'s own
 call pattern in run_factor_backtest.py), so each LIVE code (one with
 actual bars, i.e. not a {"skip": true} entry -- those cost ~0, no
@@ -97,7 +97,7 @@ def _split_half(codes, half):
 
 def _twse_years_for(codes):
     """Earliest bars[0]["date"] across live (non-skip) cached codes -> the
-    year range _fetch_twse_table() must cover so _augment_bars_with_adj_factor()'s
+    year range fetch_twse_table() must cover so augment_bars_with_adj_factor()'s
     FULL-history recompute (see module docstring: it is NOT incremental, it
     recomputes c_adj from bars[0] every call) has TWSE dividend/split
     coverage back to the oldest bar any code holds. LOOKBACK_DAYS (30d) is
@@ -109,7 +109,7 @@ def _twse_years_for(codes):
     earliest = None
     for code in codes:
         try:
-            with open(rfb._code_cache_path(code), encoding="utf-8") as f:
+            with open(rfb.code_cache_path(code), encoding="utf-8") as f:
                 cached = json.load(f)
         except (OSError, ValueError):
             continue
@@ -141,7 +141,7 @@ def update_code(code, limiter, dry_run, market, twse_events):
     Never raises -- a per-code failure is best-effort, matching
     fetch_universe_data()'s pattern, so one bad code can't kill the run."""
     try:
-        with open(rfb._code_cache_path(code), encoding="utf-8") as f:
+        with open(rfb.code_cache_path(code), encoding="utf-8") as f:
             cached = json.load(f)
     except (OSError, ValueError) as e:
         return {"status": "failed", "detail": f"cache read error: {e}"}
@@ -158,11 +158,11 @@ def update_code(code, limiter, dry_run, market, twse_events):
         daily = ds.get_daily(code, days=LOOKBACK_DAYS, cache=False)
     except Exception as e:
         return {"status": "failed", "detail": f"get_daily error: {e}"}
-    new_bars = rfb._daily_to_bars(daily)
+    new_bars = rfb.daily_to_bars(daily)
 
     merged = _merge_bars(existing_bars, new_bars)
     try:
-        augmented = rfb._augment_bars_with_adj_factor(code, merged, limiter, market, twse_events)
+        augmented = rfb.augment_bars_with_adj_factor(code, merged, limiter, market, twse_events)
     except Exception as e:
         return {"status": "failed", "detail": f"augment error: {e}"}
     # Check the NEWEST bar, not the oldest: _merge_bars() strips c_adj only
@@ -181,7 +181,7 @@ def update_code(code, limiter, dry_run, market, twse_events):
         return {"status": "updated", "detail": "[dry-run] " + detail}
 
     cached["bars"] = augmented
-    rfb._save_code_cache(code, cached)
+    rfb.save_code_cache(code, cached)
     return {"status": "updated", "detail": detail}
 
 
@@ -202,9 +202,9 @@ def main():
     market_by_code = {u["code"]: u["market"] for u in universe}
     years = _twse_years_for(codes)
     print(f"抓取 TWSE 除權息表（市場層級，{years[0]}-{years[-1]}，共 {len(years)} 個 request）...")
-    twse_by_code = rfb._fetch_twse_table(years, codes)
+    twse_by_code = rfb.fetch_twse_table(years, codes)
 
-    limiter = rfb._RateLimiter()
+    limiter = rfb.RateLimiter()
     counts = {"updated": 0, "skipped": 0, "failed": 0}
     failures = []
     for i, code in enumerate(codes):
