@@ -13,6 +13,7 @@ re-running an import or a replay is always safe. Uses stdlib `sqlite3` only
 Column note: `foreign` is a SQL reserved word, so the foreign-investor net
 column is named `foreign_net` throughout.
 """
+import json
 import os
 import sqlite3
 
@@ -558,3 +559,14 @@ def set_meta(conn, key, value):
 def get_meta(conn, key, default=None):
     row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else default
+
+
+def get_meta_json(conn, key, default=None):
+    """get_meta() + json.loads() for a meta value stored as a JSON blob
+    (e.g. active_ranking_weights, read by both scripts/run_ranking_optimize.py
+    and scripts/run_daily_recommendations.py -- each used to carry its own
+    near-identical read-and-fallback helper). `default` is returned as-is,
+    NOT JSON-decoded, when the key is unset -- pass an already-Python-shaped
+    fallback (e.g. a dict), not a JSON string."""
+    raw = get_meta(conn, key)
+    return json.loads(raw) if raw else default

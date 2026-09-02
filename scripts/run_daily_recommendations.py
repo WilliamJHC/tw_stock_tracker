@@ -14,10 +14,11 @@ data doesn't have (see Phase 0's cost note on why the cache can be up to
 
 Each run:
   1. report_factor_ic.load_cached_universe() (no network).
-  2. Reads meta.active_ranking_weights (fallback finlab_factors.RANKING_WEIGHTS
-     if unset) -- same _read_weights() idiom as run_ranking_optimize.py, so
-     this ranking always reflects whatever weights that job most recently
-     adopted, never a stale local copy.
+  2. Reads meta.active_ranking_weights via db.get_meta_json() (fallback
+     finlab_factors.RANKING_WEIGHTS if unset) -- same shared read path
+     run_ranking_optimize.py's writer uses, so this ranking always reflects
+     whatever weights that job most recently adopted, never a stale local
+     copy.
   3. finlab_factors.composite_scores()/factor_ranks()/top_n() over the
      cached universe, "as of" the latest bar date present anywhere in the
      cache.
@@ -59,11 +60,6 @@ META_KEY = "daily_recommendations"
 ACTIVE_META_KEY = "active_ranking_weights"
 
 
-def _read_weights(conn):
-    raw = db.get_meta(conn, ACTIVE_META_KEY)
-    return json.loads(raw) if raw else dict(ff.RANKING_WEIGHTS)
-
-
 def _latest_bar_date(universe_data):
     """The single latest bar date seen anywhere across the cached universe
     -- this IS "as_of" (see module docstring on why it's the cache's date,
@@ -79,7 +75,7 @@ def build_recommendations(conn, universe_data, top_n):
     if as_of is None:
         return None
 
-    weights = _read_weights(conn)
+    weights = db.get_meta_json(conn, ACTIVE_META_KEY, default=dict(ff.RANKING_WEIGHTS))
     # factor_ranks() computed once and reused by composite_scores() below --
     # it's the full liquidity-filter + percentile-rank pass over the whole
     # cached universe, no reason to pay for it twice on every daily run.

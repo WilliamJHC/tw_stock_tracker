@@ -68,18 +68,13 @@ PREVIOUS_META_KEY = "previous_ranking_weights"
 DEFAULT_HORIZON = 20  # matches finlab_factors' "hold ~1 month" rebalance cadence
 
 
-def _read_weights(conn, key, fallback=None):
-    raw = db.get_meta(conn, key)
-    return json.loads(raw) if raw else fallback
-
-
 def build_candidates(conn, universe_data, horizon=DEFAULT_HORIZON):
     """{name: weights_dict} for this cycle's sweep_ranking_weights_walk_forward()
     call, plus the raw factor_result (for logging/inspection) -- "active" is
     always present, "previous"/"ic_suggested" only when real. Returns
     (candidates, factor_result, has_previous)."""
-    active = _read_weights(conn, ACTIVE_META_KEY, fallback=dict(ff.RANKING_WEIGHTS))
-    previous = _read_weights(conn, PREVIOUS_META_KEY)
+    active = db.get_meta_json(conn, ACTIVE_META_KEY, default=dict(ff.RANKING_WEIGHTS))
+    previous = db.get_meta_json(conn, PREVIOUS_META_KEY)
 
     dates = fe.rebalance_dates(universe_data)
     factor_result = fe.evaluate_factors(universe_data, dates=dates)

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Unit tests for db.py's SQLite data-access layer. Each test opens its own
 connection against a pytest tmp_path file, never the real data/backtest.db."""
+import json
 import os
 import sys
 
@@ -291,4 +292,14 @@ def test_meta_round_trip_and_default(tmp_path):
     assert db.get_meta(conn, "missing_key", default="fallback") == "fallback"
     db.set_meta(conn, "last_run_at", "2025-01-01T00:00:00")  # overwrite, not duplicate
     assert db.get_meta(conn, "last_run_at") == "2025-01-01T00:00:00"
+    conn.close()
+
+
+def test_get_meta_json_round_trips_and_falls_back(tmp_path):
+    conn = _conn(tmp_path)
+    db.set_meta(conn, "active_ranking_weights", json.dumps({"revenue": 0.4, "roe": 0.3, "momentum": 0.3}))
+    assert db.get_meta_json(conn, "active_ranking_weights") == {"revenue": 0.4, "roe": 0.3, "momentum": 0.3}
+    assert db.get_meta_json(conn, "missing_key") is None
+    fallback = {"revenue": 1 / 3, "roe": 1 / 3, "momentum": 1 / 3}
+    assert db.get_meta_json(conn, "missing_key", default=fallback) == fallback
     conn.close()
