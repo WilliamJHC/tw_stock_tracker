@@ -5,7 +5,22 @@ pending candidate (docs/adr/0003-manual-review-for-strategy-logic-search.md)
 winner; a person reads the Telegram summary/printed report and runs this
 script to either apply it or throw it away.
 
-Usage:
+>>> Run this via the "apply_strategy_candidate" GitHub Actions workflow
+>>> (.github/workflows/apply_strategy_candidate.yml, workflow_dispatch --
+>>> trigger it from the repo's Actions tab, or `gh workflow run
+>>> apply_strategy_candidate.yml -f run_id=... -f reject=true`), NOT by
+>>> running this file directly on your own machine. db.connect() below
+>>> (src/db.py) opens a local file when no path is given -- on a
+>>> contributor's laptop that's an unrelated, likely brand-new sqlite file,
+>>> not the real backtest.db every scheduled pipeline reads/writes, which
+>>> only exists inside this repo's backtest-db-state actions/cache lineage.
+>>> A local run prints "已套用候選 ..." and looks like it worked while the
+>>> change never reaches production, no error either way. The workflow
+>>> restores/saves that same cache lineage, so it's the only place this
+>>> script's writes actually matter.
+
+Usage (inside the workflow above; direct CLI shown for local testing
+against your own throwaway backtest.db only):
     python scripts/apply_strategy_candidate.py [--run-id RUN_ID] [--reject]
 
 --run-id: optional; if given, must match meta.pending_strategy_candidate's

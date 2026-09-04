@@ -648,13 +648,27 @@ def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, pur
                         - dt.timedelta(days=ROLLING_MOMENTUM_LOOKBACK_BUFFER_DAYS)).isoformat()
             sim_start = max(calendar[0], buffered)
         sliced = _slice_universe_by_date(universe_data, sim_start, test_end)
+        # One factor_ranks() memoization cache per FOLD, shared across this
+        # fold's `names` loop below -- every named candidate scores against
+        # the same `sliced` universe/extra_factors this fold, and
+        # finlab_factors.factor_ranks() doesn't depend on which candidate's
+        # weights are being tried, so without this cache the identical
+        # liquidity-filter + percentile-rank pass gets redone once per
+        # candidate at every rebalance date (see portfolio_backtest.
+        # simulate()'s ranks_cache docstring). Scoped to THIS fold, not
+        # shared across folds -- mode="rolling" slices `sliced` differently
+        # per fold (different sim_start), so a value cached under one
+        # fold's `sliced` could reflect a different lookback window than
+        # another fold's for the same date string; a fresh {} per fold
+        # avoids ever reusing a value computed against the wrong slice.
+        ranks_cache = {}
         fold_scores = {}
         fold_best_name, fold_best_score = None, float("-inf")
         for name in names:
             p = dict(sim_params or {})
             p["ranking_weights"] = candidates[name]
             p["extra_factors"] = extra_factors
-            result = pb.simulate(sliced, params=p)
+            result = pb.simulate(sliced, params=p, ranks_cache=ranks_cache)
             oos_points = [pt for pt in result["equity_curve"] if test_start <= pt["date"] <= test_end]
             score = None
             if len(oos_points) >= 2 and oos_points[0]["equity"]:

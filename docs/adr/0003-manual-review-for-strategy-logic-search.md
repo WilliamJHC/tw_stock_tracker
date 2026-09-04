@@ -14,6 +14,8 @@ ADR 0002 決定 `RANKING_WEIGHTS`（revenue/roe/momentum 三個既有因子的�
 
 **設人工審核關卡，不自動套用。** `scripts/run_strategy_search.py` 跑完整評估（train 段 purged walk-forward 搜尋 + test 段一次性驗證）後，只寫入 `meta.pending_strategy_candidate` 並發一則 Telegram 摘要，實際套用交給人工另外執行的 `scripts/apply_strategy_candidate.py`（`--reject` 可以捨棄待審候選）。
 
+**`apply_strategy_candidate.py` 必須透過 `.github/workflows/apply_strategy_candidate.yml`（`workflow_dispatch`）執行，不能在本機終端機直接跑。** 這是 2026-09-05 第二輪 `/code-review` 抓到的缺口：正式生效、`run_ranking_optimize.py`/`run_daily_recommendations.py` 實際讀寫的 `backtest.db`，只活在 GitHub Actions 的 `backtest-db-state` cache 裡，不是一個本機連得到的伺服器或共用檔案。`db.connect()` 沒給路徑時預設開一個本機的獨立 sqlite 檔——在自己電腦上跑這支腳本，寫的是一份跟排程無關的全新資料庫，`已套用候選 ...` 會照常印出來、看起來成功了，但套用結果永遠不會被任何排程讀到，而且沒有任何錯誤訊息。新增的 workflow 用同一套 `backtest-db-cache` composite action 還原/寫回同一份 cache lineage，讓「人工核准」這個動作真的能落到排程實際在用的那份資料庫上。
+
 **兩條排程管線（既有的 RANKING_WEIGHTS 自動優化、這次新增的策略邏輯搜尋）共用同一組 `meta.active_ranking_weights`/`previous_ranking_weights` key**，而不是切成兩組獨立 key，並新增 `meta.active_weights_source`（`"strategy_search"` 或 `"ranking_optimize"`）協調兩者：
 
 - `scripts/apply_strategy_candidate.py` 套用時把 `active_weights_source` 設成 `"strategy_search"`。
@@ -46,7 +48,7 @@ ADR 0002 的理由是「DSR/PBO 已經是把主觀判斷規則化的機制，人
 - `src/portfolio_backtest.py`：`PORTFOLIO_PARAMS`/`simulate()` 新增 `extra_factors` 透傳。
 - `src/optimize.py`：新增 `train_test_split_by_calendar()`（策略搜尋的 train/test 切分）、`previous_candidate_eligible()`（本文件的協調邏輯）；`sweep_ranking_weights_walk_forward()` 新增 `extra_factors` 參數。`resolve_ranking_weights_action()`/`evaluate_decision()`（ADR 0002 的門檻本身）不變。
 - `src/db.py`：新增 `active_weights_source`、`pending_strategy_candidate` 兩個 `meta` key，通用 key-value 表，不需要 schema migration。
-- 新增 `scripts/run_strategy_search.py`（排程用，只產生報告）、`scripts/apply_strategy_candidate.py`（人工執行套用/`--reject`）、`.github/workflows/strategy_search.yml`（雙週排程，跟 `optimize.yml` 錯開一小時，共用 `backtest-db-state` concurrency group）。
+- 新增 `scripts/run_strategy_search.py`（排程用，只產生報告）、`scripts/apply_strategy_candidate.py`（人工執行套用/`--reject`，須透過下面的 workflow 執行）、`.github/workflows/strategy_search.yml`（雙週排程，20:00 UTC，跟 `optimize.yml`(22:00)/`daily_recommendations.yml`(23:00) 都錯開，共用 `backtest-db-state` concurrency group）、`.github/workflows/apply_strategy_candidate.yml`（`workflow_dispatch` 專用，人工到 Actions 頁面手動觸發，同樣共用 `backtest-db-state`）。
 - `scripts/run_daily_recommendations.py`：`factor_ranks()`/`composite_scores()` 呼叫補上 `extra_factors=ff.EXTRA_FACTOR_FUNCS`，否則套用後的 `ma_cross`/`vol_price_div` 權重會靜默失效（`composite_scores()` 對沒被算過的 key 直接跳過，不報錯）。
 - `scripts/run_ranking_optimize.py`：`build_candidates()` 讀 `active_weights_source`、改用 `previous_candidate_eligible()` 判斷要不要納入 `previous`；`apply_action()` 每輪跑完無條件把來源寫回 `"ranking_optimize"`；`sweep_ranking_weights_walk_forward()` 呼叫改用 `finlab_factors.used_extra_factors()`（只在候選真的用到新因子時才啟用，見下一條）。ADR 0002 記載的 DSR/PBO/高原門檻、`resolve_ranking_weights_action()` 本身不變。
 - `src/finlab_factors.py`：新增 `used_extra_factors()`，避免 `run_daily_recommendations.py`／`run_ranking_optimize.py` 在候選權重根本沒用到新因子時，也被新因子「算不出來就排除」的篩選悄悄縮小可用股票池；`REQUIRED_FACTOR_KEYS` 供 `apply_strategy_candidate.py` 套用前驗證權重字典完整性。

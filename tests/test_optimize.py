@@ -485,9 +485,9 @@ def test_sweep_ranking_weights_walk_forward_passes_sim_params_through():
     captured = []
     orig_simulate = pb.simulate
 
-    def spy(universe_data, params=None):
+    def spy(universe_data, params=None, ranks_cache=None):
         captured.append(dict(params or {}))
-        return orig_simulate(universe_data, params=params)
+        return orig_simulate(universe_data, params=params, ranks_cache=ranks_cache)
 
     import unittest.mock as mock
     with mock.patch("optimize.pb.simulate", side_effect=spy):
@@ -498,3 +498,35 @@ def test_sweep_ranking_weights_walk_forward_passes_sim_params_through():
     assert captured
     assert all(p.get("top_n") == 2 for p in captured)
     assert all(p.get("ranking_weights") == {"revenue": 1, "roe": 0, "momentum": 0} for p in captured)
+
+
+def test_sweep_ranking_weights_walk_forward_shares_ranks_cache_across_candidates():
+    # finlab_factors.factor_ranks() doesn't depend on which named
+    # candidate's weights are being scored -- comparing N candidates over
+    # the same fold should call it once per (fold, rebalance date), not
+    # once per (fold, rebalance date, candidate). Without the per-fold
+    # ranks_cache portfolio_backtest.simulate() now threads through, the
+    # call count would scale with len(candidates); with it, adding a THIRD
+    # candidate identical in cost to the other two must not raise the call
+    # count at all (every rebalance date this fold already visited for the
+    # first two candidates is already cached).
+    import finlab_factors as ff
+    import unittest.mock as mock
+
+    universe = _ranking_universe(n_codes=4, days=500)
+    two_candidates = {
+        "a": {"revenue": 1, "roe": 0, "momentum": 0},
+        "b": {"revenue": 0, "roe": 1, "momentum": 0},
+    }
+    three_candidates = dict(two_candidates, c={"revenue": 0, "roe": 0, "momentum": 1})
+
+    with mock.patch("finlab_factors.factor_ranks", wraps=ff.factor_ranks) as spy:
+        opt.sweep_ranking_weights_walk_forward(universe, two_candidates, n_folds=2, purge_days=60)
+        two_candidate_calls = spy.call_count
+
+    with mock.patch("finlab_factors.factor_ranks", wraps=ff.factor_ranks) as spy:
+        opt.sweep_ranking_weights_walk_forward(universe, three_candidates, n_folds=2, purge_days=60)
+        three_candidate_calls = spy.call_count
+
+    assert two_candidate_calls > 0
+    assert three_candidate_calls == two_candidate_calls

@@ -106,12 +106,30 @@ def _mark_to_market(cash, holdings, prices, bar_dates, date):
     return value
 
 
-def simulate(universe_data, params=None):
+def simulate(universe_data, params=None, ranks_cache=None):
     """Monthly-rebalanced, equal-weight top-N portfolio backtest.
 
     universe_data: {code: {"bars": [{date,c,v,...}, ...], "bar_dates": [...],
     "revenue_series": [...], "roe_series": [...]}} -- same shape
     finlab_factors.composite_scores() expects.
+
+    ranks_cache: optional {date: factor_ranks(universe_data, date,
+    extra_factors=...) result} dict, mutated in place as a memoization
+    cache. finlab_factors.factor_ranks() doesn't depend on
+    params["ranking_weights"] at all (only on universe_data/date/
+    extra_factors) -- src/optimize.py's sweep_ranking_weights_walk_forward()
+    calls this function once per NAMED CANDIDATE per fold, all sharing the
+    same universe_data/extra_factors for that fold, so without this cache
+    every candidate independently recomputes the identical liquidity-filter
+    + percentile-rank pass at every rebalance date. A caller passes one
+    shared dict across those calls to reuse it; None (the default) disables
+    caching entirely, unchanged behavior for every other caller (this
+    module's own tests, scripts/report_backtest.py, etc.) and safe for a
+    caller whose universe_data/extra_factors DIFFER between simulate()
+    calls (a shared cache would silently be wrong there -- see
+    sweep_ranking_weights_walk_forward()'s per-fold scoping, which creates
+    a fresh cache per fold rather than reusing one across folds, since
+    "rolling" mode slices universe_data differently per fold).
 
     Returns {equity_curve: [{date, equity}], trades: [...], summary: {...}}.
     summary is {} if there's no usable trading calendar at all.
@@ -140,7 +158,15 @@ def simulate(universe_data, params=None):
 
     for date in calendar:
         if date in rebalance_dates:
-            scores = ff.composite_scores(universe_data, date, weights=p["ranking_weights"], extra_factors=p.get("extra_factors"))
+            ranks = None
+            if ranks_cache is not None:
+                ranks = ranks_cache.get(date)
+                if ranks is None:
+                    ranks = ff.factor_ranks(universe_data, date, extra_factors=p.get("extra_factors"))
+                    ranks_cache[date] = ranks
+            scores = ff.composite_scores(
+                universe_data, date, weights=p["ranking_weights"], ranks=ranks, extra_factors=p.get("extra_factors")
+            )
             target_codes = set(ff.top_n(scores, p["top_n"]))
 
             for code in [c for c in holdings if c not in target_codes]:

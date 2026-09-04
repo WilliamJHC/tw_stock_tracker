@@ -258,8 +258,15 @@ def main():
         f"[策略搜尋] train 段候選 {winner} 勝出並通過 DSR/PBO/高原門檻\n"
         f"train: dsr={result['dsr']} pbo={result['pbo']} plateau={result['plateau']}\n"
         f"test(vs baseline): {winner}={winner_test_summary} baseline={baseline_test_summary}\n"
-        f"人工確認後執行 `python scripts/apply_strategy_candidate.py --run-id {run_id}` 套用，"
-        f"或 `python scripts/apply_strategy_candidate.py --run-id {run_id} --reject` 捨棄"
+        # apply_strategy_candidate.py must run via its own GitHub Actions
+        # workflow (workflow_dispatch), not as a raw local command -- a
+        # local run would silently write to an unrelated throwaway sqlite
+        # file instead of the real backtest.db every scheduled pipeline
+        # reads (see that script's own docstring). Telling a human to run
+        # `python scripts/apply_strategy_candidate.py ...` here would send
+        # them straight into that trap.
+        f"人工確認後到 GitHub Actions 手動觸發 apply_strategy_candidate workflow"
+        f"（run_id={run_id}），或勾選 reject 捨棄"
         f"{overwritten_note}"
     )
     print(message)

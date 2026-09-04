@@ -73,6 +73,57 @@ def test_simulate_equity_grows_when_selected_names_trend_up():
     assert result["summary"]["cagr_pct"] > 0
 
 
+def test_simulate_ranks_cache_none_matches_default_results():
+    # ranks_cache=None (the default) must produce byte-identical results to
+    # omitting it -- src/optimize.py's sweep_ranking_weights_walk_forward()
+    # is the only caller that passes a real cache; every other caller
+    # (this module's own callers, scripts/report_backtest.py) must see
+    # unchanged behavior.
+    universe = {"A": _entry(10, 2.0, days=200), "B": _entry(100, 0.01, days=200)}
+    without_cache = pb.simulate(universe, params={"top_n": 1})
+    with_explicit_none = pb.simulate(universe, params={"top_n": 1}, ranks_cache=None)
+    assert with_explicit_none == without_cache
+
+
+def test_simulate_ranks_cache_does_not_change_results_when_reused():
+    universe = {"A": _entry(10, 2.0, days=200), "B": _entry(100, 0.01, days=200)}
+    without_cache = pb.simulate(universe, params={"top_n": 1})
+    cache = {}
+    with_cache = pb.simulate(universe, params={"top_n": 1}, ranks_cache=cache)
+    assert with_cache["trades"] == without_cache["trades"]
+    assert with_cache["equity_curve"] == without_cache["equity_curve"]
+    assert cache  # actually got populated
+
+
+def test_simulate_ranks_cache_avoids_recomputing_factor_ranks():
+    # Two simulate() calls sharing one cache dict over the SAME universe
+    # must only compute factor_ranks() once per rebalance date total, not
+    # once per call -- this is the whole point of threading ranks_cache
+    # through (src/optimize.py's sweep_ranking_weights_walk_forward() calls
+    # simulate() once per named candidate per fold, all sharing one cache).
+    universe = {"A": _entry(100, 0.30, days=90), "B": _entry(80, 0.20, days=90)}
+    cache = {}
+    with mock.patch("finlab_factors.factor_ranks", wraps=ff.factor_ranks) as spy:
+        pb.simulate(universe, params={"top_n": 2}, ranks_cache=cache)
+        first_call_count = spy.call_count
+        pb.simulate(universe, params={"top_n": 2}, ranks_cache=cache)
+        second_call_count = spy.call_count
+    assert first_call_count > 0
+    assert second_call_count == first_call_count  # second call reused every entry
+
+
+def test_simulate_ranks_cache_seeded_entry_is_actually_consulted():
+    # Stronger than a call-count spy: seed the cache with a deliberately
+    # empty ranks dict for the very first rebalance date and confirm
+    # simulate() actually used it (no code scoreable that day) instead of
+    # silently recomputing the real ranks and ignoring the seeded value.
+    universe = {"A": _entry(100, 0.30, days=60), "B": _entry(80, 0.20, days=60)}
+    first_date = universe["A"]["bar_dates"][0]
+    cache = {first_date: {}}
+    result = pb.simulate(universe, params={"top_n": 2}, ranks_cache=cache)
+    assert all(t["date"] != first_date for t in result["trades"])
+
+
 def test_simulate_prices_pnl_off_c_adj_when_present():
     # Raw close never moves (no price-only return); c_adj rises steadily,
     # simulating a total-return series where the gain comes entirely from
