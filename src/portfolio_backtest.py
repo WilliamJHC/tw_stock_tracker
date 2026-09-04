@@ -58,6 +58,7 @@ PORTFOLIO_PARAMS = {
     "lot_size": 1000,  # whole-share-lot (張) rounding, see module docstring
     "slippage_pct": 0.1,  # one-way, see module docstring
     "ranking_weights": None,  # optional RANKING_WEIGHTS override, see finlab_factors.composite_scores()
+    "extra_factors": None,  # optional {name: fn(bars, idx)} override, see finlab_factors.composite_scores()
 }
 
 
@@ -139,7 +140,7 @@ def simulate(universe_data, params=None):
 
     for date in calendar:
         if date in rebalance_dates:
-            scores = ff.composite_scores(universe_data, date, weights=p["ranking_weights"])
+            scores = ff.composite_scores(universe_data, date, weights=p["ranking_weights"], extra_factors=p.get("extra_factors"))
             target_codes = set(ff.top_n(scores, p["top_n"]))
 
             for code in [c for c in holdings if c not in target_codes]:

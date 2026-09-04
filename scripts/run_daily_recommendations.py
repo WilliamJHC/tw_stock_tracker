@@ -21,7 +21,12 @@ Each run:
      copy.
   3. finlab_factors.composite_scores()/factor_ranks()/top_n() over the
      cached universe, "as of" the latest bar date present anywhere in the
-     cache.
+     cache. Both calls pass extra_factors=ff.EXTRA_FACTOR_FUNCS so that an
+     active_ranking_weights adopted via scripts/apply_strategy_candidate.py
+     (one that includes "ma_cross"/"vol_price_div") actually takes effect
+     here -- composite_scores() otherwise silently ignores a weight key
+     that was never computed (docs/adr/0003-manual-review-for-strategy-
+     logic-search.md).
   4. data_sources.get_universe(cache=True) for code->name (one cached
      request total, not per-code).
   5. Writes meta.daily_recommendations as JSON: {as_of, generated_at,
@@ -79,8 +84,8 @@ def build_recommendations(conn, universe_data, top_n):
     # factor_ranks() computed once and reused by composite_scores() below --
     # it's the full liquidity-filter + percentile-rank pass over the whole
     # cached universe, no reason to pay for it twice on every daily run.
-    ranks = ff.factor_ranks(universe_data, as_of)
-    scores = ff.composite_scores(universe_data, as_of, weights=weights, ranks=ranks)
+    ranks = ff.factor_ranks(universe_data, as_of, extra_factors=ff.EXTRA_FACTOR_FUNCS)
+    scores = ff.composite_scores(universe_data, as_of, weights=weights, ranks=ranks, extra_factors=ff.EXTRA_FACTOR_FUNCS)
     top_codes = ff.top_n(scores, top_n)
 
     universe = ds.get_universe(cache=True) or []

@@ -292,6 +292,89 @@ def momentum_pct(bars, idx, days=MOMENTUM_DAYS):
     return (_close(bars[idx]) - base) / base * 100
 
 
+def ma_cross_signal(bars, idx, short_window=5, long_window=20):
+    """Short-window vs long-window moving-average cross, as a signed percent
+    gap: (short_ma - long_ma) / long_ma * 100, using _close() (c_adj-first,
+    same convention as momentum_pct()). Positive = short MA above long MA
+    (recent price action running hotter than its own longer trend), higher
+    is "better" -- same "bigger number ranks higher" convention every other
+    factor in this module follows, so it drops straight into _pct_rank()/
+    composite_scores() unmodified.
+
+    Candidate factor for src/optimize.py's strategy-logic search (see
+    EXTRA_FACTOR_FUNCS below) -- reads bars/volume already present on every
+    universe_data entry, no extra fetch or cache-schema change needed
+    (unlike gross_margin_trend_series()/value_series(), which need a
+    separate {usable_date, value} series because of real disclosure-date
+    lag; a moving-average cross has no such lag).
+
+    None if idx has fewer than long_window bars of history before it
+    (inclusive), or if long_ma computes to 0 (division would be undefined)."""
+    if idx + 1 < long_window:
+        return None
+    short_ma = sum(_close(b) for b in bars[idx + 1 - short_window: idx + 1]) / short_window
+    long_ma = sum(_close(b) for b in bars[idx + 1 - long_window: idx + 1]) / long_window
+    if not long_ma:
+        return None
+    return (short_ma - long_ma) / long_ma * 100
+
+
+def volume_price_divergence(bars, idx, window=20):
+    """Price/volume-trend factor over a `window`-bar lookback, split into
+    two branches so a plain price decline and a "price up but volume
+    didn't confirm it" divergence don't collapse onto the same score range
+    (an earlier single-multiplication draft would have scored "price down,
+    volume down" the same as "price up, volume up" -- wrong for a long-only
+    selection factor):
+
+      price_trend_pct <= 0 (falling): score = price_trend_pct. Volume does
+      not participate -- a falling stock belongs near the bottom of the
+      ranking regardless of whether volume shrank alongside it.
+
+      price_trend_pct > 0 (rising): score = price_trend_pct +
+      volume_change_pct. Volume expansion adds to the score; volume
+      contraction (volume_change_pct negative -- the classic "price up,
+      volume didn't confirm" divergence) subtracts from it, but only ever
+      as an additive discount off a positive base, never reusing the
+      falling branch's formula.
+
+    price_trend_pct = window-bar percent return ending at bars[idx] (same
+    "days-bar return" shape as momentum_pct(), using _close()).
+    volume_change_pct = the latest `window`-bar average volume's percent
+    change versus the PRIOR `window`-bar average volume (the window
+    immediately before it) -- needs 2*window bars of history; None if
+    idx has fewer.
+
+    Same candidate-factor status as ma_cross_signal() above -- reads bars/
+    volume directly, no extra fetch/cache-schema change."""
+    if idx + 1 < 2 * window:
+        return None
+    base_price = _close(bars[idx - window])
+    if not base_price:
+        return None
+    price_trend_pct = (_close(bars[idx]) - base_price) / base_price * 100
+
+    recent_chunk = bars[idx + 1 - window: idx + 1]
+    prior_chunk = bars[idx + 1 - 2 * window: idx + 1 - window]
+    recent_avg_vol = sum(b["v"] for b in recent_chunk) / window
+    prior_avg_vol = sum(b["v"] for b in prior_chunk) / window
+
+    if price_trend_pct <= 0:
+        return price_trend_pct
+    if not prior_avg_vol:
+        # No prior volume to compare against -- a percent CHANGE is
+        # undefined (not "infinitely bullish"), so this bar can't be scored
+        # rather than guessing a value that would silently distort the
+        # ranking. Same "can't compute, return None" stance as this
+        # function's own insufficient-history branch above.
+        return None
+    volume_change_pct = (recent_avg_vol - prior_avg_vol) / prior_avg_vol * 100
+    return price_trend_pct + volume_change_pct
+
+
+EXTRA_FACTOR_FUNCS = {"ma_cross": ma_cross_signal, "vol_price_div": volume_price_divergence}
+
+
 def _pct_rank(values):
     """{code: number} -> {code: percentile in (0, 1]}, average-rank ties
     (matches pandas .rank(pct=True), which the original FinLab strategy
@@ -311,16 +394,29 @@ def _pct_rank(values):
     return ranks
 
 
-def factor_ranks(universe_data, date):
+def factor_ranks(universe_data, date, extra_factors=None):
     """universe_data/date: same shape as composite_scores() below. Returns
-    {code: {"revenue": pct, "roe": pct, "momentum": pct}} -- the per-factor
-    percentile ranks (see _pct_rank()) for every code that passes the
-    liquidity filter and has all three factors available as of `date`.
-    composite_scores() is a weighted sum of exactly these three numbers;
+    {code: {"revenue": pct, "roe": pct, "momentum": pct, ...}} -- the
+    per-factor percentile ranks (see _pct_rank()) for every code that
+    passes the liquidity filter and has all required factors available as
+    of `date`. composite_scores() is a weighted sum of these numbers;
     factored out into its own function so a caller that wants the
     per-factor breakdown (e.g. a recommendation card's "why this stock
     ranked" detail, scripts/run_daily_recommendations.py) doesn't have to
-    duplicate this filter+rank logic."""
+    duplicate this filter+rank logic.
+
+    extra_factors: optional {name: fn(bars, idx) -> float|None} dict (e.g.
+    EXTRA_FACTOR_FUNCS above) -- lets src/optimize.py's strategy-logic
+    search compare candidate factors that aren't part of the fixed
+    revenue/roe/momentum trio without this function growing a parallel
+    code path. None (the default) behaves exactly as before this
+    parameter existed: no extra keys computed, no extra filtering, output
+    unchanged bit-for-bit. When given, each code additionally needs every
+    extra_factors value to be non-None to survive the filter -- same "all
+    required factors present" rule the existing three already follow --
+    and each extra factor gets its own independent percentile rank, merged
+    into the per-code dict under its own key."""
+    extra_factors = extra_factors or {}
     raw = {}
     for code, d in universe_data.items():
         bars, bar_dates = d["bars"], d["bar_dates"]
@@ -332,7 +428,10 @@ def factor_ranks(universe_data, date):
         roe = _as_of(d["roe_series"], date, "roe_pct")
         if mom is None or yoy is None or roe is None:
             continue
-        raw[code] = {"momentum": mom, "yoy": yoy, "roe": roe}
+        extras = {name: fn(bars, idx) for name, fn in extra_factors.items()}
+        if any(v is None for v in extras.values()):
+            continue
+        raw[code] = {"momentum": mom, "yoy": yoy, "roe": roe, **extras}
 
     if not raw:
         return {}
@@ -340,34 +439,52 @@ def factor_ranks(universe_data, date):
     mom_rank = _pct_rank({c: v["momentum"] for c, v in raw.items()})
     yoy_rank = _pct_rank({c: v["yoy"] for c, v in raw.items()})
     roe_rank = _pct_rank({c: v["roe"] for c, v in raw.items()})
+    extra_ranks = {name: _pct_rank({c: v[name] for c, v in raw.items()}) for name in extra_factors}
     return {
-        code: {"revenue": yoy_rank[code], "roe": roe_rank[code], "momentum": mom_rank[code]}
+        code: {
+            "revenue": yoy_rank[code], "roe": roe_rank[code], "momentum": mom_rank[code],
+            **{name: extra_ranks[name][code] for name in extra_factors},
+        }
         for code in raw
     }
 
 
-def composite_scores(universe_data, date, weights=None, ranks=None):
+def composite_scores(universe_data, date, weights=None, ranks=None, extra_factors=None):
     """universe_data: {code: {"bars": [...], "bar_dates": [...],
     "revenue_series": [...], "roe_series": [...]}} (bar_dates = bars' date
     field pre-extracted, see _bar_index_on_or_before). Returns {code: score}
-    for codes that pass the liquidity filter and have all three factors
+    for codes that pass the liquidity filter and have all required factors
     available as of `date` -- percentile ranks are computed within this
     survivor set (filter, then rank) via factor_ranks() above, then
-    weighted-summed here.
+    weighted-summed here as sum(r[k] * w[k] for k in r if k in w): every
+    key `r` actually has a rank for AND `w` has a weight for contributes,
+    everything else is silently skipped (e.g. a "baseline" weights dict
+    with no "ma_cross" key just doesn't add an ma_cross term, no error).
+    weights=None/extra_factors=None reduces `r` to exactly the three
+    original keys, reproducing the pre-extra_factors sum bit-for-bit (same
+    revenue+roe+momentum order, since dicts preserve insertion order).
 
-    weights: optional {"revenue","roe","momentum"} override for the module-
-    level RANKING_WEIGHTS -- lets a caller compare candidate weightings
-    (e.g. src/optimize.py's sweep_ranking_weights_walk_forward(), Phase 5
-    applied to Phase 4's rank-IC-derived suggestions) without mutating
-    global state. None (the default) uses RANKING_WEIGHTS, unchanged
-    behavior for every existing caller.
+    weights: optional override for the module-level RANKING_WEIGHTS -- lets
+    a caller compare candidate weightings (e.g. src/optimize.py's
+    sweep_ranking_weights_walk_forward(), Phase 5 applied to Phase 4's
+    rank-IC-derived suggestions, and the strategy-logic search's named
+    ma_cross/vol_price_div candidates) without mutating global state. None
+    (the default) uses RANKING_WEIGHTS, unchanged behavior for every
+    existing caller.
 
     ranks: optional pre-computed factor_ranks(universe_data, date) result --
     lets a caller that also needs the per-factor breakdown (e.g.
     scripts/run_daily_recommendations.py's recommendation cards) reuse the
     same liquidity-filter + percentile-rank pass instead of this function
-    recomputing it. None (the default) computes it here, unchanged behavior
-    for every existing caller.
+    recomputing it. None (the default) computes it here via
+    factor_ranks(universe_data, date, extra_factors=extra_factors),
+    unchanged behavior for every existing caller.
+
+    extra_factors: forwarded to factor_ranks() when `ranks` isn't already
+    given -- see that function's docstring. Ignored (no effect) when
+    `ranks` is passed directly, since factor_ranks() is never called in
+    that case; the extra keys must already be in `ranks` for their weight
+    to apply.
 
     This is NOT the same rank order as finlab_strategy.py's FinLab-backed
     ranking_position(), which ranks over the WHOLE fetched universe first
@@ -380,12 +497,12 @@ def composite_scores(universe_data, date, weights=None, ranks=None):
     universe_data, so a "whole universe" to rank against doesn't exist
     here. Treat the two strategies as comparable in spirit, not bit-for-bit
     identical rankings."""
-    ranks = ranks if ranks is not None else factor_ranks(universe_data, date)
+    ranks = ranks if ranks is not None else factor_ranks(universe_data, date, extra_factors=extra_factors)
     if not ranks:
         return {}
     w = weights if weights is not None else RANKING_WEIGHTS
     return {
-        code: r["revenue"] * w["revenue"] + r["roe"] * w["roe"] + r["momentum"] * w["momentum"]
+        code: sum(r[k] * w[k] for k in r if k in w)
         for code, r in ranks.items()
     }
 

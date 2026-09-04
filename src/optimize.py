@@ -35,6 +35,7 @@ reuses that structure instead of building a second, finer-grained
 bucketing pass. Coarser than 8 blocks, but honest about it, not a silent
 choice.
 """
+import bisect
 import datetime as dt
 import statistics
 
@@ -497,8 +498,92 @@ def purged_calendar_walk_forward_splits(calendar, n_folds=4, purge_days=60, mode
     return folds
 
 
+def _days_in_month(year, month):
+    """Number of calendar days in `year`-`month` -- helper for
+    train_test_split_by_calendar()'s month-subtraction below (stdlib
+    datetime has no built-in month delta; this avoids pulling in a new
+    dependency like dateutil for a once-per-run calculation)."""
+    next_month = dt.date(year + 1, 1, 1) if month == 12 else dt.date(year, month + 1, 1)
+    return (next_month - dt.date(year, month, 1)).days
+
+
+def train_test_split_by_calendar(calendar, test_months=6, purge_days=60):
+    """calendar: ascending trading-date strings (portfolio_backtest.py's
+    _trading_calendar() output). Carves off the LAST `test_months` calendar
+    months as a held-out test window that never enters
+    sweep_ranking_weights_walk_forward()'s search -- an extra guard on top
+    of that function's own purged walk-forward folds, per the strategy-
+    logic-search plan's train/test split (searching only ever touches
+    train; test is spent exactly once, at the very end, to sanity-check
+    the train-selected candidate against genuinely unseen data).
+
+    The remaining earlier history becomes train, minus a `purge_days`-day
+    gap immediately before the test window starts -- same purge rationale
+    as purged_calendar_walk_forward_splits() above (a trade opened just
+    before the boundary could still be open once the test window begins,
+    so training on it would leak test-adjacent price action).
+
+    Returns {"train": (start_date, end_date), "test": (start_date, end_date)}
+    (date strings, inclusive), or None if there isn't enough calendar left
+    for a non-empty, purged train segment once the test window is carved
+    out (either the test window already swallows the whole calendar, or
+    the purge gap eats what would have been train)."""
+    if not calendar:
+        return None
+    end_dt = dt.date.fromisoformat(calendar[-1])
+    # Subtract test_months calendar months, clamping day-of-month down when
+    # the target month is shorter (e.g. Aug 31 - 6 months -> Feb 28/29).
+    total_months = end_dt.year * 12 + (end_dt.month - 1) - test_months
+    year, month = divmod(total_months, 12)
+    month += 1
+    day = min(end_dt.day, _days_in_month(year, month))
+    test_start_dt = dt.date(year, month, day)
+
+    test_start_idx = bisect.bisect_left(calendar, test_start_dt.isoformat())
+    if test_start_idx >= len(calendar):
+        return None
+
+    purge_idx = test_start_idx - 1
+    while purge_idx >= 0 and (test_start_dt - dt.date.fromisoformat(calendar[purge_idx])).days < purge_days:
+        purge_idx -= 1
+    if purge_idx < 0:
+        return None
+
+    return {
+        "train": (calendar[0], calendar[purge_idx]),
+        "test": (calendar[test_start_idx], calendar[-1]),
+    }
+
+
+def previous_candidate_eligible(active_weights_source, has_previous):
+    """Pure decision logic for scripts/run_ranking_optimize.py's
+    build_candidates(): should this cycle's sweep include "previous" (the
+    RANKING_WEIGHTS rollback target) as a candidate at all?
+
+    Coordination problem this guards against: the strategy-logic-search
+    pipeline (scripts/apply_strategy_candidate.py) and this RANKING_WEIGHTS
+    auto-optimize pipeline share the same meta.active_ranking_weights/
+    previous_ranking_weights keys. If a human just approved a strategy-
+    search candidate (meta.active_weights_source == "strategy_search"),
+    the very next scheduled run_ranking_optimize.py cycle would otherwise
+    see a real "previous" entry (whatever the human's candidate replaced)
+    and could resolve_ranking_weights_action() its way into
+    "rollback_to_previous" -- silently reverting a human decision this
+    pipeline was never supposed to touch. Returning False here keeps
+    "previous" out of that cycle's candidate pool entirely (ic_suggested is
+    NOT affected -- it's still compared against "active" as normal), which
+    protects exactly one cycle: scripts/run_ranking_optimize.py's own
+    apply_action() resets active_weights_source back to "ranking_optimize"
+    the next time IT changes active (adopt or rollback), so this is not a
+    permanent rollback-disable.
+
+    has_previous=False (no previous candidate exists this cycle regardless
+    of source) always returns False -- nothing to guard."""
+    return has_previous and active_weights_source != "strategy_search"
+
+
 def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, purge_days=60,
-                                        mode="anchored", sim_params=None):
+                                        mode="anchored", sim_params=None, extra_factors=None):
     """Purged walk-forward comparison of NAMED finlab_factors.RANKING_WEIGHTS
     candidates -- e.g. the current fixed weights vs Phase 4's rank-IC-
     derived suggestions at a few horizons (docs/https-finlab-finance-blog-
@@ -509,7 +594,19 @@ def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, pur
     check per factor, so re-searching continuous weights here would mostly
     relearn that same in-sample noise a second time.
 
-    candidates: {name: {"revenue","roe","momentum"} weight dict}.
+    candidates: {name: {"revenue","roe","momentum", ...} weight dict} -- may
+    include extra keys (e.g. "ma_cross"/"vol_price_div") beyond the
+    original three when `extra_factors` is also given (see below);
+    finlab_factors.composite_scores()'s generalized weighted sum just skips
+    any weight key that isn't in a given ranks dict, so a candidate that
+    doesn't use an extra factor can simply omit it from its own weight dict.
+
+    extra_factors: forwarded to every fold's portfolio_backtest.simulate()
+    call as params["extra_factors"] -- lets this sweep score candidate
+    factors beyond the fixed revenue/roe/momentum trio (the strategy-logic
+    search's ma_cross/vol_price_div) through this same purged walk-forward
+    machinery instead of a parallel search engine. None (the default)
+    reproduces the pre-existing behavior exactly.
 
     Each fold reruns portfolio_backtest.simulate() from the trading
     calendar's start (mode="anchored") or the fold's own train_start
@@ -554,6 +651,7 @@ def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, pur
         for name in names:
             p = dict(sim_params or {})
             p["ranking_weights"] = candidates[name]
+            p["extra_factors"] = extra_factors
             result = pb.simulate(sliced, params=p)
             oos_points = [pt for pt in result["equity_curve"] if test_start <= pt["date"] <= test_end]
             score = None

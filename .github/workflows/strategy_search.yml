@@ -1,0 +1,89 @@
+name: strategy_search
+
+# Strategy-logic search (docs/adr/0003-manual-review-for-strategy-logic-
+# search.md): biweekly (1st and 15th of each month, same cadence as
+# optimize.yml) walk-forward comparison of named candidates that add new
+# factor logic (ma_cross/vol_price_div) on top of revenue/roe/momentum,
+# via scripts/run_strategy_search.py. Unlike optimize.yml/
+# scripts/run_ranking_optimize.py, this job NEVER auto-applies its winner
+# -- it only writes meta.pending_strategy_candidate and sends a Telegram
+# summary; a human runs scripts/apply_strategy_candidate.py separately.
+#
+# Scheduled 1 hour after optimize.yml (23:00 vs 22:00 UTC) so the two never
+# fire at the same instant -- both share the backtest-db-state concurrency
+# group below, so a same-minute collision would just queue anyway, but
+# spacing them avoids that queue entirely on the common case.
+#
+# cache/factor_run's daily bars are kept fresh by
+# .github/workflows/update_universe_bars_part1.yml/_part2.yml (Phase 0) --
+# this job restores that lineage read-only below, same as optimize.yml.
+on:
+  schedule:
+    - cron: '0 23 1,15 * *'   # 每月 1、15 號台北 07:00（UTC 前一天 23:00），晚 optimize.yml 一小時
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        type: boolean
+        description: '只評估、不寫 meta/optimization_runs、不發 Telegram'
+        default: false
+
+concurrency:
+  # Shared with optimize.yml/daily_recommendations.yml on purpose: all three
+  # jobs read+write src/data/backtest.db through the same optimize-state-
+  # cache lineage (see .github/actions/backtest-db-cache), so they must
+  # never run at the same time -- a concurrent save from any of them would
+  # silently overwrite another's write to a full-file cache blob (no
+  # merge). This serializes them (cancel-in-progress: false queues, doesn't
+  # cancel).
+  group: backtest-db-state
+  cancel-in-progress: false
+
+jobs:
+  strategy_search:
+    runs-on: ubuntu-latest
+    # TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID 建在 Environment「Cloudflare」底下
+    # （沿用 optimize.yml 的既有 secrets，同一組 Telegram bot）；沒有這行
+    # secrets.* 會全部解析成空字串（見 snapshot.yml 的同類註解）。
+    environment: Cloudflare
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: check secrets
+        run: |
+          missing=""
+          [ -z "$TELEGRAM_BOT_TOKEN" ] && missing="$missing TELEGRAM_BOT_TOKEN"
+          [ -z "$TELEGRAM_CHAT_ID" ] && missing="$missing TELEGRAM_CHAT_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::缺少或空白的 secrets:$missing（Settings → Environments → Cloudflare）"
+            exit 1
+          fi
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-actions.txt
+      - run: pip install -r requirements-actions.txt
+      # cache/factor_run 的血統歸 update_universe_bars_part1/2.yml 管（Phase 0）
+      # ——這個 job 只讀不寫，restore-only，避免跟它們的儲存互相打架。
+      - uses: actions/cache/restore@v4
+        with:
+          path: cache/factor_run
+          key: update-universe-bars-state-${{ github.run_id }}
+          restore-keys: |
+            update-universe-bars-state-
+      # backtest.db 存 meta.pending_strategy_candidate 與 optimization_runs
+      # 試驗紀錄，是這個 job 自己讀寫的狀態，跟上面 cache/factor_run 的血統
+      # 分開存（理由同上，避免整包互相覆蓋）。
+      # save: 'true' -- 這個 job 會寫回，見 .github/actions/backtest-db-cache/action.yml。
+      - uses: ./.github/actions/backtest-db-cache
+        with:
+          save: 'true'
+      - name: run_strategy_search
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python scripts/run_strategy_search.py --dry-run
+          else
+            python scripts/run_strategy_search.py
+          fi

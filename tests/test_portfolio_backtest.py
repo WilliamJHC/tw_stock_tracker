@@ -2,7 +2,9 @@
 """Unit tests for portfolio_backtest.py, all on hand-computed fixtures --
 no network, no DB."""
 import datetime as dt
+import unittest.mock as mock
 
+import finlab_factors as ff
 import portfolio_backtest as pb
 
 
@@ -139,6 +141,41 @@ def test_simulate_fee_reduces_return_vs_zero_fee():
     no_fee = pb.simulate(universe, params={"top_n": 2, "fee_pct": 0.0})
     with_fee = pb.simulate(universe, params={"top_n": 2, "fee_pct": 2.0})
     assert with_fee["equity_curve"][-1]["equity"] < no_fee["equity_curve"][-1]["equity"]
+
+
+def test_simulate_passes_extra_factors_through_to_composite_scores():
+    # Regression/positive test for PORTFOLIO_PARAMS["extra_factors"] ->
+    # composite_scores()'s extra_factors kwarg (src/optimize.py's
+    # strategy-logic search relies on this to score ma_cross/vol_price_div
+    # candidates through simulate()).
+    universe = {"A": _entry(10, 2.0), "B": _entry(100, 0.01)}
+    marker = {"fake": lambda bars, idx: 1.0}
+    captured = []
+    orig_composite_scores = ff.composite_scores
+
+    def spy(universe_data, date, weights=None, ranks=None, extra_factors=None):
+        captured.append(extra_factors)
+        return orig_composite_scores(universe_data, date, weights=weights, ranks=ranks, extra_factors=extra_factors)
+
+    with mock.patch("portfolio_backtest.ff.composite_scores", side_effect=spy):
+        pb.simulate(universe, params={"top_n": 1, "extra_factors": marker})
+    assert captured
+    assert all(ef is marker for ef in captured)
+
+
+def test_simulate_default_extra_factors_is_none():
+    universe = {"A": _entry(10, 2.0), "B": _entry(100, 0.01)}
+    captured = []
+    orig_composite_scores = ff.composite_scores
+
+    def spy(universe_data, date, weights=None, ranks=None, extra_factors=None):
+        captured.append(extra_factors)
+        return orig_composite_scores(universe_data, date, weights=weights, ranks=ranks, extra_factors=extra_factors)
+
+    with mock.patch("portfolio_backtest.ff.composite_scores", side_effect=spy):
+        pb.simulate(universe, params={"top_n": 1})
+    assert captured
+    assert all(ef is None for ef in captured)
 
 
 # ------------------------------------------ Phase 3 item 5: lot rounding/slippage --

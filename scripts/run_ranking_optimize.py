@@ -17,9 +17,13 @@ Each run:
      sweep_ranking_weights_walk_forward()) across up to 3 named candidates:
      "active" (whatever backtest.db's meta.active_ranking_weights currently
      holds, or finlab_factors.RANKING_WEIGHTS if never set),
-     "previous" (only present the cycle right after a prior switch -- see
-     meta.previous_ranking_weights), "ic_suggested" (from step 2, omitted
-     entirely if None).
+     "previous" (only present the cycle right after a prior switch AND when
+     meta.active_weights_source isn't "strategy_search" -- see
+     src/optimize.py's previous_candidate_eligible() and docs/adr/0003-
+     manual-review-for-strategy-logic-search.md: this guards against
+     rolling back a strategy-logic-search candidate a human just approved
+     via scripts/apply_strategy_candidate.py), "ic_suggested" (from step 2,
+     omitted entirely if None).
   4. src/optimize.py's resolve_ranking_weights_action() turns that result's
      decision/winner into "keep" / "adopt_suggested" / "rollback_to_previous"
      -- see that function's docstring for the full rule set. A switch
@@ -65,16 +69,25 @@ import report_factor_ic as rfi  # noqa: E402
 
 ACTIVE_META_KEY = "active_ranking_weights"
 PREVIOUS_META_KEY = "previous_ranking_weights"
+SOURCE_META_KEY = "active_weights_source"
 DEFAULT_HORIZON = 20  # matches finlab_factors' "hold ~1 month" rebalance cadence
 
 
 def build_candidates(conn, universe_data, horizon=DEFAULT_HORIZON):
     """{name: weights_dict} for this cycle's sweep_ranking_weights_walk_forward()
     call, plus the raw factor_result (for logging/inspection) -- "active" is
-    always present, "previous"/"ic_suggested" only when real. Returns
-    (candidates, factor_result, has_previous)."""
+    always present, "ic_suggested" only when real, and "previous" only when
+    both real AND eligible this cycle (see
+    optimize.previous_candidate_eligible() -- meta.active_weights_source
+    guards against this auto-optimize pipeline rolling back a strategy-
+    logic-search candidate a human just approved via
+    scripts/apply_strategy_candidate.py; docs/adr/0003-manual-review-for-
+    strategy-logic-search.md). Returns (candidates, factor_result,
+    has_previous) where has_previous reflects whether "previous" actually
+    made it into `candidates` this cycle, not merely whether it exists."""
     active = db.get_meta_json(conn, ACTIVE_META_KEY, default=dict(ff.RANKING_WEIGHTS))
     previous = db.get_meta_json(conn, PREVIOUS_META_KEY)
+    active_weights_source = db.get_meta(conn, SOURCE_META_KEY, default="ranking_optimize")
 
     dates = fe.rebalance_dates(universe_data)
     factor_result = fe.evaluate_factors(universe_data, dates=dates)
@@ -92,7 +105,7 @@ def build_candidates(conn, universe_data, horizon=DEFAULT_HORIZON):
         suggested = None
 
     candidates = {"active": active}
-    has_previous = previous is not None
+    has_previous = opt.previous_candidate_eligible(active_weights_source, previous is not None)
     if has_previous:
         candidates["previous"] = previous
     if suggested is not None:
@@ -102,14 +115,22 @@ def build_candidates(conn, universe_data, horizon=DEFAULT_HORIZON):
 
 def apply_action(conn, action, candidates):
     """Mutates meta per resolve_ranking_weights_action()'s verdict. Returns
-    a human-readable summary line for the Telegram event."""
+    a human-readable summary line for the Telegram event.
+
+    Both switching branches also reset active_weights_source back to
+    "ranking_optimize" -- this pipeline just changed active itself, so
+    whatever one-cycle strategy_search protection previous_candidate_
+    eligible() may have been enforcing (see build_candidates()) no longer
+    applies; the next cycle should see "previous" normally again."""
     if action == "adopt_suggested":
         db.set_meta(conn, PREVIOUS_META_KEY, json.dumps(candidates["active"]))
         db.set_meta(conn, ACTIVE_META_KEY, json.dumps(candidates["ic_suggested"]))
+        db.set_meta(conn, SOURCE_META_KEY, "ranking_optimize")
         return f"採用新候選 ic_suggested={candidates['ic_suggested']}"
     if action == "rollback_to_previous":
         db.set_meta(conn, ACTIVE_META_KEY, json.dumps(candidates["previous"]))
         db.set_meta(conn, PREVIOUS_META_KEY, "")  # one rollback undoes one switch, doesn't chain further back
+        db.set_meta(conn, SOURCE_META_KEY, "ranking_optimize")
         return f"rollback，退回 previous={candidates['previous']}"
     return f"維持現況 active={candidates['active']}"
 
@@ -152,7 +173,7 @@ def main():
         icir = by_horizon.get(args.horizon, {}).get("icir")
         print(f"  rank-IC h={args.horizon} {factor_name}: icir={icir}")
 
-    result = opt.sweep_ranking_weights_walk_forward(universe_data, candidates)
+    result = opt.sweep_ranking_weights_walk_forward(universe_data, candidates, extra_factors=ff.EXTRA_FACTOR_FUNCS)
     if result is None:
         msg = "[排程最佳化] 資料量不足以切出任何一個 purged walk-forward fold，本次維持現況"
         print(msg)

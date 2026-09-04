@@ -1,15 +1,24 @@
 # -*- coding: utf-8 -*-
 """Unit tests for finlab_factors.py, all on hand-computed fixtures -- no
 network, no DB."""
+import datetime as dt
+
 import finlab_factors as ff
 
 
 def _bars(closes, start="2023-01-01", volume=300_000):
-    import datetime as dt
     base = dt.date.fromisoformat(start)
     return [
         {"date": (base + dt.timedelta(days=i)).isoformat(), "c": c, "v": volume}
         for i, c in enumerate(closes)
+    ]
+
+
+def _bars_with_volume(closes, volumes, start="2023-01-01"):
+    base = dt.date.fromisoformat(start)
+    return [
+        {"date": (base + dt.timedelta(days=i)).isoformat(), "c": c, "v": v}
+        for i, (c, v) in enumerate(zip(closes, volumes))
     ]
 
 
@@ -250,6 +259,75 @@ def test_momentum_pct_falls_back_to_raw_c_when_no_c_adj():
     assert ff.momentum_pct(bars, 60, days=60) == 10.0
 
 
+# ------------------------------------------------------- ma_cross_signal --
+
+def test_ma_cross_signal_hand_computed():
+    # 15 bars at 100, then 5 bars at 200 -> short_ma(last 5) = 200,
+    # long_ma(last 20) = (15*100 + 5*200)/20 = 125 -> (200-125)/125*100 = 60.
+    closes = [100.0] * 15 + [200.0] * 5
+    bars = _bars(closes)
+    signal = ff.ma_cross_signal(bars, 19, short_window=5, long_window=20)
+    assert abs(signal - 60.0) < 1e-9
+
+
+def test_ma_cross_signal_positive_when_short_window_trending_up():
+    closes = [100.0] * 20 + [110.0] * 5
+    bars = _bars(closes)
+    assert ff.ma_cross_signal(bars, len(bars) - 1, short_window=5, long_window=20) > 0
+
+
+def test_ma_cross_signal_none_when_insufficient_history():
+    bars = _bars([100.0] * 19)
+    assert ff.ma_cross_signal(bars, 18, short_window=5, long_window=20) is None
+
+
+# ------------------------------------------------- volume_price_divergence --
+
+def test_volume_price_divergence_none_when_insufficient_history():
+    bars = _bars([100.0] * 9, volume=1000)
+    assert ff.volume_price_divergence(bars, 8, window=5) is None
+
+
+def test_volume_price_divergence_down_move_ignores_volume():
+    # Falling price (idx4 -> idx9: 100 -> 90, -10%) with a volume SURGE on
+    # the decline -- must not be "saved" by the volume trend, a falling
+    # stock belongs near the bottom of the ranking regardless.
+    closes = [100.0] * 5 + [90.0] * 5
+    volumes = [1000] * 5 + [50_000] * 5
+    bars = _bars_with_volume(closes, volumes)
+    signal = ff.volume_price_divergence(bars, 9, window=5)
+    assert signal == -10.0
+
+
+def test_volume_price_divergence_up_with_volume_confirmation_scores_higher():
+    closes = [100.0] * 5 + [110.0] * 5  # +10% over the window
+    volumes = [1000] * 5 + [2000] * 5  # avg volume doubled -> +100%
+    bars = _bars_with_volume(closes, volumes)
+    signal = ff.volume_price_divergence(bars, 9, window=5)
+    assert abs(signal - (10.0 + 100.0)) < 1e-9
+
+
+def test_volume_price_divergence_up_without_volume_confirmation_scores_lower():
+    # Same price path as above, but volume trend reversed (a "price up,
+    # volume didn't confirm" divergence) -- must score strictly lower than
+    # the volume-confirmed case, since volume_change_pct is now negative.
+    closes = [100.0] * 5 + [110.0] * 5
+    confirmed_volumes = [1000] * 5 + [2000] * 5
+    diverging_volumes = [2000] * 5 + [1000] * 5
+    confirmed = ff.volume_price_divergence(_bars_with_volume(closes, confirmed_volumes), 9, window=5)
+    diverging = ff.volume_price_divergence(_bars_with_volume(closes, diverging_volumes), 9, window=5)
+    assert diverging < confirmed
+    # -50% volume change on top of +10% price -> -40, hand-computed
+    assert abs(diverging - (10.0 - 50.0)) < 1e-9
+
+
+def test_volume_price_divergence_up_move_with_zero_prior_volume_returns_none():
+    closes = [100.0] * 5 + [110.0] * 5
+    volumes = [0] * 5 + [2000] * 5
+    bars = _bars_with_volume(closes, volumes)
+    assert ff.volume_price_divergence(bars, 9, window=5) is None
+
+
 # ------------------------------------------------------- composite_scores --
 
 def _universe_entry(base, mom_boost, days=90):
@@ -307,6 +385,68 @@ def test_composite_scores_weights_override_can_flip_ranking():
     assert flipped["A"] > flipped["B"]
     # module-level RANKING_WEIGHTS must be untouched by the override
     assert ff.RANKING_WEIGHTS == {"revenue": 0.4, "roe": 0.3, "momentum": 0.3}
+
+
+def test_factor_ranks_extra_factors_none_matches_default():
+    universe = {"A": _universe_entry(100, 1.0), "B": _universe_entry(50, 0.2)}
+    date = universe["A"]["bar_dates"][-1]
+    assert ff.factor_ranks(universe, date) == ff.factor_ranks(universe, date, extra_factors=None)
+
+
+def test_factor_ranks_with_extra_factors_adds_percentile_ranks():
+    universe = {"A": _universe_entry(100, 1.0, days=90), "B": _universe_entry(50, 0.2, days=90)}
+    date = universe["A"]["bar_dates"][-1]
+
+    def fake_factor(bars, idx):
+        return bars[idx]["c"]  # arbitrary monotonic-with-price stand-in
+
+    ranks = ff.factor_ranks(universe, date, extra_factors={"fake": fake_factor})
+    assert set(ranks) == {"A", "B"}
+    assert "fake" in ranks["A"] and "fake" in ranks["B"]
+    # A's base (100) + drift (1.0) is well above B's (50, 0.2) -> higher close -> higher fake rank
+    assert ranks["A"]["fake"] > ranks["B"]["fake"]
+    # existing three keys still present, untouched
+    assert set(ranks["A"]) == {"revenue", "roe", "momentum", "fake"}
+
+
+def test_factor_ranks_extra_factor_missing_value_excludes_code():
+    universe = {"A": _universe_entry(100, 1.0, days=90), "B": _universe_entry(50, 0.2, days=90)}
+    date = universe["A"]["bar_dates"][-1]
+
+    def none_below_80(bars, idx):
+        return None if bars[idx]["c"] < 80 else 1.0
+
+    ranks = ff.factor_ranks(universe, date, extra_factors={"x": none_below_80})
+    # B's close stays well under 80 for its whole run (base=50, drift=0.2) -> excluded
+    assert set(ranks) == {"A"}
+
+
+def test_composite_scores_extra_factors_none_matches_default():
+    universe = {"A": _universe_entry(100, 1.0), "B": _universe_entry(50, 0.2)}
+    date = universe["A"]["bar_dates"][-1]
+    assert ff.composite_scores(universe, date) == ff.composite_scores(universe, date, extra_factors=None)
+
+
+def test_composite_scores_with_extra_factors_can_flip_ranking():
+    # A: weaker fundamentals (base=50 vs B's 100) -- default RANKING_WEIGHTS
+    # (revenue+roe=0.7) ranks B on top despite A's slightly stronger
+    # momentum. An extra factor that inversely tracks price level (favors
+    # A, whose price stays lower) with weight 1.0 (zeroing the other three)
+    # must flip the ranking. Bases kept >=50 so liquidity_ok's turnover
+    # floor (price*volume) stays comfortably clear at this fixture's
+    # default volume (300_000).
+    universe = {"A": _universe_entry(50, 0.01), "B": _universe_entry(100, 0.01)}
+    date = universe["A"]["bar_dates"][-1]
+
+    def extra_favors_a(bars, idx):
+        return -bars[idx]["c"]
+
+    default_scores = ff.composite_scores(universe, date)
+    assert default_scores["B"] > default_scores["A"]
+
+    weights = {"revenue": 0.0, "roe": 0.0, "momentum": 0.0, "extra": 1.0}
+    boosted = ff.composite_scores(universe, date, weights=weights, extra_factors={"extra": extra_favors_a})
+    assert boosted["A"] > boosted["B"]
 
 
 def test_composite_scores_reuses_precomputed_ranks_instead_of_recomputing():

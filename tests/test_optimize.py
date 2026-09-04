@@ -321,6 +321,73 @@ def test_purged_calendar_walk_forward_splits_too_little_calendar_returns_empty()
     assert opt.purged_calendar_walk_forward_splits(_calendar(20), n_folds=4, purge_days=60) == []
 
 
+# --------------------------------------------- train_test_split_by_calendar --
+
+def test_train_test_split_by_calendar_hand_computed():
+    # 900 daily dates starting 2020-01-01 -> calendar[-1] == "2022-06-18"
+    # (verified independently via plain date arithmetic, not by re-deriving
+    # the function under test). 6 months back from 2022-06-18 == 2021-12-18
+    # (test_start); walking back from there until a 60-day gap is cleared
+    # lands on 2021-10-19 (train_end).
+    calendar = _calendar(900)
+    assert calendar[-1] == "2022-06-18"
+    split = opt.train_test_split_by_calendar(calendar, test_months=6, purge_days=60)
+    assert split == {
+        "train": (calendar[0], "2021-10-19"),
+        "test": ("2021-12-18", "2022-06-18"),
+    }
+
+
+def test_train_test_split_by_calendar_purge_gap_and_ordering():
+    calendar = _calendar(900)
+    split = opt.train_test_split_by_calendar(calendar, test_months=6, purge_days=60)
+    train_start, train_end = split["train"]
+    test_start, test_end = split["test"]
+    assert train_start == calendar[0]
+    assert test_end == calendar[-1]
+    assert train_end < test_start
+    gap_days = (dt.date.fromisoformat(test_start) - dt.date.fromisoformat(train_end)).days
+    assert gap_days >= 60
+
+
+def test_train_test_split_by_calendar_entire_calendar_within_test_window_returns_none():
+    # 150 days (~5 months) of history, asking for a 6-month test window --
+    # the test window alone would already swallow the whole calendar,
+    # leaving no room for a non-empty train segment.
+    calendar = _calendar(150)
+    assert opt.train_test_split_by_calendar(calendar, test_months=6, purge_days=60) is None
+
+
+def test_train_test_split_by_calendar_purge_gap_eats_all_available_train_returns_none():
+    # 200 days of history: a 6-month test window leaves only ~17 days of
+    # calendar before it, nowhere near the 60-day purge gap required --
+    # train would be empty after purging.
+    calendar = _calendar(200)
+    assert opt.train_test_split_by_calendar(calendar, test_months=6, purge_days=60) is None
+
+
+def test_train_test_split_by_calendar_empty_calendar_returns_none():
+    assert opt.train_test_split_by_calendar([], test_months=6, purge_days=60) is None
+
+
+# ------------------------------------------------- previous_candidate_eligible --
+
+def test_previous_candidate_eligible_true_when_has_previous_and_source_is_ranking_optimize():
+    assert opt.previous_candidate_eligible("ranking_optimize", has_previous=True) is True
+
+
+def test_previous_candidate_eligible_false_when_source_is_strategy_search():
+    assert opt.previous_candidate_eligible("strategy_search", has_previous=True) is False
+
+
+def test_previous_candidate_eligible_false_when_no_previous_even_if_source_ranking_optimize():
+    assert opt.previous_candidate_eligible("ranking_optimize", has_previous=False) is False
+
+
+def test_previous_candidate_eligible_false_when_no_previous_and_source_strategy_search():
+    assert opt.previous_candidate_eligible("strategy_search", has_previous=False) is False
+
+
 def test_slice_universe_by_date_filters_bars_keeps_factor_series():
     universe = {
         "A": {
