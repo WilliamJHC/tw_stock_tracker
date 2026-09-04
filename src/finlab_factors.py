@@ -374,6 +374,32 @@ def volume_price_divergence(bars, idx, window=20):
 
 EXTRA_FACTOR_FUNCS = {"ma_cross": ma_cross_signal, "vol_price_div": volume_price_divergence}
 
+REQUIRED_FACTOR_KEYS = frozenset({"revenue", "roe", "momentum"})
+
+
+def used_extra_factors(weight_dicts):
+    """Subset of EXTRA_FACTOR_FUNCS whose key appears in at least one of
+    `weight_dicts` (an iterable of {"revenue"/"roe"/"momentum"/"ma_cross"/
+    "vol_price_div": weight} dicts, e.g. the several named RANKING_WEIGHTS
+    candidates a walk-forward sweep is comparing this cycle).
+
+    Passing THE WHOLE of EXTRA_FACTOR_FUNCS unconditionally into
+    factor_ranks() would apply its "every extra factor must be non-None"
+    exclusion filter to every code -- including for a caller whose weight
+    dict(s) never reference ma_cross/vol_price_div at all, silently
+    shrinking the eligible universe with no corresponding term in the
+    score. That regression is exactly what this function exists to avoid:
+    callers scoring against weight dict(s) that don't reference any extra
+    factor get back {} (empty dict, same as omitting extra_factors
+    entirely -- factor_ranks()'s own `extra_factors or {}` normalizes both
+    the same way), so scripts/run_daily_recommendations.py's live output
+    and scripts/run_ranking_optimize.py's monthly RANKING_WEIGHTS sweep
+    stay byte-identical to their pre-strategy-logic-search behavior until a
+    strategy-search candidate that actually uses one of these factors gets
+    manually applied (scripts/apply_strategy_candidate.py)."""
+    used_keys = {k for w in weight_dicts for k in w if k in EXTRA_FACTOR_FUNCS}
+    return {k: EXTRA_FACTOR_FUNCS[k] for k in used_keys}
+
 
 def _pct_rank(values):
     """{code: number} -> {code: percentile in (0, 1]}, average-rank ties

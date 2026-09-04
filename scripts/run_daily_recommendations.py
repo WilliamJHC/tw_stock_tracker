@@ -81,11 +81,19 @@ def build_recommendations(conn, universe_data, top_n):
         return None
 
     weights = db.get_meta_json(conn, ACTIVE_META_KEY, default=dict(ff.RANKING_WEIGHTS))
+    # Only the extra factors `weights` actually references -- ff.used_extra_
+    # factors([weights]) is {} on every ordinary day (active_ranking_weights
+    # has no ma_cross/vol_price_div key until a strategy-search candidate is
+    # manually applied), which keeps this call byte-identical to before
+    # extra_factors existed instead of unconditionally applying
+    # EXTRA_FACTOR_FUNCS' "every extra factor must be non-None" filter to
+    # every code regardless of whether `weights` uses any of them.
+    extra_factors = ff.used_extra_factors([weights])
     # factor_ranks() computed once and reused by composite_scores() below --
     # it's the full liquidity-filter + percentile-rank pass over the whole
     # cached universe, no reason to pay for it twice on every daily run.
-    ranks = ff.factor_ranks(universe_data, as_of, extra_factors=ff.EXTRA_FACTOR_FUNCS)
-    scores = ff.composite_scores(universe_data, as_of, weights=weights, ranks=ranks, extra_factors=ff.EXTRA_FACTOR_FUNCS)
+    ranks = ff.factor_ranks(universe_data, as_of, extra_factors=extra_factors)
+    scores = ff.composite_scores(universe_data, as_of, weights=weights, ranks=ranks, extra_factors=extra_factors)
     top_codes = ff.top_n(scores, top_n)
 
     universe = ds.get_universe(cache=True) or []

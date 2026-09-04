@@ -449,6 +449,22 @@ def test_composite_scores_with_extra_factors_can_flip_ranking():
     assert boosted["A"] > boosted["B"]
 
 
+def test_used_extra_factors_empty_when_no_weight_dict_references_one():
+    # scripts/run_daily_recommendations.py's/run_ranking_optimize.py's
+    # ordinary-cycle case -- active/previous/ic_suggested never carry a
+    # ma_cross/vol_price_div key until a strategy-search candidate is
+    # manually applied, so this must stay {} (not the whole
+    # EXTRA_FACTOR_FUNCS) or factor_ranks()'s exclusion filter would start
+    # narrowing the eligible universe by factors nothing here uses.
+    weights = [{"revenue": 0.4, "roe": 0.3, "momentum": 0.3}, {"revenue": 1.0}]
+    assert ff.used_extra_factors(weights) == {}
+
+
+def test_used_extra_factors_returns_only_the_referenced_subset():
+    weights = [{"revenue": 0.3, "ma_cross": 0.3}, {"revenue": 1.0}]
+    assert ff.used_extra_factors(weights) == {"ma_cross": ff.ma_cross_signal}
+
+
 def test_composite_scores_reuses_precomputed_ranks_instead_of_recomputing():
     """scripts/run_daily_recommendations.py calls factor_ranks() itself for
     the per-factor breakdown, then passes it into composite_scores() so the

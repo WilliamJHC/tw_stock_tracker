@@ -173,7 +173,15 @@ def main():
         icir = by_horizon.get(args.horizon, {}).get("icir")
         print(f"  rank-IC h={args.horizon} {factor_name}: icir={icir}")
 
-    result = opt.sweep_ranking_weights_walk_forward(universe_data, candidates, extra_factors=ff.EXTRA_FACTOR_FUNCS)
+    # Only the extra factors any of this cycle's candidates actually
+    # reference -- see ff.used_extra_factors()'s docstring. "active"/
+    # "previous"/"ic_suggested" never carry a ma_cross/vol_price_div key
+    # unless a strategy-search candidate was manually applied, so this is
+    # {} (byte-identical to before extra_factors existed) on an ordinary
+    # cycle instead of unconditionally narrowing every candidate's eligible
+    # universe by factors none of them use.
+    extra_factors = ff.used_extra_factors(candidates.values())
+    result = opt.sweep_ranking_weights_walk_forward(universe_data, candidates, extra_factors=extra_factors)
     if result is None:
         msg = "[排程最佳化] 資料量不足以切出任何一個 purged walk-forward fold，本次維持現況"
         print(msg)

@@ -74,6 +74,20 @@ def main():
         conn.close()
         return
 
+    missing = ff.REQUIRED_FACTOR_KEYS - set(pending["weights"])
+    if missing:
+        # composite_scores() only sums keys present in BOTH the per-code
+        # rank dict and the weights dict -- a weights dict missing one of
+        # the three base factors used to KeyError loudly before extra_
+        # factors existed; now it would silently compute a partial score
+        # and go live with no error at all. Refuse to apply rather than let
+        # a malformed candidate (hand-edited meta, or a future bug in
+        # scripts/run_strategy_search.py's build_candidates()) become the
+        # live ranking silently.
+        print(f"候選 weights 缺少必要因子 {missing}，拒絕套用（不動 active_ranking_weights）")
+        conn.close()
+        return
+
     active = db.get_meta_json(conn, ACTIVE_META_KEY, default=dict(ff.RANKING_WEIGHTS))
     db.set_meta(conn, PREVIOUS_META_KEY, json.dumps(active))
     db.set_meta(conn, ACTIVE_META_KEY, json.dumps(pending["weights"]))
