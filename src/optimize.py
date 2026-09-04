@@ -573,9 +573,11 @@ def previous_candidate_eligible(active_weights_source, has_previous):
     "previous" out of that cycle's candidate pool entirely (ic_suggested is
     NOT affected -- it's still compared against "active" as normal), which
     protects exactly one cycle: scripts/run_ranking_optimize.py's own
-    apply_action() resets active_weights_source back to "ranking_optimize"
-    the next time IT changes active (adopt or rollback), so this is not a
-    permanent rollback-disable.
+    apply_action() unconditionally resets active_weights_source back to
+    "ranking_optimize" at the end of THIS cycle regardless of what it
+    concludes (adopt/rollback/keep alike), so this is not a permanent
+    rollback-disable and doesn't linger across however many "keep" cycles
+    happen to follow.
 
     has_previous=False (no previous candidate exists this cycle regardless
     of source) always returns False -- nothing to guard."""

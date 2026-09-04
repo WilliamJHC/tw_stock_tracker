@@ -353,14 +353,20 @@ def volume_price_divergence(bars, idx, window=20):
     if not base_price:
         return None
     price_trend_pct = (_close(bars[idx]) - base_price) / base_price * 100
+    if price_trend_pct <= 0:
+        # Falling branch never looks at volume at all -- check this BEFORE
+        # summing recent/prior_chunk below, not after, so the O(window)
+        # volume averages (needed only by the rising branch) aren't computed
+        # and discarded on every falling-price code, which is most of the
+        # universe's per-date, per-fold, per-candidate calls in a down
+        # market.
+        return price_trend_pct
 
     recent_chunk = bars[idx + 1 - window: idx + 1]
     prior_chunk = bars[idx + 1 - 2 * window: idx + 1 - window]
     recent_avg_vol = sum(b["v"] for b in recent_chunk) / window
     prior_avg_vol = sum(b["v"] for b in prior_chunk) / window
 
-    if price_trend_pct <= 0:
-        return price_trend_pct
     if not prior_avg_vol:
         # No prior volume to compare against -- a percent CHANGE is
         # undefined (not "infinitely bullish"), so this bar can't be scored

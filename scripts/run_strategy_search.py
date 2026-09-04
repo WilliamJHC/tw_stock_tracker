@@ -155,7 +155,15 @@ def main():
     candidates = build_candidates(active_weights)
     print(f"candidates: {list(candidates)}")
 
-    result = opt.sweep_ranking_weights_walk_forward(train_universe, candidates, extra_factors=ff.EXTRA_FACTOR_FUNCS)
+    # Union of extra factors actually referenced across THIS cycle's 4 named
+    # candidates (currently == ff.EXTRA_FACTOR_FUNCS, since between them
+    # with_ma_cross/with_vol_price_div/with_both already cover both keys --
+    # ff.used_extra_factors() keeps this correct automatically if
+    # build_candidates()'s fixed dict ever changes instead of needing a
+    # matching manual update here).
+    result = opt.sweep_ranking_weights_walk_forward(
+        train_universe, candidates, extra_factors=ff.used_extra_factors(candidates.values())
+    )
     if result is None:
         msg = "[策略搜尋] train 段資料量不足以切出任何一個 purged walk-forward fold，本次略過"
         print(msg)
@@ -199,8 +207,18 @@ def main():
     test_universe = opt._slice_universe_by_date(universe_data, test_sim_start, test_end)
 
     winner_weights = candidates[winner]
-    winner_sim = pb.simulate(test_universe, params={"ranking_weights": winner_weights, "extra_factors": ff.EXTRA_FACTOR_FUNCS})
-    baseline_sim = pb.simulate(test_universe, params={"ranking_weights": candidates["baseline"], "extra_factors": ff.EXTRA_FACTOR_FUNCS})
+    # Only the extra factor(s) winner/baseline actually use -- NOT the full
+    # ff.EXTRA_FACTOR_FUNCS. Using the full set here would apply
+    # vol_price_div's eligibility filter to baseline_sim (and to winner_sim
+    # if winner is "with_ma_cross") even though neither candidate's weights
+    # reference it, artificially narrowing the held-out test-segment
+    # universe relative to how each candidate actually behaves in
+    # production (used_extra_factors([weights]) there too, see
+    # run_daily_recommendations.py) -- exactly the bias this human-facing
+    # apply/reject report must not have.
+    test_extra_factors = ff.used_extra_factors([winner_weights, candidates["baseline"]])
+    winner_sim = pb.simulate(test_universe, params={"ranking_weights": winner_weights, "extra_factors": test_extra_factors})
+    baseline_sim = pb.simulate(test_universe, params={"ranking_weights": candidates["baseline"], "extra_factors": test_extra_factors})
     winner_test_summary = _test_window_summary(winner_sim, test_start, test_end)
     baseline_test_summary = _test_window_summary(baseline_sim, test_start, test_end)
 
@@ -222,12 +240,27 @@ def main():
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
+    # db.set_meta() below is a plain overwrite (meta is a key-value table,
+    # no history) -- if a PRIOR cycle's candidate is still sitting there
+    # unreviewed (nobody ran apply_strategy_candidate.py before this cycle
+    # fired again), it's about to be silently replaced with no trace beyond
+    # its trials already persisted to optimization_runs under its own
+    # run_id. Surface that explicitly rather than let it vanish quietly --
+    # a human who was mid-review of the old one needs to know it's gone.
+    overwritten = db.get_meta_json(conn, PENDING_META_KEY)
+    overwritten_note = (
+        f"\n（覆蓋掉尚未處理的候選 run_id={overwritten['run_id']} candidate_name={overwritten['candidate_name']}，"
+        f"未執行 apply/--reject 就被下一輪蓋掉；試驗紀錄仍在 optimization_runs 裡）"
+        if overwritten else ""
+    )
+
     message = (
         f"[策略搜尋] train 段候選 {winner} 勝出並通過 DSR/PBO/高原門檻\n"
         f"train: dsr={result['dsr']} pbo={result['pbo']} plateau={result['plateau']}\n"
         f"test(vs baseline): {winner}={winner_test_summary} baseline={baseline_test_summary}\n"
         f"人工確認後執行 `python scripts/apply_strategy_candidate.py --run-id {run_id}` 套用，"
         f"或 `python scripts/apply_strategy_candidate.py --run-id {run_id} --reject` 捨棄"
+        f"{overwritten_note}"
     )
     print(message)
 

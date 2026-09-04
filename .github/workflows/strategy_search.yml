@@ -9,17 +9,24 @@ name: strategy_search
 # -- it only writes meta.pending_strategy_candidate and sends a Telegram
 # summary; a human runs scripts/apply_strategy_candidate.py separately.
 #
-# Scheduled 1 hour after optimize.yml (23:00 vs 22:00 UTC) so the two never
-# fire at the same instant -- both share the backtest-db-state concurrency
-# group below, so a same-minute collision would just queue anyway, but
-# spacing them avoids that queue entirely on the common case.
+# Scheduled at 20:00 UTC, clear of BOTH of the other two jobs that share
+# backtest-db-state below: optimize.yml (22:00 UTC) and
+# daily_recommendations.yml (23:00 UTC every Sun-Thu, .github/workflows/
+# daily_recommendations.yml) -- an earlier draft used 23:00 UTC here too
+# (only 1 hour after optimize.yml), which collides with
+# daily_recommendations.yml's own 23:00 UTC slot on any 1st/15th that lands
+# on Sun-Thu (5 of 7 possible weekdays) and would have queued behind it via
+# the shared concurrency group, delaying its before-market-open delivery.
+# All three sharing the group would just queue on an exact clash rather
+# than corrupt anything, but this avoids the queue delay outright instead
+# of relying on that fallback.
 #
 # cache/factor_run's daily bars are kept fresh by
 # .github/workflows/update_universe_bars_part1.yml/_part2.yml (Phase 0) --
 # this job restores that lineage read-only below, same as optimize.yml.
 on:
   schedule:
-    - cron: '0 23 1,15 * *'   # 每月 1、15 號台北 07:00（UTC 前一天 23:00），晚 optimize.yml 一小時
+    - cron: '0 20 1,15 * *'   # 每月 1、15 號台北 04:00（UTC 前一天 20:00），避開 optimize.yml(22:00) 與 daily_recommendations.yml(23:00)
   workflow_dispatch:
     inputs:
       dry_run:

@@ -106,7 +106,14 @@ def build_recommendations(conn, universe_data, top_n):
             "code": code,
             "name": code_to_name.get(code) or code,
             "composite_score": scores[code],
-            "factor_ranks": {"revenue": r.get("revenue"), "roe": r.get("roe"), "momentum": r.get("momentum")},
+            # dict(r), not a hardcoded {"revenue","roe","momentum"} subset --
+            # r already carries exactly whatever factor_ranks() computed for
+            # this code (the base three, plus ma_cross/vol_price_div once a
+            # strategy-search candidate using them is live via `weights`
+            # above); hardcoding the three would silently drop the new
+            # factor(s) from this "why this stock ranked" breakdown right
+            # when they're the ones actually driving the ranking.
+            "factor_ranks": dict(r),
         })
     return {"as_of": as_of, "codes": codes_out}
 

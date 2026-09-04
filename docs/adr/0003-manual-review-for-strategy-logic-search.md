@@ -18,7 +18,7 @@ ADR 0002 決定 `RANKING_WEIGHTS`（revenue/roe/momentum 三個既有因子的�
 
 - `scripts/apply_strategy_candidate.py` 套用時把 `active_weights_source` 設成 `"strategy_search"`。
 - `scripts/run_ranking_optimize.py` 的 `build_candidates()` 用 `src/optimize.py` 的純函式 `previous_candidate_eligible(active_weights_source, has_previous)` 決定該輪要不要把 `previous_ranking_weights` 納入候選——`active_weights_source == "strategy_search"` 時該輪跳過（`ic_suggested` 照常比較，沒有被關掉）。
-- `scripts/run_ranking_optimize.py` 的 `apply_action()` 在自己換掉 active（`adopt_suggested`/`rollback_to_previous`）之後，把 `active_weights_source` 寫回 `"ranking_optimize"`，解除保護。
+- `scripts/run_ranking_optimize.py` 的 `apply_action()` 每次跑完這個週期就無條件把 `active_weights_source` 寫回 `"ranking_optimize"`（`adopt_suggested`/`rollback_to_previous`/`keep` 三種結果都一樣），解除保護——只擋這一輪，不會因為連續幾輪都是 `keep` 就一直卡著不解除。
 
 ## 為什麼這樣分界（人工審核 vs. ADR 0002 的自動套用）
 
@@ -30,7 +30,7 @@ ADR 0002 的理由是「DSR/PBO 已經是把主觀判斷規則化的機制，人
 
 兩條管線切成兩組完全獨立的 key（例如 `strategy_active_ranking_weights` 另開一組）表面上更乾淨、不會互相干擾，但有一個實質缺點：`scripts/run_ranking_optimize.py` 之後每次比較的「active」基準會跟真正上線生效的設定脫節——如果人工核准了一個策略搜尋候選，但 RANKING_WEIGHTS 管線仍然只認自己那組 key 裡的「active」，它會繼續拿一個已經不是真正上線設定的基準去做比較與 rollback 判斷，這條管線的自動化就失去意義。
 
-共用同一組 key 保證「不管哪條管線改的，`active_ranking_weights` 永遠只有一個生效版本」，唯一要解決的副作用是本文件開頭那個未經設計的衝突：`build_candidates()` 原本「只要 `previous` 存在就納入候選」的判斷，會讓 RANKING_WEIGHTS 管線在人工核准後的下一輪把它當成候選、贏了就 `rollback_to_previous`，直接推翻人工決定。`active_weights_source` + `previous_candidate_eligible()` 這個一次性保護（只擋 `previous` 進候選池一輪，`ic_suggested` 照常評估，且保護會在 RANKING_WEIGHTS 管線自己下次換手時解除）用最小改動解決這個副作用，不需要引入第二組 key、不需要改 `resolve_ranking_weights_action()`/門檻本身。
+共用同一組 key 保證「不管哪條管線改的，`active_ranking_weights` 永遠只有一個生效版本」，唯一要解決的副作用是本文件開頭那個未經設計的衝突：`build_candidates()` 原本「只要 `previous` 存在就納入候選」的判斷，會讓 RANKING_WEIGHTS 管線在人工核准後的下一輪把它當成候選、贏了就 `rollback_to_previous`，直接推翻人工決定。`active_weights_source` + `previous_candidate_eligible()` 這個一次性保護（只擋 `previous` 進候選池一輪，`ic_suggested` 照常評估，且保護會在 RANKING_WEIGHTS 管線跑完這一輪就無條件解除，不看這輪結果是 `keep` 還是真的換手）用最小改動解決這個副作用，不需要引入第二組 key、不需要改 `resolve_ranking_weights_action()`/門檻本身。
 
 ## 考慮過但拒絕的方案
 
@@ -38,7 +38,7 @@ ADR 0002 的理由是「DSR/PBO 已經是把主觀判斷規則化的機制，人
 
 **策略搜尋也採 ADR 0002 式自動套用+rollback。** 使用者已確認拒絕：全新未驗證邏輯的風險值得人工看過，這點跟 RANKING_WEIGHTS 純粹調整既有已驗證因子的權重比例不同。
 
-**用一把全域鎖（例如一個 boolean flag）完全關掉 RANKING_WEIGHTS 管線的 rollback，直到人工再次介入解除。** 比一次性保護更保守，但如果沒人記得手動解除，RANKING_WEIGHTS 管線的自動化就會被永久卡住，且需要額外的人工步驟才能恢復——`previous_candidate_eligible()` 的一次性設計（保護在 RANKING_WEIGHTS 管線自己下次換手時自動解除）不需要這個額外步驟。
+**用一把全域鎖（例如一個 boolean flag）完全關掉 RANKING_WEIGHTS 管線的 rollback，直到人工再次介入解除。** 比一次性保護更保守，但如果沒人記得手動解除，RANKING_WEIGHTS 管線的自動化就會被永久卡住，且需要額外的人工步驟才能恢復——`previous_candidate_eligible()` 的一次性設計（保護在 RANKING_WEIGHTS 管線跑完下一輪就自動解除，不用等它真的換手）不需要這個額外步驟。
 
 ## 影響
 
@@ -48,4 +48,5 @@ ADR 0002 的理由是「DSR/PBO 已經是把主觀判斷規則化的機制，人
 - `src/db.py`：新增 `active_weights_source`、`pending_strategy_candidate` 兩個 `meta` key，通用 key-value 表，不需要 schema migration。
 - 新增 `scripts/run_strategy_search.py`（排程用，只產生報告）、`scripts/apply_strategy_candidate.py`（人工執行套用/`--reject`）、`.github/workflows/strategy_search.yml`（雙週排程，跟 `optimize.yml` 錯開一小時，共用 `backtest-db-state` concurrency group）。
 - `scripts/run_daily_recommendations.py`：`factor_ranks()`/`composite_scores()` 呼叫補上 `extra_factors=ff.EXTRA_FACTOR_FUNCS`，否則套用後的 `ma_cross`/`vol_price_div` 權重會靜默失效（`composite_scores()` 對沒被算過的 key 直接跳過，不報錯）。
-- `scripts/run_ranking_optimize.py`：`build_candidates()` 讀 `active_weights_source`、改用 `previous_candidate_eligible()` 判斷要不要納入 `previous`；`apply_action()` 在自己換手後把來源寫回 `"ranking_optimize"`；`sweep_ranking_weights_walk_forward()` 呼叫補上 `extra_factors`。ADR 0002 記載的 DSR/PBO/高原門檻、`resolve_ranking_weights_action()` 本身不變。
+- `scripts/run_ranking_optimize.py`：`build_candidates()` 讀 `active_weights_source`、改用 `previous_candidate_eligible()` 判斷要不要納入 `previous`；`apply_action()` 每輪跑完無條件把來源寫回 `"ranking_optimize"`；`sweep_ranking_weights_walk_forward()` 呼叫改用 `finlab_factors.used_extra_factors()`（只在候選真的用到新因子時才啟用，見下一條）。ADR 0002 記載的 DSR/PBO/高原門檻、`resolve_ranking_weights_action()` 本身不變。
+- `src/finlab_factors.py`：新增 `used_extra_factors()`，避免 `run_daily_recommendations.py`／`run_ranking_optimize.py` 在候選權重根本沒用到新因子時，也被新因子「算不出來就排除」的篩選悄悄縮小可用股票池；`REQUIRED_FACTOR_KEYS` 供 `apply_strategy_candidate.py` 套用前驗證權重字典完整性。

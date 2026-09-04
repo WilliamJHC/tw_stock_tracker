@@ -94,12 +94,16 @@ def build_candidates(conn, universe_data, horizon=DEFAULT_HORIZON):
     suggested = fe.suggest_weights(factor_result, horizon=horizon)
     # suggest_weights() only includes factors clearing its min_icir bar --
     # a legitimate 1- or 2-factor dict for a human reading the report, but
-    # finlab_factors.composite_scores() indexes w["revenue"]/w["roe"]/
-    # w["momentum"] unconditionally and would KeyError on a partial dict.
-    # Every OTHER candidate here ("active"/"previous") is always a complete
-    # RANKING_WEIGHTS-shaped dict (persisted via meta or the module default),
-    # so this is the one place a partial dict could enter the walk-forward
-    # sweep -- skip it rather than crash the whole scheduled run.
+    # finlab_factors.composite_scores() silently sums only the keys `w` and
+    # a code's rank both have (no error on a partial dict -- see that
+    # function's docstring), which would let a candidate missing e.g. "roe"
+    # enter the walk-forward sweep and get scored on an unintentionally
+    # smaller basis than the other candidates, not a loud failure. Every
+    # OTHER candidate here ("active"/"previous") is always a complete
+    # RANKING_WEIGHTS-shaped dict (persisted via meta or the module
+    # default), so this is the one place a partial dict could enter the
+    # sweep -- skip it rather than let it silently compete on unequal
+    # footing.
     if suggested is not None and set(suggested) != set(ff.RANKING_WEIGHTS):
         print(f"  ic_suggested 缺少因子（{set(ff.RANKING_WEIGHTS) - set(suggested)}），本輪不納入候選")
         suggested = None
@@ -117,20 +121,27 @@ def apply_action(conn, action, candidates):
     """Mutates meta per resolve_ranking_weights_action()'s verdict. Returns
     a human-readable summary line for the Telegram event.
 
-    Both switching branches also reset active_weights_source back to
-    "ranking_optimize" -- this pipeline just changed active itself, so
-    whatever one-cycle strategy_search protection previous_candidate_
-    eligible() may have been enforcing (see build_candidates()) no longer
-    applies; the next cycle should see "previous" normally again."""
+    Resets active_weights_source back to "ranking_optimize" UNCONDITIONALLY
+    (all three branches, "keep" included) -- previous_candidate_eligible()'s
+    protection is documented as lasting "exactly one cycle": the cycle
+    right after a human applies a strategy-search candidate excludes
+    "previous" from this cycle's own candidates dict (build_candidates()
+    already computed that before this function runs), and by the time this
+    function returns, that one cycle is over regardless of what it
+    concluded. Resetting only on adopt_suggested/rollback_to_previous (an
+    earlier version of this function) left the protection engaged for as
+    many consecutive "keep" cycles as happened to occur -- "previous"
+    staying excluded well past the one cycle this mechanism is supposed to
+    cover, silently disabling a real safety net (a since-actually-bad
+    active setting rolling back to previous) for longer than documented."""
+    db.set_meta(conn, SOURCE_META_KEY, "ranking_optimize")
     if action == "adopt_suggested":
         db.set_meta(conn, PREVIOUS_META_KEY, json.dumps(candidates["active"]))
         db.set_meta(conn, ACTIVE_META_KEY, json.dumps(candidates["ic_suggested"]))
-        db.set_meta(conn, SOURCE_META_KEY, "ranking_optimize")
         return f"採用新候選 ic_suggested={candidates['ic_suggested']}"
     if action == "rollback_to_previous":
         db.set_meta(conn, ACTIVE_META_KEY, json.dumps(candidates["previous"]))
         db.set_meta(conn, PREVIOUS_META_KEY, "")  # one rollback undoes one switch, doesn't chain further back
-        db.set_meta(conn, SOURCE_META_KEY, "ranking_optimize")
         return f"rollback，退回 previous={candidates['previous']}"
     return f"維持現況 active={candidates['active']}"
 
