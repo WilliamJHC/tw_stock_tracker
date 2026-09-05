@@ -511,6 +511,36 @@ def test_simulate_explicit_params_override_wins_over_regime_default():
     assert t["hold_days"] == 66  # explicit 65 wins, not bear's 60
 
 
+def test_simulate_end_of_data_and_buy_hold_fee_uses_default_not_last_row_regime(monkeypatch):
+    # Regression test: the end_of_data forced close and buy_hold_return must
+    # use the GLOBAL default fee_pct, not whatever regime the LAST score_row
+    # happened to resolve to (a prior version reused the loop's leftover `p`
+    # here, which is only correct by coincidence while no shipped regime
+    # overrides fee_pct). Monkeypatch a hypothetical regime-specific fee_pct
+    # override to prove this, since STRATEGY_PARAMS_BY_REGIME ships with no
+    # such override today.
+    monkeypatch.setitem(bt.STRATEGY_PARAMS_BY_REGIME, "bear", {"fee_pct": 99.0})
+    bars = _bars([100, 101, 102, 103, 104])
+    score_rows = [
+        {"date": "d0", "action": "無變化", "composite": 0},
+        {"date": "d1", "action": "準備進場", "composite": 45},
+        {"date": "d2", "action": "無變化", "composite": 0},
+        {"date": "d3", "action": "無變化", "composite": 0},
+    ]
+    regime_by_date = {"d0": "bull", "d1": "bull", "d2": "bull", "d3": "bear"}  # last row is "bear"
+    out = bt.simulate(score_rows, bars, regime_by_date=regime_by_date)
+    t = out["trades"][-1]
+    assert t["exit_reason"] == "end_of_data"
+    gross_ret = (t["exit_price"] / t["entry_price"] - 1) * 100
+    assert abs(t["ret_pct"] - (gross_ret - bt.STRATEGY_PARAMS["fee_pct"])) < 1e-9
+
+    # buy_hold_return spans score_rows[0]/score_rows[-1]'s dates ("d0"/"d3"),
+    # NOT necessarily bars' own first/last entry -- bars here has a trailing
+    # "d4" bar with no matching score_row.
+    expected_bh = (bars[3]["c"] / bars[0]["c"] - 1) * 100 - bt.STRATEGY_PARAMS["fee_pct"]
+    assert abs(out["summary"]["buy_hold_return"] - expected_bh) < 1e-9
+
+
 def test_simulate_without_regime_by_date_unchanged():
     # regime_by_date omitted entirely -- must be byte-identical to the
     # pre-regime-awareness call shape (same fixture/assertions as

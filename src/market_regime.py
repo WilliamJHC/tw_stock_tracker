@@ -34,6 +34,14 @@ import datetime as dt
 
 import analysis as an
 
+# The three regimes this module ever classifies a bar into (never None's
+# own "not enough history" case -- that's a distinct fourth value handled
+# explicitly everywhere below, not a member of this tuple). Single source of
+# truth for the regime taxonomy: src/factor_eval.py and src/backtest.py both
+# import this instead of hardcoding their own copy, so a renamed/added
+# regime here can't silently drift out of sync with their bucketing.
+REGIMES = ("bull", "bear", "consolidation")
+
 MA_SHORT = 20
 MA_MID = 60
 SLOPE_LOOKBACK = 10

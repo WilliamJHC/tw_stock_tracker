@@ -22,11 +22,12 @@ dividend contributes a phantom momentum value to that date's IC.
 import bisect
 
 import finlab_factors as ff
+import market_regime as mr
 import metrics as m
 import portfolio_backtest as pb
 
 DEFAULT_HORIZONS = (1, 5, 20, 60)
-REGIMES = ("bull", "bear", "consolidation")
+REGIMES = mr.REGIMES  # re-exported for callers that already do `fe.REGIMES` -- single source of truth is market_regime.py
 
 # RANKING_WEIGHTS' factor name -> the raw value key _raw_factor_values()
 # stores it under (finlab_factors.py names the revenue-YoY factor "yoy" in
@@ -129,14 +130,21 @@ def evaluate_factors(universe_data, dates=None, horizons=DEFAULT_HORIZONS):
     return result
 
 
-def _regime_as_of(raw_regime_series, date):
+def _regime_as_of(raw_regime_series, date, _series_dates=None):
     """Latest raw_regime_series entry with date <= `date`, or None -- same
     "as of" convention as finlab_factors._as_of()/_bar_index_on_or_before().
     raw_regime_series: market_regime.regime_series()'s ascending [(date,
     regime_or_None), ...]. Needed because `dates` here are month-boundary
     rebalance dates while regime_series() is daily -- an exact-match lookup
-    would miss every rebalance date that isn't also a regime_series() entry."""
-    dates = [d for d, _ in raw_regime_series]
+    would miss every rebalance date that isn't also a regime_series() entry.
+
+    _series_dates: optional pre-extracted `[d for d, _ in raw_regime_series]`
+    -- evaluate_factors_by_regime() below calls this once per rebalance date
+    against the same (typically ~1000-bar) raw_regime_series, so it hoists
+    this list out and passes it in rather than paying to rebuild it on every
+    call. None (the default) rebuilds it here, for a standalone caller (e.g.
+    this module's own tests) that doesn't have one already."""
+    dates = _series_dates if _series_dates is not None else [d for d, _ in raw_regime_series]
     idx = bisect.bisect_right(dates, date) - 1
     return raw_regime_series[idx][1] if idx >= 0 else None
 
@@ -163,9 +171,10 @@ def evaluate_factors_by_regime(universe_data, raw_regime_series, dates=None, hor
     `dates` defaults to rebalance_dates(universe_data), same as
     evaluate_factors()."""
     dates = dates if dates is not None else rebalance_dates(universe_data)
+    series_dates = [d for d, _ in raw_regime_series]
     buckets = {regime: [] for regime in REGIMES}
     for date in dates:
-        regime = _regime_as_of(raw_regime_series, date)
+        regime = _regime_as_of(raw_regime_series, date, series_dates)
         if regime in buckets:
             buckets[regime].append(date)
     return {

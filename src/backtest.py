@@ -30,6 +30,7 @@ import datetime as dt
 import json
 
 import analysis as an
+import market_regime as mr
 import metrics as mt
 
 DEFAULT_HORIZONS = (5, 10, 20)
@@ -142,7 +143,7 @@ def signal_win_rates(daily, horizons=DEFAULT_HORIZONS):
     return rows
 
 
-REGIMES = ("bull", "bear", "consolidation")
+REGIMES = mr.REGIMES  # re-exported for callers that already do `bt.REGIMES` -- single source of truth is market_regime.py
 
 
 def signal_win_rates_by_regime(daily, raw_regime_series, horizons=DEFAULT_HORIZONS):
@@ -493,7 +494,14 @@ def simulate(score_rows, bars, params=None, bar_index=None, regime_by_date=None)
         trades.append({
             "entry_date": position["entry_date"], "entry_price": position["entry_price"],
             "exit_date": bars[last_idx]["date"], "exit_price": exit_price,
-            "ret_pct": gross_ret - p["fee_pct"], "exit_reason": "end_of_data",
+            # default_p, not the loop's last resolved `p` -- fee_pct isn't a
+            # regime-conditional knob in STRATEGY_PARAMS_BY_REGIME today, but
+            # if it ever became one, `p` here would be whatever regime the
+            # LAST score_row happened to resolve to (not necessarily this
+            # bar's date, since score_rows can end before bars does), an
+            # unrelated and undocumented coincidence rather than a real
+            # choice. default_p is well-defined regardless of loop state.
+            "ret_pct": gross_ret - default_p["fee_pct"], "exit_reason": "end_of_data",
             "hold_days": last_idx - position["entry_idx"],
         })
 
@@ -512,7 +520,7 @@ def simulate(score_rows, bars, params=None, bar_index=None, regime_by_date=None)
         c0 = closes[bar_idx_by_date[start_date]]
         c1 = closes[bar_idx_by_date[end_date]]
         if c0:
-            buy_hold_return = (c1 / c0 - 1) * 100 - p["fee_pct"]
+            buy_hold_return = (c1 / c0 - 1) * 100 - default_p["fee_pct"]  # see default_p note above
 
     summary = {
         "n_trades": n_trades,

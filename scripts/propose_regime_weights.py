@@ -55,7 +55,12 @@ def build_candidate(universe_data, raw_regime_series, horizon=20, min_sample_dat
     `skipped` to whoever reviews the candidate so a thin bucket is never
     silently absent."""
     dates = fe.rebalance_dates(universe_data)
-    result = fe.evaluate_factors_by_regime(universe_data, raw_regime_series, dates=dates)
+    # horizons=(horizon,) -- suggest_weights() below only ever looks up
+    # `horizon` itself; evaluate_factors_by_regime() defaults to factor_eval.
+    # DEFAULT_HORIZONS=(1,5,20,60), so without this a non-default --horizon
+    # (e.g. 10) would silently get no ICIR computed for it at all and every
+    # regime would wrongly skip with "no factor cleared min_icir".
+    result = fe.evaluate_factors_by_regime(universe_data, raw_regime_series, dates=dates, horizons=(horizon,))
     weights_by_regime, skipped = {}, {}
     for regime in fe.REGIMES:
         bucket = result[regime]

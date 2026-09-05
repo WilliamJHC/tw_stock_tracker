@@ -23,7 +23,6 @@ Usage:
     python scripts/report_regime_factor_ic.py [--horizons 1,5,20,60] [--confirm-days 3]
 """
 import argparse
-import datetime as dt
 import json
 import os
 import sys
@@ -69,7 +68,7 @@ def _daily_from_db(conn, code):
     except ValueError as e:
         print(f"  [skip] {code}: {e}")
         return None
-    times = [int(dt.datetime.combine(dt.date.fromisoformat(r["date"]), dt.time()).timestamp()) for r in adjusted]
+    times = [bt._epoch(r["date"]) for r in adjusted]
     return {"t": times, "o": [r["o"] for r in adjusted], "c": [r["c"] for r in adjusted], "v": [r["v"] for r in adjusted]}
 
 
