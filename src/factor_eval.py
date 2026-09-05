@@ -19,11 +19,14 @@ LIMITATION (see that module's docstring): it runs on unadjusted close, so
 a rebalance date shortly after any universe code's split/large stock
 dividend contributes a phantom momentum value to that date's IC.
 """
+import bisect
+
 import finlab_factors as ff
 import metrics as m
 import portfolio_backtest as pb
 
 DEFAULT_HORIZONS = (1, 5, 20, 60)
+REGIMES = ("bull", "bear", "consolidation")
 
 # RANKING_WEIGHTS' factor name -> the raw value key _raw_factor_values()
 # stores it under (finlab_factors.py names the revenue-YoY factor "yoy" in
@@ -124,6 +127,54 @@ def evaluate_factors(universe_data, dates=None, horizons=DEFAULT_HORIZONS):
                                                             raw_by_date=raw_by_date)]
             result[factor_name][horizon] = m.ic_stats(ic_series)
     return result
+
+
+def _regime_as_of(raw_regime_series, date):
+    """Latest raw_regime_series entry with date <= `date`, or None -- same
+    "as of" convention as finlab_factors._as_of()/_bar_index_on_or_before().
+    raw_regime_series: market_regime.regime_series()'s ascending [(date,
+    regime_or_None), ...]. Needed because `dates` here are month-boundary
+    rebalance dates while regime_series() is daily -- an exact-match lookup
+    would miss every rebalance date that isn't also a regime_series() entry."""
+    dates = [d for d, _ in raw_regime_series]
+    idx = bisect.bisect_right(dates, date) - 1
+    return raw_regime_series[idx][1] if idx >= 0 else None
+
+
+def evaluate_factors_by_regime(universe_data, raw_regime_series, dates=None, horizons=DEFAULT_HORIZONS):
+    """evaluate_factors() bucketed by market regime (src/market_regime.py):
+    {"bull": {"sample_dates": N, "factors": {...}}, "bear": {...},
+    "consolidation": {...}} -- each "factors" value is exactly
+    evaluate_factors()'s own {factor_name: {horizon: ic_stats_dict}} shape,
+    computed only over the dates that bucket into that regime, so a caller
+    (scripts/report_regime_factor_ic.py) can print/compare per-regime IC
+    with no separate code path.
+
+    "sample_dates" is included because a small bucket (e.g. few
+    "consolidation" rebalance dates in the sample window) makes its own
+    ic_stats() numbers unreliable -- the report must say so explicitly, not
+    just print a number that looks the same shape as a well-sampled one
+    (docs/regime_strategy_research.md).
+
+    raw_regime_series: market_regime.regime_series()'s ascending [(date,
+    regime_or_None), ...] for the market index (TAIEX), looked up "as of"
+    via _regime_as_of() above since `dates` are rebalance dates, not daily.
+
+    `dates` defaults to rebalance_dates(universe_data), same as
+    evaluate_factors()."""
+    dates = dates if dates is not None else rebalance_dates(universe_data)
+    buckets = {regime: [] for regime in REGIMES}
+    for date in dates:
+        regime = _regime_as_of(raw_regime_series, date)
+        if regime in buckets:
+            buckets[regime].append(date)
+    return {
+        regime: {
+            "sample_dates": len(bucket_dates),
+            "factors": evaluate_factors(universe_data, dates=bucket_dates, horizons=horizons) if bucket_dates else {},
+        }
+        for regime, bucket_dates in buckets.items()
+    }
 
 
 def evaluate_candidate_factor(universe_data, series_key, value_key, dates=None, horizons=DEFAULT_HORIZONS):

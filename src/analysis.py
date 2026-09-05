@@ -594,13 +594,22 @@ def build_backtest_ctx(daily):
             "ma60": ma60, "vol20": vol20, "quadrant": quadrant}
 
 
-def backtest_signal(ctx, fn, horizon=20, gap=5):
+def backtest_signal(ctx, fn, horizon=20, gap=5, allowed_indices=None):
     """Win rate of a signal over history: forward `horizon`-day return,
-    sampling at most once per `gap` days to avoid overlapping samples."""
+    sampling at most once per `gap` days to avoid overlapping samples.
+
+    allowed_indices: optional set of bar indices `i` may fall on -- indices
+    outside it are skipped as if the signal never fired there. None (the
+    default) considers every bar, unchanged from before this parameter
+    existed. Used by backtest.signal_win_rates_by_regime() to restrict the
+    win-rate calculation to bars falling in one market regime (src/
+    market_regime.py) without duplicating this loop."""
     n = len(ctx["closes"])
     hits = []
     last = -10 ** 9
     for i in range(n - horizon):
+        if allowed_indices is not None and i not in allowed_indices:
+            continue
         if not fn(ctx, i):
             continue
         if i - last < gap:

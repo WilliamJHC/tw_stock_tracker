@@ -13,6 +13,7 @@ import adjust
 import backtest as bt
 import data_sources as ds
 import db
+import market_regime as mr
 import pipeline as pl
 
 # 3650 calendar days ~= 10y of bars; analysis needs a 120-bar warmup
@@ -184,15 +185,37 @@ def compute_signal_stats(conn, codes):
         print(f"  {code}: {len(rows)} 組訊號×天期（{n_with_samples} 組有樣本）")
 
 
+def _taiex_regime_by_date():
+    """{date: regime_or_None} for src/backtest.py's simulate(regime_by_date=)
+    -- one TAIEX fetch shared by every code's replay in this run, not one
+    per code (the regime is market-wide, not code-specific; see
+    src/market_regime.py). None (not {}) on failure -- FinMind AND yfinance
+    both down is the kind of transient issue that shouldn't fail the whole
+    replay batch over an optional enhancement, so the caller falls back to
+    simulate()'s pre-regime-awareness behavior (one fixed STRATEGY_PARAMS
+    for the whole run) rather than aborting."""
+    try:
+        taiex = ds.get_index_daily("TAIEX")
+    except ds.SourceError as e:
+        print(f"  TAIEX 大盤資料抓取失敗（{e}），本次回測不套用盤勢感知的 STRATEGY_PARAMS_BY_REGIME")
+        return None
+    return dict(mr.regime_series(taiex))
+
+
 def run_replay_and_simulate(conn, codes, run_id=None):
     """Phase 4: recompute daily scores bar-by-bar and run the strategy
     simulation for every code, writing score_history/strategy_runs/trades.
     Sets meta.last_run_at/last_run_id/params_json/of_excluded on success --
     the frontend's sole source for "回測資料更新於 X" (docs/archive/backtest_plan.md
     Phase 1), so this only happens once the full pipeline has actually run,
-    not after the raw data import in Phase 2."""
+    not after the raw data import in Phase 2.
+
+    Each code's simulate() call is regime-aware (docs/regime_strategy_research.md,
+    src/backtest.py's STRATEGY_PARAMS_BY_REGIME) via one shared TAIEX regime
+    lookup fetched once for the whole run -- see _taiex_regime_by_date()."""
     run_id = run_id or dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     print(f"\n重算歷史分數與策略回測（run_id={run_id}）...")
+    regime_by_date = _taiex_regime_by_date()
 
     bars_by_code = {}
     for code in codes:
@@ -226,9 +249,12 @@ def run_replay_and_simulate(conn, codes, run_id=None):
             continue
         db.upsert_score_history(conn, code, score_rows)
 
-        sim = bt.simulate(score_rows, bars)
+        sim = bt.simulate(score_rows, bars, regime_by_date=regime_by_date)
         db.upsert_strategy_run(conn, run_id, code, {
-            "params_json": json.dumps(bt.STRATEGY_PARAMS, ensure_ascii=False),
+            "params_json": json.dumps(
+                {"base": bt.STRATEGY_PARAMS, "by_regime": bt.STRATEGY_PARAMS_BY_REGIME},
+                ensure_ascii=False,
+            ),
             **sim["summary"],
             "computed_at": dt.datetime.now().isoformat(),
         })
@@ -244,7 +270,9 @@ def run_replay_and_simulate(conn, codes, run_id=None):
 
     db.set_meta(conn, "last_run_at", dt.datetime.now().isoformat())
     db.set_meta(conn, "last_run_id", run_id)
-    db.set_meta(conn, "params_json", json.dumps(bt.STRATEGY_PARAMS, ensure_ascii=False))
+    db.set_meta(conn, "params_json", json.dumps(
+        {"base": bt.STRATEGY_PARAMS, "by_regime": bt.STRATEGY_PARAMS_BY_REGIME}, ensure_ascii=False,
+    ))
     # OF (orderFlow, 15/100 of SCORE_WEIGHTS) can't be reconstructed 2 years
     # back -- see docs/archive/backtest_plan.md Phase 4's "硬限制" section. Every
     # replayed score is scored as if OF contributed 0; build_suggestions()

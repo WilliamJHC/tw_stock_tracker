@@ -68,6 +68,37 @@ STRATEGY_PARAMS = {
     "fee_pct": 0.6,
 }
 
+# Regime-conditional overrides on top of STRATEGY_PARAMS (docs/
+# regime_strategy_research.md Phase B, backed by pooled watchlist signal
+# win-rates from scripts/report_regime_factor_ic.py -- NOT the same
+# walk-forward/PBO/DSR rigor RANKING_WEIGHTS gets, see that doc's
+# methodology section for why a lighter bar is appropriate here). Only a
+# regime with real evidence to deviate gets an entry; a regime absent here
+# (or a key absent from its dict) falls through to STRATEGY_PARAMS
+# unchanged -- see simulate()'s regime_by_date parameter.
+#
+# bear: pooled h=20 signal stats showed "跌破MA60" (trend-continuation
+# entry) at a 48.1% win rate with ~0% avg_ret (worst of all regime/signal
+# pairs measured -- continuation has no real edge once the market itself is
+# already trending down), while "爆量長紅" (reversal) was the single best
+# performer of any regime at 70.6%/+9.02%. Shorter max_hold_days locks in a
+# bounce before the broader downtrend reasserts itself; a tighter
+# exit_composite cuts a deteriorating position sooner instead of waiting for
+# the same -40 threshold a bull/consolidation market would use. atr_mult and
+# fee_pct are left at the global default -- the research only evaluated
+# holding-period and composite-exit behavior, not the ATR stop itself (that
+# stop is already disabled globally, see the atr_mult=100 note above; a
+# regime-specific re-evaluation of it is future work, not backed by this
+# data).
+# bull/consolidation: the same data showed no clear divergence from the
+# global default worth acting on (docs/regime_strategy_research.md's
+# "訊號勝率分盤勢結果" table) -- deliberately left unlisted here rather than
+# repeating STRATEGY_PARAMS's values, so a future change to STRATEGY_PARAMS
+# doesn't also require updating an unchanged duplicate.
+STRATEGY_PARAMS_BY_REGIME = {
+    "bear": {"exit_composite": -25, "max_hold_days": 60},
+}
+
 # Phase 5 confidence-engine knobs. horizon=20 matches this project's other
 # "hold ~1 month" framing (20d is the default backtest horizon used
 # elsewhere -- max_hold_days moved to 120 in Phase 3, but 20d's own
@@ -109,6 +140,57 @@ def signal_win_rates(daily, horizons=DEFAULT_HORIZONS):
                 "avg_ret": r.get("avg_ret"),
             })
     return rows
+
+
+REGIMES = ("bull", "bear", "consolidation")
+
+
+def signal_win_rates_by_regime(daily, raw_regime_series, horizons=DEFAULT_HORIZONS):
+    """Same shape as signal_win_rates() above, computed separately for each
+    of market_regime.py's three market regimes: {"bull": [...], "bear":
+    [...], "consolidation": [...]}, each value the same flat list of
+    {signal, horizon, n, wins, win_rate, avg_ret} rows, restricted to bars
+    whose calendar date fell in that regime (docs/regime_strategy_research.md
+    Phase B).
+
+    raw_regime_series: market_regime.regime_series()'s [(date, regime_or_
+    None), ...] for the MARKET INDEX (TAIEX), not `daily`'s own code -- a
+    single stock's own MA alignment is a different concept from the
+    market-wide regime this buckets by (see src/market_regime.py's
+    docstring). Matched against `daily["t"]` by calendar date; a bar with no
+    matching regime entry (e.g. before TAIEX's own history starts) is
+    excluded from every bucket rather than guessed at -- same "just don't
+    count it" stance as an.liquidity_ok()-style filters elsewhere in this
+    project.
+
+    Deliberately reuses an.backtest_signal()'s `allowed_indices` filter
+    instead of re-deriving win rates from scratch per regime -- see that
+    parameter's docstring."""
+    dates = [dt.datetime.fromtimestamp(t).date().isoformat() for t in daily["t"]]
+    regime_by_date = dict(raw_regime_series)
+    buckets = {regime: set() for regime in REGIMES}
+    for i, date in enumerate(dates):
+        regime = regime_by_date.get(date)
+        if regime in buckets:
+            buckets[regime].add(i)
+
+    ctx = an.build_backtest_ctx(daily)
+    result = {}
+    for regime, allowed in buckets.items():
+        rows = []
+        for signal, fn in an.BACKTEST_SIGNALS.items():
+            for horizon in horizons:
+                r = an.backtest_signal(ctx, fn, horizon=horizon, gap=5, allowed_indices=allowed)
+                rows.append({
+                    "signal": signal,
+                    "horizon": horizon,
+                    "n": r["n"],
+                    "wins": r.get("wins"),
+                    "win_rate": r.get("win_rate"),
+                    "avg_ret": r.get("avg_ret"),
+                })
+        result[regime] = rows
+    return result
 
 
 # --------------------------------------------------------- score replay ----
@@ -284,7 +366,24 @@ def build_bar_index(bars):
     )
 
 
-def simulate(score_rows, bars, params=None, bar_index=None):
+def _resolve_params(explicit_override, regime=None):
+    """STRATEGY_PARAMS, layered with STRATEGY_PARAMS_BY_REGIME[regime] (if
+    `regime` names one) and then `explicit_override` (if given) -- in that
+    order, so an explicit caller override always wins over a regime default
+    for any key both specify, and a regime default always wins over the
+    global default. None (unlisted) regime, or a regime not in
+    STRATEGY_PARAMS_BY_REGIME, changes nothing (pure global default +
+    explicit override, byte-identical to this function's behavior before
+    regime-awareness existed)."""
+    p = dict(STRATEGY_PARAMS)
+    if regime and regime in STRATEGY_PARAMS_BY_REGIME:
+        p.update(STRATEGY_PARAMS_BY_REGIME[regime])
+    if explicit_override:
+        p.update(explicit_override)
+    return p
+
+
+def simulate(score_rows, bars, params=None, bar_index=None, regime_by_date=None):
     """Long-only, single-position, no-leverage strategy simulation over one
     code's replayed scores (docs/backtest_plan.md Phase 4). Pure function --
     no I/O.
@@ -321,10 +420,21 @@ def simulate(score_rows, bars, params=None, bar_index=None):
     by build_bar_index(bars) -- pass it in when calling simulate() many
     times against the same `bars` array to skip rebuilding it every call.
     Must actually correspond to `bars`; not verified here.
-    """
-    p = dict(STRATEGY_PARAMS)
-    if params:
-        p.update(params)
+
+    regime_by_date: optional {date: regime} (e.g. dict(market_regime.
+    regime_series(taiex_bars)), NOT this code's own bars -- see
+    src/market_regime.py) -- when given, EVERY entry/exit decision on a
+    given row resolves its params via _resolve_params(params, regime) using
+    THAT row's date's regime, instead of one fixed params dict for the whole
+    simulation. A regime change mid-hold takes effect immediately on the
+    next row (e.g. a position opened in a bull regime gets bear's tighter
+    exit_composite the day the market turns), matching how a caller would
+    actually want risk parameters to respond to a live regime shift. None
+    (the default) uses one _resolve_params(params, None) for the entire
+    simulation, byte-identical to this function's behavior before regime-
+    awareness existed."""
+    default_p = _resolve_params(params, None)
+    p = default_p
 
     if bar_index is not None:
         bar_idx_by_date, highs, lows, closes = bar_index
@@ -339,6 +449,7 @@ def simulate(score_rows, bars, params=None, bar_index=None):
         if idx is None or idx + 1 >= len(bars):
             continue  # no next bar to execute on yet (or ever, for the last row)
         next_bar = bars[idx + 1]
+        p = _resolve_params(params, regime_by_date.get(row["date"])) if regime_by_date is not None else default_p
 
         if position is None:
             if row["action"] == "準備進場":

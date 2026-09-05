@@ -310,6 +310,26 @@ def _twse_daily(code, months=4):
 
 # ---------------------------------------------------------- public API --
 
+def _finmind_price_rows_to_hist(rows):
+    """FinMind TaiwanStockPrice rows -> {t,o,h,l,c,v} (no source/adjusted
+    key -- callers set those). None if every row lacks a usable close.
+    Shared by get_daily() (per-stock) and get_index_daily() (index-level,
+    same dataset/row shape, different data_id)."""
+    hist = {"t": [], "o": [], "h": [], "l": [], "c": [], "v": []}
+    for r in rows:
+        c = r.get("close")
+        if not c:
+            continue
+        d = dt.datetime.strptime(r["date"], "%Y-%m-%d")
+        hist["t"].append(int(d.timestamp()))
+        hist["o"].append(float(r.get("open") or c))
+        hist["h"].append(float(r.get("max") or c))
+        hist["l"].append(float(r.get("min") or c))
+        hist["c"].append(float(c))
+        hist["v"].append(int(r.get("Trading_Volume") or 0))
+    return hist if hist["c"] else None
+
+
 def get_daily(code, days=730, cache=True):
     """`days`-window daily OHLCV (default ~2y). Volume unit: shares. Returns
     {t,o,h,l,c,v,source,adjusted}.
@@ -342,19 +362,8 @@ def get_daily(code, days=730, cache=True):
     try:
         start = (dt.date.today() - dt.timedelta(days=days + 30)).isoformat()
         rows = _finmind("TaiwanStockPrice", code, start)
-        if rows:
-            hist = {"t": [], "o": [], "h": [], "l": [], "c": [], "v": []}
-            for r in rows:
-                c = r.get("close")
-                if not c:
-                    continue
-                d = dt.datetime.strptime(r["date"], "%Y-%m-%d")
-                hist["t"].append(int(d.timestamp()))
-                hist["o"].append(float(r.get("open") or c))
-                hist["h"].append(float(r.get("max") or c))
-                hist["l"].append(float(r.get("min") or c))
-                hist["c"].append(float(c))
-                hist["v"].append(int(r.get("Trading_Volume") or 0))
+        hist = _finmind_price_rows_to_hist(rows) if rows else None
+        if hist:
             hist["source"] = "finmind"
             hist["adjusted"] = False
     except (SourceError, requests.RequestException, ValueError, KeyError):
@@ -389,6 +398,70 @@ def get_daily(code, days=730, cache=True):
 
     if cache:
         _cache_put(f"daily_{code}", hist)
+    return hist
+
+
+# yfinance ticker for each supported market index -- ^TWII is TAIEX's own
+# ticker, not a per-stock code, so it must NOT go through _yf_history_since()/
+# _yf_history()'s ".TW"/".TWO" suffix logic (that would mangle it into
+# "^TWII.TW", which doesn't exist).
+_INDEX_YF_TICKERS = {"TAIEX": "^TWII"}
+
+
+def get_index_daily(index_id="TAIEX", days=1825, cache=True):
+    """`days`-window daily OHLCV for a market index (default TAIEX, ~5y --
+    longer than get_daily()'s 730-day default because src/market_regime.py's
+    regime_series() and the regime-bucketed factor-IC report need enough
+    history to see multiple bull/bear/consolidation cycles, see
+    docs/regime_strategy_research.md; verified 2026-09-06 against live
+    FinMind data that 3y (1095 days) landed entirely inside TAIEX's 2023-2026
+    bull run and missed 2022's bear market almost completely -- 5y is what
+    scripts/run_factor_backtest.py's own per-code cache already carries
+    (cache/factor_run/*.json's "days": 1800), so this matches that window
+    instead of inventing a shorter one). Returns {t,o,h,l,c,v,source} -- no
+    `adjusted` key: an index has no splits/dividends to adjust for, unlike a
+    single stock's get_daily().
+
+    Only two sources, unlike get_daily()'s four: Fugle and the TWSE per-code
+    daily endpoint (_fugle_daily()/_twse_daily()) are both stock-specific
+    APIs that don't serve an index at all, so neither belongs in this
+    fallback chain.
+    1. FinMind TaiwanStockPrice with data_id=index_id -- FinMind serves
+       TAIEX's own OHLC under that same dataset, same row shape as a stock.
+    2. yfinance, ticker resolved via _INDEX_YF_TICKERS (see its docstring
+       above for why this can't reuse _yf_history_since())."""
+    cache_key = f"index_daily_{index_id}"
+    cached = _cache_get(cache_key) if cache else None
+    if cached:
+        return cached
+
+    start = (dt.date.today() - dt.timedelta(days=days + 30)).isoformat()
+    hist = None
+    # 1. FinMind
+    try:
+        rows = _finmind("TaiwanStockPrice", index_id, start)
+        hist = _finmind_price_rows_to_hist(rows) if rows else None
+        if hist:
+            hist["source"] = "finmind"
+    except (SourceError, requests.RequestException, ValueError, KeyError):
+        hist = None
+
+    # 2. yfinance
+    if not hist or not hist["c"]:
+        yf_ticker = _INDEX_YF_TICKERS.get(index_id, index_id)
+        try:
+            import yfinance as yf
+            df = yf.Ticker(yf_ticker).history(start=start, interval="1d", auto_adjust=False)
+            hist = _df_to_hist(df)
+            hist["source"] = "yfinance"
+        except Exception:
+            hist = None
+
+    if not hist or not hist["c"]:
+        raise SourceError(f"get_index_daily: no data for {index_id}")
+
+    if cache:
+        _cache_put(cache_key, hist)
     return hist
 
 

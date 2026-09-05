@@ -1,0 +1,62 @@
+name: apply_regime_weights_candidate
+
+# Manual application step for scripts/propose_regime_weights.py's pending
+# candidate (docs/adr/0004-regime-adaptive-strategy.md -- same manual-review
+# posture as apply_strategy_candidate.yml/docs/adr/0003-manual-review-for-
+# strategy-logic-search.md). workflow_dispatch-only, no schedule -- a human
+# decides when to apply or reject.
+#
+# Runs INSIDE GitHub Actions, not on a contributor's local machine, for the
+# same reason apply_strategy_candidate.yml does: the real backtest.db only
+# exists inside this repo's backtest-db-state actions/cache lineage (see
+# .github/actions/backtest-db-cache) -- a local run opens an unrelated
+# throwaway file instead and would silently never reach production.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        type: string
+        description: '要核對的 run_id（留空 = 直接套用/捨棄目前的 pending 候選，不核對是否一致）'
+        default: ''
+      reject:
+        type: boolean
+        description: '勾選 = 捨棄待審候選，不套用'
+        default: false
+
+concurrency:
+  # Shared with optimize.yml/daily_recommendations.yml/strategy_search.yml/
+  # apply_strategy_candidate.yml on purpose -- see backtest-db-cache's own
+  # description: every job here reads+writes src/data/backtest.db through
+  # the same optimize-state- cache lineage, so they must never run at the
+  # same time (actions/cache has no merge, just whole-file overwrite by
+  # save time).
+  group: backtest-db-state
+  cancel-in-progress: false
+
+jobs:
+  apply_regime_weights_candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-actions.txt
+      - run: pip install -r requirements-actions.txt
+      # save: 'true' -- this job writes active_ranking_weights_by_regime/
+      # pending_regime_weights_candidate and must save the result back, same
+      # as apply_strategy_candidate.yml.
+      - uses: ./.github/actions/backtest-db-cache
+        with:
+          save: 'true'
+      - name: apply_regime_weights_candidate
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.run_id }}" ]; then
+            ARGS="$ARGS --run-id ${{ inputs.run_id }}"
+          fi
+          if [ "${{ inputs.reject }}" = "true" ]; then
+            ARGS="$ARGS --reject"
+          fi
+          python scripts/apply_regime_weights_candidate.py $ARGS

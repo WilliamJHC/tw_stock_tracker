@@ -163,6 +163,14 @@ Secrets 沿用「手機雲端版」同一個 Environment「Cloudflare」底下�
 `TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID`（跟 `deploy-worker.yml` 用同一組），
 不需要另外設定。
 
+**盤勢自適應權重**：每日推薦排名（`scripts/run_daily_recommendations.py`）
+會依當下大盤（TAIEX）盤勢——多頭／空頭／盤整，`src/market_regime.py`——
+從 `meta.active_ranking_weights_by_regime` 找對應那組權重，找不到（尚未
+有人工核准的候選，或該盤勢樣本數不足被跳過）就 fallback 回上面這組全域
+`active_ranking_weights`，行為不變。候選同樣走人工審核，不是 ADR 0002 的
+自動套用——見 `docs/adr/0004-regime-adaptive-strategy.md`、
+`docs/regime_strategy_research.md`（因子在各盤勢下的實測 IC/勝率）。
+
 ### 故障排查（Actions 紅燈看哪裡）
 
 點進失敗的 run → 展開紅色 ✕ 的那個 step 看訊息。目前遇過兩種：

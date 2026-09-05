@@ -55,6 +55,57 @@ def test_signal_win_rates_hand_computed_monotonic_rise():
     assert direct["avg_ret"] == bull_align["avg_ret"]
 
 
+# ------------------------------------------------------ signal_win_rates_by_regime --
+
+def _daily_with_dates(n, start="2022-01-01"):
+    """Same monotonic +1%/day series as the test above, but with real "t"
+    epoch timestamps (dates start-> start+n-1 days) -- signal_win_rates_by_
+    regime() needs daily["t"] to match bars against a regime series, unlike
+    plain signal_win_rates()."""
+    base = dt.date.fromisoformat(start)
+    closes = [100.0]
+    for _ in range(n - 1):
+        closes.append(closes[-1] * 1.01)
+    times = [int(dt.datetime.combine(base + dt.timedelta(days=i), dt.time()).timestamp()) for i in range(n)]
+    return {"c": closes, "v": [1000] * n, "o": closes[:], "t": times}, base
+
+
+def test_signal_win_rates_by_regime_only_counts_bars_in_that_regime():
+    n = 100
+    daily, base = _daily_with_dates(n)
+    dates = [(base + dt.timedelta(days=i)).isoformat() for i in range(n)]
+
+    # "均線多頭排列" only qualifies for i in [59, 94] (see the hand-computed
+    # test above) -- labeling i<50 "bull" and i>=50 "bear" puts every
+    # qualifying bar in the "bear" bucket, none in "bull".
+    raw_regime_series = [(dates[i], "bull" if i < 50 else "bear") for i in range(n)]
+
+    result = bt.signal_win_rates_by_regime(daily, raw_regime_series, horizons=(5,))
+    assert set(result) == set(bt.REGIMES)
+
+    by_key = {(r["signal"], r["horizon"]): r for r in result["bear"]}
+    bear_bucket = by_key[("均線多頭排列", 5)]
+    by_key_bull = {(r["signal"], r["horizon"]): r for r in result["bull"]}
+    bull_bucket = by_key_bull[("均線多頭排列", 5)]
+
+    ctx = an.build_backtest_ctx(daily)
+    direct = an.backtest_signal(ctx, an.BACKTEST_SIGNALS["均線多頭排列"], horizon=5, gap=5)
+
+    assert bear_bucket["n"] == direct["n"]  # every qualifying bar fell in "bear"
+    assert bull_bucket["n"] == 0
+    assert all(r["n"] == 0 for r in result["consolidation"])  # no bar labeled "consolidation"
+
+
+def test_signal_win_rates_by_regime_excludes_bars_with_no_matching_date():
+    n = 100
+    daily, _ = _daily_with_dates(n)
+    # Regime series covers a completely different date range -- no bar in
+    # `daily` should land in any bucket.
+    raw_regime_series = [("1999-01-01", "bull")]
+    result = bt.signal_win_rates_by_regime(daily, raw_regime_series, horizons=(5,))
+    assert all(r["n"] == 0 for rows in result.values() for r in rows)
+
+
 # -------------------------------------------------------------- replay_scores --
 
 def test_replay_scores_never_leaks_same_day_chip_data():
@@ -383,6 +434,97 @@ def test_simulate_no_trades_returns_none_summary_fields():
     assert s["win_rate"] is None and s["avg_ret"] is None
     assert s["total_return"] is None and s["max_drawdown"] is None
     assert s["start_date"] == "d0" and s["end_date"] == "d1"  # dates still reported
+
+
+# ------------------------------------------------- simulate()'s regime_by_date --
+
+def test_resolve_params_layering():
+    base = bt._resolve_params(None, None)
+    assert base["max_hold_days"] == bt.STRATEGY_PARAMS["max_hold_days"]
+
+    bear = bt._resolve_params(None, "bear")
+    assert bear["max_hold_days"] == bt.STRATEGY_PARAMS_BY_REGIME["bear"]["max_hold_days"]
+    assert bear["atr_mult"] == bt.STRATEGY_PARAMS["atr_mult"]  # unspecified key falls through to global
+
+    overridden = bt._resolve_params({"max_hold_days": 5}, "bear")
+    assert overridden["max_hold_days"] == 5  # explicit override wins over regime default
+
+    assert bt._resolve_params(None, "sideways") == base  # unrecognized regime -> no-op
+
+
+def test_simulate_uses_regime_specific_max_hold_days():
+    # Same shape as test_simulate_max_hold_days_exit() above, but selecting
+    # STRATEGY_PARAMS_BY_REGIME["bear"]'s max_hold_days=60 via regime_by_date
+    # instead of an explicit params override.
+    n = 70
+    opens = [100.0 + i * 0.01 for i in range(n)]
+    dates = [f"d{i:03d}" for i in range(n)]
+    bars = _bars(opens, dates)
+    score_rows = [{"date": dates[0], "action": "準備進場", "composite": 45}]
+    score_rows += [{"date": dates[i], "action": "無變化", "composite": 0} for i in range(1, n - 1)]
+    regime_by_date = {d: "bear" for d in dates}
+
+    out = bt.simulate(score_rows, bars, regime_by_date=regime_by_date)
+    t = out["trades"][0]
+    assert t["exit_reason"] == "max_hold"
+    assert t["hold_days"] == bt.STRATEGY_PARAMS_BY_REGIME["bear"]["max_hold_days"] + 1  # +1 fill lag
+
+
+def test_simulate_regime_change_mid_hold_uses_current_row_regime():
+    bars = _bars([100, 101, 102, 103, 104, 105])
+    score_rows = [
+        {"date": "d0", "action": "無變化", "composite": 0},
+        {"date": "d1", "action": "準備進場", "composite": 45},
+        {"date": "d2", "action": "今日關注", "composite": -30},
+        {"date": "d3", "action": "無變化", "composite": 0},
+    ]
+    # d1 (entry day) is "bull" (unlisted in STRATEGY_PARAMS_BY_REGIME ->
+    # global exit_composite=-40; -30 wouldn't trip it). d2 flips to "bear"
+    # (exit_composite=-25) -- the SAME -30 composite score on d2 now trips
+    # the exit. Confirms the exit check uses the CURRENT row's regime, not
+    # whatever regime was in effect when the position was opened.
+    regime_by_date = {"d0": "bull", "d1": "bull", "d2": "bear", "d3": "bear"}
+    out = bt.simulate(score_rows, bars, regime_by_date=regime_by_date)
+    t = out["trades"][0]
+    assert t["exit_reason"] == "composite_exit"
+    assert t["entry_price"] == bars[2]["o"] and t["exit_price"] == bars[3]["o"]
+
+    # Sanity: the identical score path WITHOUT regime info (global -40
+    # default throughout) never trips the exit -- proves the regime
+    # override, not something else, is what caused the exit above.
+    baseline = bt.simulate(score_rows, bars)
+    assert baseline["trades"][0]["exit_reason"] == "end_of_data"
+
+
+def test_simulate_explicit_params_override_wins_over_regime_default():
+    n = 70
+    opens = [100.0 + i * 0.01 for i in range(n)]
+    dates = [f"d{i:03d}" for i in range(n)]
+    bars = _bars(opens, dates)
+    score_rows = [{"date": dates[0], "action": "準備進場", "composite": 45}]
+    score_rows += [{"date": dates[i], "action": "無變化", "composite": 0} for i in range(1, n - 1)]
+    regime_by_date = {d: "bear" for d in dates}  # bear's max_hold_days=60
+
+    out = bt.simulate(score_rows, bars, params={"max_hold_days": 65}, regime_by_date=regime_by_date)
+    t = out["trades"][0]
+    assert t["exit_reason"] == "max_hold"
+    assert t["hold_days"] == 66  # explicit 65 wins, not bear's 60
+
+
+def test_simulate_without_regime_by_date_unchanged():
+    # regime_by_date omitted entirely -- must be byte-identical to the
+    # pre-regime-awareness call shape (same fixture/assertions as
+    # test_simulate_max_hold_days_exit() above).
+    n = 70
+    opens = [100.0 + i * 0.01 for i in range(n)]
+    dates = [f"d{i:03d}" for i in range(n)]
+    bars = _bars(opens, dates)
+    score_rows = [{"date": dates[0], "action": "準備進場", "composite": 45}]
+    score_rows += [{"date": dates[i], "action": "無變化", "composite": 0} for i in range(1, n - 1)]
+    out = bt.simulate(score_rows, bars, params={"max_hold_days": 60})
+    t = out["trades"][0]
+    assert t["exit_reason"] == "max_hold"
+    assert t["hold_days"] == 61
 
 
 # --------------------------------------------------------------- confidence --

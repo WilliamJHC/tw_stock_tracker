@@ -58,11 +58,13 @@ import alerts  # noqa: E402
 import data_sources as ds  # noqa: E402
 import db  # noqa: E402
 import finlab_factors as ff  # noqa: E402
+import market_regime as mr  # noqa: E402
 
 import report_factor_ic as rfi  # noqa: E402
 
 META_KEY = "daily_recommendations"
 ACTIVE_META_KEY = "active_ranking_weights"
+REGIME_META_KEY = "active_ranking_weights_by_regime"
 
 
 def _latest_bar_date(universe_data):
@@ -73,14 +75,42 @@ def _latest_bar_date(universe_data):
     return max(dates) if dates else None
 
 
+def _current_market_regime():
+    """"bull"/"bear"/"consolidation"/None -- None on a TAIEX fetch failure
+    (FinMind and yfinance both down) or not enough TAIEX history yet
+    (src/market_regime.py's warmup). Either way the caller falls back to the
+    flat active_ranking_weights unchanged, same "don't fail the schedule
+    over an optional enhancement" stance as src/run_backtest.py's
+    _taiex_regime_by_date()."""
+    try:
+        taiex = ds.get_index_daily("TAIEX")
+    except ds.SourceError as e:
+        print(f"  TAIEX 大盤資料抓取失敗（{e}），今日推薦排名不套用盤勢別權重")
+        return None
+    return mr.current_regime(taiex)
+
+
 def build_recommendations(conn, universe_data, top_n):
-    """Returns {"as_of": str, "codes": [...]} or None if universe_data has
-    no usable bar_dates at all (nothing to date the ranking by)."""
+    """Returns {"as_of": str, "market_regime": str|None, "codes": [...]} or
+    None if universe_data has no usable bar_dates at all (nothing to date
+    the ranking by)."""
     as_of = _latest_bar_date(universe_data)
     if as_of is None:
         return None
 
-    weights = db.get_meta_json(conn, ACTIVE_META_KEY, default=dict(ff.RANKING_WEIGHTS))
+    regime = _current_market_regime()
+    # meta.active_ranking_weights_by_regime only exists once a human has
+    # approved a scripts/propose_regime_weights.py candidate via
+    # scripts/apply_regime_weights_candidate.py (docs/adr/0004-regime-
+    # adaptive-strategy.md) -- default {} makes every lookup below a no-op
+    # until then, so this ranking is byte-identical to before regime-
+    # adaptive weights existed. A regime the candidate skipped for
+    # insufficient sample size (docs/regime_strategy_research.md) is simply
+    # absent from the dict too, falling through the same way.
+    weights_by_regime = db.get_meta_json(conn, REGIME_META_KEY, default={})
+    weights = weights_by_regime.get(regime) if regime else None
+    if weights is None:
+        weights = db.get_meta_json(conn, ACTIVE_META_KEY, default=dict(ff.RANKING_WEIGHTS))
     # Only the extra factors `weights` actually references -- ff.used_extra_
     # factors([weights]) is {} on every ordinary day (active_ranking_weights
     # has no ma_cross/vol_price_div key until a strategy-search candidate is
@@ -115,7 +145,7 @@ def build_recommendations(conn, universe_data, top_n):
             # when they're the ones actually driving the ranking.
             "factor_ranks": dict(r),
         })
-    return {"as_of": as_of, "codes": codes_out}
+    return {"as_of": as_of, "market_regime": regime, "codes": codes_out}
 
 
 def main():
@@ -144,6 +174,7 @@ def main():
     payload = {
         "as_of": result["as_of"],
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "market_regime": result["market_regime"],
         "codes": result["codes"],
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2))

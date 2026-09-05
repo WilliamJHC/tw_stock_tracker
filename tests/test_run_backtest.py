@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """Unit tests for run_backtest.py's _adjusted_bars() and chip-row merge/split."""
+import datetime as dt
+
 import pytest
 
+import data_sources as ds
 import run_backtest as rb
 
 
@@ -45,3 +48,29 @@ def test_adjusted_bars_raises_when_null_and_computed_factors_are_mixed():
     bars = [_bar("2026-08-17", 100.0, 1.0), _bar("2026-08-18", 25.0, None)]
     with pytest.raises(ValueError, match="adj_factor 只有部分算過"):
         rb._adjusted_bars(bars)
+
+
+# ----------------------------------------------------- _taiex_regime_by_date --
+
+def test_taiex_regime_by_date_returns_none_on_source_error(monkeypatch):
+    """FinMind and yfinance both down must degrade to "no regime info"
+    rather than aborting the whole replay batch -- see this function's
+    docstring."""
+    def boom(*args, **kwargs):
+        raise ds.SourceError("network down")
+    monkeypatch.setattr(ds, "get_index_daily", boom)
+    assert rb._taiex_regime_by_date() is None
+
+
+def test_taiex_regime_by_date_wraps_market_regime_series(monkeypatch):
+    n = 70
+    base = dt.date(2020, 1, 1)
+    closes = [100.0 + i * 0.5 for i in range(n)]  # steady riser -> some classified days
+    times = [int(dt.datetime.combine(base + dt.timedelta(days=i), dt.time()).timestamp()) for i in range(n)]
+    fake_taiex = {"t": times, "c": closes}
+    monkeypatch.setattr(ds, "get_index_daily", lambda *a, **kw: fake_taiex)
+
+    import market_regime as mr
+    result = rb._taiex_regime_by_date()
+    assert result == dict(mr.regime_series(fake_taiex))
+    assert any(v is not None for v in result.values())  # sanity: not every day is warmup-None

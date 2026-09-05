@@ -114,6 +114,50 @@ def test_rebalance_dates_matches_portfolio_backtest_convention():
     assert fe.rebalance_dates(universe) == pb._rebalance_dates(calendar)
 
 
+# --------------------------------------------------- evaluate_factors_by_regime --
+
+def test_regime_as_of_picks_latest_entry_on_or_before_date():
+    raw = [("2022-01-01", "bull"), ("2022-03-01", "bear"), ("2022-06-01", "consolidation")]
+    assert fe._regime_as_of(raw, "2022-01-15") == "bull"  # between entries -> latest <=
+    assert fe._regime_as_of(raw, "2022-03-01") == "bear"  # exact match
+    assert fe._regime_as_of(raw, "2022-12-31") == "consolidation"  # after last entry
+    assert fe._regime_as_of(raw, "2021-01-01") is None  # before first entry
+
+
+def test_evaluate_factors_by_regime_partitions_dates_and_matches_direct_call():
+    universe = _synthetic_universe(n_codes=6, days=400)
+    dates = universe["C0"]["bar_dates"][300:340:10]  # 4 rebalance dates
+    assert len(dates) == 4
+    # First half of `dates` in the "bull" bucket, second half "bear" -- the
+    # regime series itself only needs one entry per date since _regime_as_of()
+    # does an exact/as-of lookup, not interpolation.
+    raw_regime_series = [(dates[0], "bull"), (dates[1], "bull"), (dates[2], "bear"), (dates[3], "bear")]
+
+    result = fe.evaluate_factors_by_regime(universe, raw_regime_series, dates=dates, horizons=(5, 20))
+
+    assert set(result) == set(fe.REGIMES)
+    assert result["bull"]["sample_dates"] == 2
+    assert result["bear"]["sample_dates"] == 2
+    assert result["consolidation"]["sample_dates"] == 0
+    assert result["consolidation"]["factors"] == {}
+
+    # Bucketed "bull" factors must equal calling evaluate_factors() directly
+    # with just the bull-bucketed dates -- bucketing must not change the
+    # per-bucket evaluation logic itself.
+    direct = fe.evaluate_factors(universe, dates=dates[:2], horizons=(5, 20))
+    assert result["bull"]["factors"] == direct
+
+
+def test_evaluate_factors_by_regime_excludes_dates_with_no_regime_coverage():
+    universe = _synthetic_universe(n_codes=6, days=400)
+    dates = universe["C0"]["bar_dates"][300:320:10]  # 2 rebalance dates
+    # Regime series starts AFTER both rebalance dates -- neither has any
+    # coverage, so every bucket should be empty rather than misattributed.
+    raw_regime_series = [(dates[-1] + "z", "bull")]  # lexically after every real date here
+    result = fe.evaluate_factors_by_regime(universe, raw_regime_series, dates=dates)
+    assert all(v["sample_dates"] == 0 for v in result.values())
+
+
 # --------------------------------------------------------- suggest_weights --
 
 def test_suggest_weights_normalizes_and_favors_higher_icir():

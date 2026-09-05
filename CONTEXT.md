@@ -39,3 +39,11 @@ stock_tracker 專案的詞彙表。只收「這個詞在這個專案裡精確指
 ## 基準日（as_of）
 
 指某個數值「根據哪一天的資料算出來」，不代表這個數值現在是否仍然成立。目前唯一使用處是 `target_price.as_of`（見上）。刻意跟「這個數值是否已經失效／被突破」分開——後者不是這個詞要回答的問題，見 ADR 0001。
+
+## 盤勢／市場狀態（market regime）
+
+`src/market_regime.py` 的 `classify_regime()`/`regime_series()` 對**大盤（TAIEX）**算出的三態分類：`"bull"`（多頭）/`"bear"`（空頭）/`"consolidation"`（盤整），依大盤收盤價 vs MA20 vs MA60 排列 + MA20 斜率判斷，細節與門檻值見該模組 docstring、`docs/adr/0004-regime-adaptive-strategy.md`、`docs/regime_strategy_research.md`。
+
+**`_Avoid_`：不要跟「均線多頭/空頭排列」搞混——那是 `src/analysis.py`/`src/breakout_strategy.py` 既有的**個股**層級判斷（`ma5 > ma20 > ma60`），跟這裡的「盤勢」是完全不同層級的概念：一支個股可以在大盤「空頭」盤勢裡仍然呈現「均線多頭排列」，兩者不互相蘊含。
+
+`effective_regime_series()` 是「防抖」後的版本（連續 N 天同一原始分類才算切換），純函式、不持久化狀態，每次呼叫都對同一段歷史重算；`current_regime()` 是給只要「現在是什麼盤勢」的呼叫端用的便利函式。目前接了兩處：`finlab_factors.RANKING_WEIGHTS`（分盤勢版本走人工審核，`meta.active_ranking_weights_by_regime`）、`backtest.STRATEGY_PARAMS`（分盤勢版本 `STRATEGY_PARAMS_BY_REGIME`，寫死進 code，不建審核流程）。

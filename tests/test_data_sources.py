@@ -494,3 +494,51 @@ def test_get_quote_falls_back_to_prev_close_when_no_book_either():
         q = ds.get_quote("2330")
     assert q["price"] == 2380.0
     assert q["source"] == "twse-mis"
+
+
+# ------------------------------------------------------- get_index_daily --
+
+def test_get_index_daily_uses_finmind_when_available():
+    rows = [
+        {"date": "2026-01-02", "open": 18000, "max": 18100, "min": 17950, "close": 18050, "Trading_Volume": 1000},
+        {"date": "2026-01-05", "open": 18050, "max": 18200, "min": 18000, "close": 18150, "Trading_Volume": 1200},
+    ]
+    with patch("data_sources._finmind", return_value=rows) as mock_finmind:
+        hist = ds.get_index_daily("TAIEX", cache=False)
+    mock_finmind.assert_called_once()
+    assert mock_finmind.call_args[0][0] == "TaiwanStockPrice"
+    assert mock_finmind.call_args[0][1] == "TAIEX"
+    assert hist["source"] == "finmind"
+    assert hist["c"] == [18050.0, 18150.0]
+    assert "adjusted" not in hist  # an index has no splits/dividends to adjust for
+
+
+def test_get_index_daily_falls_back_to_yfinance_when_finmind_empty():
+    import pandas as pd
+
+    df = pd.DataFrame(
+        {"Open": [18000.0], "High": [18100.0], "Low": [17950.0], "Close": [18050.0], "Volume": [1000]},
+        index=pd.to_datetime(["2026-01-02"]),
+    )
+    fake_ticker = type("FakeTicker", (), {"history": lambda self, **kw: df})()
+    with patch("data_sources._finmind", return_value=[]), \
+         patch("yfinance.Ticker", return_value=fake_ticker) as mock_ticker:
+        hist = ds.get_index_daily("TAIEX", cache=False)
+    mock_ticker.assert_called_once_with("^TWII")  # not "^TWII.TW" -- see _INDEX_YF_TICKERS docstring
+    assert hist["source"] == "yfinance"
+    assert hist["c"] == [18050.0]
+
+
+def test_get_index_daily_raises_when_all_sources_empty():
+    with patch("data_sources._finmind", return_value=[]), \
+         patch("yfinance.Ticker", side_effect=Exception("no data")):
+        with pytest.raises(ds.SourceError):
+            ds.get_index_daily("TAIEX", cache=False)
+
+
+def test_get_index_daily_caches_result():
+    rows = [{"date": "2026-01-02", "close": 18050}]
+    with patch("data_sources._finmind", return_value=rows) as mock_finmind:
+        ds.get_index_daily("TAIEX", cache=True)
+        ds.get_index_daily("TAIEX", cache=True)
+    mock_finmind.assert_called_once()  # 2nd call served from cache, no 2nd FinMind hit
