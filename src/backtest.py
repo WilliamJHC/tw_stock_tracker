@@ -375,23 +375,32 @@ def build_bar_index(bars):
 
 def _resolve_params(explicit_override, regime=None, by_regime=None):
     """STRATEGY_PARAMS, layered with by_regime[regime] (if `regime` names
-    one) and then `explicit_override` (if given) -- in that order, so an
-    explicit caller override always wins over a regime default for any key
-    both specify, and a regime default always wins over the global default.
-    None (unlisted) regime, or a regime not in `by_regime`, changes nothing
-    (pure global default + explicit override, byte-identical to this
-    function's behavior before regime-awareness existed).
+    one), then `by_regime[regime]` (if given and it names one), and then
+    `explicit_override` (if given) -- in that order, so an explicit caller
+    override always wins over `by_regime` for any key both specify,
+    `by_regime` always wins over STRATEGY_PARAMS_BY_REGIME, and a regime
+    default always wins over the global default. None (unlisted) regime, or
+    a regime not in a given table, changes nothing at that layer (pure
+    global default + explicit override, byte-identical to this function's
+    behavior before regime-awareness existed).
 
-    by_regime: defaults to the module-level STRATEGY_PARAMS_BY_REGIME when
-    not given. A caller passes its own dict here to test a regime-
-    conditional variant (e.g. a walk-forward sweep comparing "bear also
-    gates entry" against production's STRATEGY_PARAMS_BY_REGIME) without
-    mutating the module global, which every other concurrent caller/thread
-    also reads."""
+    by_regime: an ADDITIONAL layer on top of STRATEGY_PARAMS_BY_REGIME[regime]
+    (not a replacement for it) -- a caller passes a dict here to test a
+    regime-conditional variant (e.g. a walk-forward sweep comparing "bear
+    also gates entry" against production's STRATEGY_PARAMS_BY_REGIME)
+    without mutating the module global, which every other concurrent
+    caller/thread also reads. Layering rather than replacing means a caller
+    can override just ONE key for a regime (e.g. {"bear": {"allow_entry":
+    False}}) without having to also copy forward every other key
+    STRATEGY_PARAMS_BY_REGIME[regime] already sets (e.g. bear's
+    exit_composite/max_hold_days) -- a caller that DOES want to fully
+    replace a regime's production overrides can still do so by passing
+    those same keys explicitly in by_regime[regime]."""
     p = dict(STRATEGY_PARAMS)
-    regime_table = STRATEGY_PARAMS_BY_REGIME if by_regime is None else by_regime
-    if regime and regime in regime_table:
-        p.update(regime_table[regime])
+    if regime and regime in STRATEGY_PARAMS_BY_REGIME:
+        p.update(STRATEGY_PARAMS_BY_REGIME[regime])
+    if regime and by_regime and regime in by_regime:
+        p.update(by_regime[regime])
     if explicit_override:
         p.update(explicit_override)
     return p
@@ -452,9 +461,9 @@ def simulate(score_rows, bars, params=None, bar_index=None, regime_by_date=None,
     simulation, byte-identical to this function's behavior before regime-
     awareness existed.
 
-    by_regime: forwarded to every _resolve_params() call in place of the
-    module-level STRATEGY_PARAMS_BY_REGIME -- see that parameter's
-    docstring. None (the default) uses STRATEGY_PARAMS_BY_REGIME, unchanged
+    by_regime: forwarded to every _resolve_params() call as an ADDITIONAL
+    layer on top of the module-level STRATEGY_PARAMS_BY_REGIME -- see that
+    parameter's docstring. None (the default) adds no such layer, unchanged
     behavior."""
     default_p = _resolve_params(params, None, by_regime)
     p = default_p

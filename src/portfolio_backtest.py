@@ -124,20 +124,26 @@ def _mark_to_market(cash, holdings, prices, bar_dates, date):
 
 
 def _resolve_invest_pct(explicit_override, regime=None, by_regime=None):
-    """PORTFOLIO_PARAMS["invest_pct"], layered with by_regime[regime]["invest_pct"]
-    (if `regime` names one with that key) and then explicit_override["invest_pct"]
-    (if given) -- same 3-layer precedence as backtest._resolve_params(), scoped
-    to just this one knob since every other PORTFOLIO_PARAMS key stays fixed
-    for the whole simulation (see simulate()'s `p` built once up top).
+    """PORTFOLIO_PARAMS["invest_pct"], layered with
+    PORTFOLIO_PARAMS_BY_REGIME[regime]["invest_pct"] (if `regime` names one
+    with that key), then by_regime[regime]["invest_pct"] as an ADDITIONAL
+    layer on top of that (if given and it also names one), and then
+    explicit_override["invest_pct"] (if given) -- same layering precedence
+    as backtest._resolve_params()'s by_regime, scoped to just this one knob
+    since every other PORTFOLIO_PARAMS key stays fixed for the whole
+    simulation (see simulate()'s `p` built once up top).
 
-    by_regime: defaults to the module-level PORTFOLIO_PARAMS_BY_REGIME when
-    not given -- a caller passes its own dict to test a candidate discount
+    by_regime: a caller passes its own dict here to test a candidate discount
     without mutating the module global (mirrors backtest.simulate()'s
-    `by_regime` parameter)."""
+    `by_regime` parameter) -- layered on top of, not instead of,
+    PORTFOLIO_PARAMS_BY_REGIME, so a candidate can override this one knob
+    without needing to also restate whatever else that table might carry
+    for the same regime in the future."""
     value = PORTFOLIO_PARAMS["invest_pct"]
-    regime_table = PORTFOLIO_PARAMS_BY_REGIME if by_regime is None else by_regime
-    if regime and regime in regime_table and "invest_pct" in regime_table[regime]:
-        value = regime_table[regime]["invest_pct"]
+    if regime and regime in PORTFOLIO_PARAMS_BY_REGIME and "invest_pct" in PORTFOLIO_PARAMS_BY_REGIME[regime]:
+        value = PORTFOLIO_PARAMS_BY_REGIME[regime]["invest_pct"]
+    if regime and by_regime and regime in by_regime and "invest_pct" in by_regime[regime]:
+        value = by_regime[regime]["invest_pct"]
     if explicit_override and "invest_pct" in explicit_override:
         value = explicit_override["invest_pct"]
     return value
@@ -231,8 +237,13 @@ def simulate(universe_data, params=None, ranks_cache=None, regime_by_date=None, 
 
             port_value = _mark_to_market(cash, holdings, prices, bar_dates, date)
             if target_codes:
-                regime = regime_by_date.get(date) if regime_by_date is not None else None
-                invest_pct = _resolve_invest_pct(params, regime, by_regime)
+                # No regime_by_date -> no regime ever resolves -> neither
+                # PORTFOLIO_PARAMS_BY_REGIME nor by_regime could apply
+                # regardless, so p["invest_pct"] (already resolved once, up
+                # top) is exactly what _resolve_invest_pct() would return
+                # here -- skip the redundant per-rebalance lookup.
+                invest_pct = (_resolve_invest_pct(params, regime_by_date.get(date), by_regime)
+                              if regime_by_date is not None else p["invest_pct"])
                 target_value_each = port_value * (invest_pct / 100) / len(target_codes)
                 # Sorted, not set-order: a plain `for code in target_codes`
                 # iterates in Python's per-run-randomized string hash order,

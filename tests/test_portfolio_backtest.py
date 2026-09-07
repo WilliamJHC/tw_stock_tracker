@@ -245,6 +245,17 @@ def test_resolve_invest_pct_layering():
     assert pb._resolve_invest_pct(None, "bear") == pb.PORTFOLIO_PARAMS["invest_pct"]
 
 
+def test_resolve_invest_pct_by_regime_layers_on_top_of_module_table(monkeypatch):
+    # by_regime overriding invest_pct for a regime must not lose whatever
+    # else PORTFOLIO_PARAMS_BY_REGIME already carries for that SAME key on
+    # that regime -- layers on top of it instead of replacing the table
+    # wholesale (mirrors backtest._resolve_params()'s by_regime contract).
+    monkeypatch.setitem(pb.PORTFOLIO_PARAMS_BY_REGIME, "bear", {"invest_pct": 70})
+    candidate = {"bear": {"invest_pct": 40}}
+    assert pb._resolve_invest_pct(None, "bear", by_regime=candidate) == 40  # by_regime wins over the module table
+    assert pb._resolve_invest_pct(None, "bear") == 70  # by_regime omitted -> module table alone
+
+
 def test_simulate_invest_pct_reduces_deployed_capital():
     universe = {"A": _entry(100, 0.5), "B": _entry(80, 0.4)}
     full = pb.simulate(universe, params={"top_n": 2, "initial_capital": 1_000_000})

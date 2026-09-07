@@ -559,20 +559,26 @@ def test_simulate_without_regime_by_date_unchanged():
 
 # ------------------------------------------------ simulate()'s allow_entry --
 
-def test_resolve_params_by_regime_override_replaces_module_table():
-    # A caller-supplied by_regime dict is used INSTEAD OF the module-level
-    # STRATEGY_PARAMS_BY_REGIME, not merged with it -- lets a walk-forward
-    # sweep test a regime-conditional variant without mutating the global.
+def test_resolve_params_by_regime_layers_on_top_of_module_table():
+    # A caller-supplied by_regime dict LAYERS ON TOP OF the module-level
+    # STRATEGY_PARAMS_BY_REGIME, not replacing it -- lets a walk-forward
+    # sweep override just ONE key for a regime (e.g. testing "bear also
+    # gates entry") without having to also copy forward that regime's other
+    # production overrides to avoid silently losing them.
     candidate = {"bear": {"allow_entry": False}}
     resolved = bt._resolve_params(None, "bear", by_regime=candidate)
     assert resolved["allow_entry"] is False
-    # max_hold_days isn't in the candidate's "bear" entry, so it falls
-    # through to STRATEGY_PARAMS's global default, NOT the module-level
-    # STRATEGY_PARAMS_BY_REGIME["bear"]'s 60 -- proves candidate fully
-    # replaces the table rather than layering on top of it.
-    assert resolved["max_hold_days"] == bt.STRATEGY_PARAMS["max_hold_days"]
+    # max_hold_days isn't in the candidate's "bear" entry, so it still comes
+    # from the module-level STRATEGY_PARAMS_BY_REGIME["bear"]'s 60 (NOT
+    # STRATEGY_PARAMS's global default) -- proves by_regime layers on top of
+    # the table instead of replacing it wholesale.
+    assert resolved["max_hold_days"] == bt.STRATEGY_PARAMS_BY_REGIME["bear"]["max_hold_days"]
 
-    # by_regime omitted (None) -> falls back to the module-level table,
+    # explicit_override still wins over by_regime, same precedence as always.
+    overridden = bt._resolve_params({"allow_entry": True}, "bear", by_regime=candidate)
+    assert overridden["allow_entry"] is True
+
+    # by_regime omitted (None) -> falls back to the module-level table alone,
     # unchanged behavior.
     assert bt._resolve_params(None, "bear")["max_hold_days"] == \
         bt.STRATEGY_PARAMS_BY_REGIME["bear"]["max_hold_days"]
