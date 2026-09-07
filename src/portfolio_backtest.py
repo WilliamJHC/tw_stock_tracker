@@ -59,7 +59,24 @@ PORTFOLIO_PARAMS = {
     "slippage_pct": 0.1,  # one-way, see module docstring
     "ranking_weights": None,  # optional RANKING_WEIGHTS override, see finlab_factors.composite_scores()
     "extra_factors": None,  # optional {name: fn(bars, idx)} override, see finlab_factors.composite_scores()
+    # % of current portfolio value actually deployed at each rebalance; the
+    # rest sits idle as `cash` until the next rebalance re-evaluates it. 100
+    # (invest everything, the pre-existing behavior) everywhere by default --
+    # see PORTFOLIO_PARAMS_BY_REGIME and simulate()'s regime_by_date param
+    # for how a caller tests a regime-conditional discount without changing
+    # this global.
+    "invest_pct": 100,
 }
+
+# Regime-conditional overrides on top of PORTFOLIO_PARAMS, same layering
+# convention as backtest.STRATEGY_PARAMS_BY_REGIME (see that module for the
+# rationale: only a regime with real walk-forward evidence to deviate gets an
+# entry here). Empty until a candidate invest_pct discount actually clears
+# src/optimize.py's DSR/PBO/plateau gates for some regime -- see
+# docs/regime_strategy_research.md's methodology and simulate()'s
+# `by_regime` parameter for how a candidate is tested first without editing
+# this table.
+PORTFOLIO_PARAMS_BY_REGIME = {}
 
 
 def _floor_to_lot(shares, lot_size):
@@ -106,12 +123,45 @@ def _mark_to_market(cash, holdings, prices, bar_dates, date):
     return value
 
 
-def simulate(universe_data, params=None, ranks_cache=None):
+def _resolve_invest_pct(explicit_override, regime=None, by_regime=None):
+    """PORTFOLIO_PARAMS["invest_pct"], layered with by_regime[regime]["invest_pct"]
+    (if `regime` names one with that key) and then explicit_override["invest_pct"]
+    (if given) -- same 3-layer precedence as backtest._resolve_params(), scoped
+    to just this one knob since every other PORTFOLIO_PARAMS key stays fixed
+    for the whole simulation (see simulate()'s `p` built once up top).
+
+    by_regime: defaults to the module-level PORTFOLIO_PARAMS_BY_REGIME when
+    not given -- a caller passes its own dict to test a candidate discount
+    without mutating the module global (mirrors backtest.simulate()'s
+    `by_regime` parameter)."""
+    value = PORTFOLIO_PARAMS["invest_pct"]
+    regime_table = PORTFOLIO_PARAMS_BY_REGIME if by_regime is None else by_regime
+    if regime and regime in regime_table and "invest_pct" in regime_table[regime]:
+        value = regime_table[regime]["invest_pct"]
+    if explicit_override and "invest_pct" in explicit_override:
+        value = explicit_override["invest_pct"]
+    return value
+
+
+def simulate(universe_data, params=None, ranks_cache=None, regime_by_date=None, by_regime=None):
     """Monthly-rebalanced, equal-weight top-N portfolio backtest.
 
     universe_data: {code: {"bars": [{date,c,v,...}, ...], "bar_dates": [...],
     "revenue_series": [...], "roe_series": [...]}} -- same shape
     finlab_factors.composite_scores() expects.
+
+    regime_by_date: optional {date: regime} (e.g. dict(market_regime.
+    regime_series(taiex_bars)) -- see src/market_regime.py) -- when given,
+    EVERY rebalance resolves its invest_pct via _resolve_invest_pct(params,
+    regime, by_regime) using THAT rebalance date's regime, instead of one
+    fixed invest_pct for the whole run. None (the default, unchanged
+    behavior) invests params["invest_pct"] (100 unless overridden) at every
+    rebalance regardless of regime.
+
+    by_regime: forwarded to _resolve_invest_pct() in place of the module-
+    level PORTFOLIO_PARAMS_BY_REGIME -- lets a walk-forward sweep test a
+    candidate regime-conditional invest_pct without mutating that global.
+    None (the default) uses PORTFOLIO_PARAMS_BY_REGIME, unchanged behavior.
 
     ranks_cache: optional {date: factor_ranks(universe_data, date,
     extra_factors=...) result} dict, mutated in place as a memoization
@@ -181,7 +231,9 @@ def simulate(universe_data, params=None, ranks_cache=None):
 
             port_value = _mark_to_market(cash, holdings, prices, bar_dates, date)
             if target_codes:
-                target_value_each = port_value / len(target_codes)
+                regime = regime_by_date.get(date) if regime_by_date is not None else None
+                invest_pct = _resolve_invest_pct(params, regime, by_regime)
+                target_value_each = port_value * (invest_pct / 100) / len(target_codes)
                 # Sorted, not set-order: a plain `for code in target_codes`
                 # iterates in Python's per-run-randomized string hash order,
                 # so later-iterated codes could get silently starved of cash

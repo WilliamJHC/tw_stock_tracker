@@ -229,6 +229,63 @@ def test_simulate_default_extra_factors_is_none():
     assert all(ef is None for ef in captured)
 
 
+# ---------------------------------------------------------- invest_pct --
+
+def test_resolve_invest_pct_layering():
+    assert pb._resolve_invest_pct(None, None) == pb.PORTFOLIO_PARAMS["invest_pct"]
+
+    candidate = {"bear": {"invest_pct": 40}}
+    assert pb._resolve_invest_pct(None, "bear", by_regime=candidate) == 40
+    assert pb._resolve_invest_pct(None, "bull", by_regime=candidate) == pb.PORTFOLIO_PARAMS["invest_pct"]
+    # explicit override wins over the regime-conditional candidate
+    assert pb._resolve_invest_pct({"invest_pct": 10}, "bear", by_regime=candidate) == 10
+
+    # by_regime omitted (None) falls back to the module-level table, which
+    # ships empty -- so any regime name resolves to the global default.
+    assert pb._resolve_invest_pct(None, "bear") == pb.PORTFOLIO_PARAMS["invest_pct"]
+
+
+def test_simulate_invest_pct_reduces_deployed_capital():
+    universe = {"A": _entry(100, 0.5), "B": _entry(80, 0.4)}
+    full = pb.simulate(universe, params={"top_n": 2, "initial_capital": 1_000_000})
+    half = pb.simulate(universe, params={"top_n": 2, "initial_capital": 1_000_000, "invest_pct": 50})
+    # Half the capital deployed into the same trending-up names -> less
+    # profit than fully invested, but still positive (the deployed half
+    # still participates in the up-move; the rest just sits idle as cash).
+    assert 0 < half["summary"]["total_return_pct"] < full["summary"]["total_return_pct"]
+
+
+def test_simulate_regime_by_date_resolves_invest_pct_per_rebalance():
+    universe = {"A": _entry(100, 0.5), "B": _entry(80, 0.4)}
+    regime_by_date = {d: "bear" for d in universe["A"]["bar_dates"]}
+    candidate = {"bear": {"invest_pct": 50}}
+
+    regime_result = pb.simulate(universe, params={"top_n": 2}, regime_by_date=regime_by_date, by_regime=candidate)
+    flat_50_result = pb.simulate(universe, params={"top_n": 2, "invest_pct": 50})
+    # Every date resolves to "bear" -> byte-identical to a flat invest_pct=50
+    # override for the whole run, proving the regime lookup actually reaches
+    # target_value_each's sizing.
+    assert regime_result["summary"] == flat_50_result["summary"]
+
+
+def test_simulate_explicit_invest_pct_wins_over_by_regime():
+    universe = {"A": _entry(100, 0.5), "B": _entry(80, 0.4)}
+    regime_by_date = {d: "bear" for d in universe["A"]["bar_dates"]}
+    candidate = {"bear": {"invest_pct": 50}}
+
+    out = pb.simulate(universe, params={"top_n": 2, "invest_pct": 80},
+                       regime_by_date=regime_by_date, by_regime=candidate)
+    flat_80 = pb.simulate(universe, params={"top_n": 2, "invest_pct": 80})
+    assert out["summary"] == flat_80["summary"]
+
+
+def test_simulate_without_regime_by_date_unchanged():
+    universe = {"A": _entry(100, 0.5), "B": _entry(80, 0.4)}
+    baseline = pb.simulate(universe, params={"top_n": 2})
+    explicit_none = pb.simulate(universe, params={"top_n": 2}, regime_by_date=None, by_regime=None)
+    assert baseline == explicit_none
+
+
 # ------------------------------------------ Phase 3 item 5: lot rounding/slippage --
 
 def test_floor_to_lot_hand_computed():

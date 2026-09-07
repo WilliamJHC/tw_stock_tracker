@@ -67,6 +67,12 @@ STRATEGY_PARAMS = {
     "atr_mult": 100,
     "max_hold_days": 120,
     "fee_pct": 0.6,
+    # Gate on whether simulate() may open a NEW position at all (an existing
+    # open position is unaffected -- only entry is gated, not exit). True
+    # everywhere by default -- unchanged behavior. See simulate()'s
+    # `by_regime` parameter for how a caller tests a regime-conditional
+    # override of this without mutating STRATEGY_PARAMS_BY_REGIME itself.
+    "allow_entry": True,
 }
 
 # Regime-conditional overrides on top of STRATEGY_PARAMS (docs/
@@ -367,30 +373,41 @@ def build_bar_index(bars):
     )
 
 
-def _resolve_params(explicit_override, regime=None):
-    """STRATEGY_PARAMS, layered with STRATEGY_PARAMS_BY_REGIME[regime] (if
-    `regime` names one) and then `explicit_override` (if given) -- in that
-    order, so an explicit caller override always wins over a regime default
-    for any key both specify, and a regime default always wins over the
-    global default. None (unlisted) regime, or a regime not in
-    STRATEGY_PARAMS_BY_REGIME, changes nothing (pure global default +
-    explicit override, byte-identical to this function's behavior before
-    regime-awareness existed)."""
+def _resolve_params(explicit_override, regime=None, by_regime=None):
+    """STRATEGY_PARAMS, layered with by_regime[regime] (if `regime` names
+    one) and then `explicit_override` (if given) -- in that order, so an
+    explicit caller override always wins over a regime default for any key
+    both specify, and a regime default always wins over the global default.
+    None (unlisted) regime, or a regime not in `by_regime`, changes nothing
+    (pure global default + explicit override, byte-identical to this
+    function's behavior before regime-awareness existed).
+
+    by_regime: defaults to the module-level STRATEGY_PARAMS_BY_REGIME when
+    not given. A caller passes its own dict here to test a regime-
+    conditional variant (e.g. a walk-forward sweep comparing "bear also
+    gates entry" against production's STRATEGY_PARAMS_BY_REGIME) without
+    mutating the module global, which every other concurrent caller/thread
+    also reads."""
     p = dict(STRATEGY_PARAMS)
-    if regime and regime in STRATEGY_PARAMS_BY_REGIME:
-        p.update(STRATEGY_PARAMS_BY_REGIME[regime])
+    regime_table = STRATEGY_PARAMS_BY_REGIME if by_regime is None else by_regime
+    if regime and regime in regime_table:
+        p.update(regime_table[regime])
     if explicit_override:
         p.update(explicit_override)
     return p
 
 
-def simulate(score_rows, bars, params=None, bar_index=None, regime_by_date=None):
+def simulate(score_rows, bars, params=None, bar_index=None, regime_by_date=None, by_regime=None):
     """Long-only, single-position, no-leverage strategy simulation over one
     code's replayed scores (docs/backtest_plan.md Phase 4). Pure function --
     no I/O.
 
-    Entry: `action == "準備進場"` while flat -> buy at the *next* bar's open
+    Entry: `action == "準備進場"` while flat AND params["allow_entry"] is
+    true for that row's resolved params -> buy at the *next* bar's open
     (protection #3: a signal from D's close can't fill before D+1's open).
+    allow_entry=False only blocks OPENING a new position -- an already-open
+    position keeps following the normal exit rules below regardless (see
+    STRATEGY_PARAMS's allow_entry key).
     Exit, first match wins (checked in this order every day while holding):
       1. `action == "減碼警示"`
       2. `composite <= params["exit_composite"]`
@@ -433,8 +450,13 @@ def simulate(score_rows, bars, params=None, bar_index=None, regime_by_date=None)
     actually want risk parameters to respond to a live regime shift. None
     (the default) uses one _resolve_params(params, None) for the entire
     simulation, byte-identical to this function's behavior before regime-
-    awareness existed."""
-    default_p = _resolve_params(params, None)
+    awareness existed.
+
+    by_regime: forwarded to every _resolve_params() call in place of the
+    module-level STRATEGY_PARAMS_BY_REGIME -- see that parameter's
+    docstring. None (the default) uses STRATEGY_PARAMS_BY_REGIME, unchanged
+    behavior."""
+    default_p = _resolve_params(params, None, by_regime)
     p = default_p
 
     if bar_index is not None:
@@ -450,10 +472,11 @@ def simulate(score_rows, bars, params=None, bar_index=None, regime_by_date=None)
         if idx is None or idx + 1 >= len(bars):
             continue  # no next bar to execute on yet (or ever, for the last row)
         next_bar = bars[idx + 1]
-        p = _resolve_params(params, regime_by_date.get(row["date"])) if regime_by_date is not None else default_p
+        p = (_resolve_params(params, regime_by_date.get(row["date"]), by_regime)
+             if regime_by_date is not None else default_p)
 
         if position is None:
-            if row["action"] == "準備進場":
+            if row["action"] == "準備進場" and p.get("allow_entry", True):
                 atr_val = an.atr(highs[:idx + 1], lows[:idx + 1], closes[:idx + 1],
                                   an.SHORT_TERM_THRESHOLDS["atr_period"])
                 entry_price = next_bar["o"]

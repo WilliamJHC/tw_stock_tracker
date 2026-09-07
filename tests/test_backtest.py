@@ -557,6 +557,67 @@ def test_simulate_without_regime_by_date_unchanged():
     assert t["hold_days"] == 61
 
 
+# ------------------------------------------------ simulate()'s allow_entry --
+
+def test_resolve_params_by_regime_override_replaces_module_table():
+    # A caller-supplied by_regime dict is used INSTEAD OF the module-level
+    # STRATEGY_PARAMS_BY_REGIME, not merged with it -- lets a walk-forward
+    # sweep test a regime-conditional variant without mutating the global.
+    candidate = {"bear": {"allow_entry": False}}
+    resolved = bt._resolve_params(None, "bear", by_regime=candidate)
+    assert resolved["allow_entry"] is False
+    # max_hold_days isn't in the candidate's "bear" entry, so it falls
+    # through to STRATEGY_PARAMS's global default, NOT the module-level
+    # STRATEGY_PARAMS_BY_REGIME["bear"]'s 60 -- proves candidate fully
+    # replaces the table rather than layering on top of it.
+    assert resolved["max_hold_days"] == bt.STRATEGY_PARAMS["max_hold_days"]
+
+    # by_regime omitted (None) -> falls back to the module-level table,
+    # unchanged behavior.
+    assert bt._resolve_params(None, "bear")["max_hold_days"] == \
+        bt.STRATEGY_PARAMS_BY_REGIME["bear"]["max_hold_days"]
+
+
+def test_simulate_by_regime_blocks_new_entry_in_gated_regime():
+    bars = _bars([100, 101, 102, 103, 104])
+    score_rows = [
+        {"date": "d0", "action": "無變化", "composite": 0},
+        {"date": "d1", "action": "準備進場", "composite": 45},
+        {"date": "d2", "action": "無變化", "composite": 0},
+        {"date": "d3", "action": "無變化", "composite": 0},
+    ]
+    regime_by_date = {"d0": "bear", "d1": "bear", "d2": "bear", "d3": "bear"}
+    candidate = {"bear": {"allow_entry": False}}
+
+    out = bt.simulate(score_rows, bars, regime_by_date=regime_by_date, by_regime=candidate)
+    assert out["trades"] == []  # entry signal on d1 was gated -- no position ever opened
+
+    # Sanity: the identical inputs WITHOUT by_regime open a position as
+    # normal (proves the gate, not something else, suppressed the trade).
+    baseline = bt.simulate(score_rows, bars, regime_by_date=regime_by_date)
+    assert len(baseline["trades"]) == 1
+
+
+def test_simulate_by_regime_gate_does_not_close_an_already_open_position():
+    # allow_entry=False must only block OPENING a new position -- an
+    # existing open position keeps following the normal exit rules (here,
+    # end_of_data) instead of being force-closed the moment the gate applies.
+    bars = _bars([100, 101, 102, 103, 104])
+    score_rows = [
+        {"date": "d0", "action": "準備進場", "composite": 45},  # opens in bull (gate off)
+        {"date": "d1", "action": "無變化", "composite": 0},
+        {"date": "d2", "action": "無變化", "composite": 0},  # regime flips to bear here
+        {"date": "d3", "action": "無變化", "composite": 0},
+    ]
+    regime_by_date = {"d0": "bull", "d1": "bull", "d2": "bear", "d3": "bear"}
+    candidate = {"bear": {"allow_entry": False}}
+
+    out = bt.simulate(score_rows, bars, regime_by_date=regime_by_date, by_regime=candidate)
+    assert len(out["trades"]) == 1
+    assert out["trades"][0]["exit_reason"] == "end_of_data"
+    assert out["trades"][0]["entry_price"] == bars[1]["o"]  # still filled at d0's next-bar open
+
+
 # --------------------------------------------------------------- confidence --
 
 def test_compute_confidence_weighted_average_horizon_filter_and_vp_exclusion():
