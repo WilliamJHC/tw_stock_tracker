@@ -42,18 +42,23 @@ def common_trading_days(curve_a, curve_b):
     return sorted(dates_a & dates_b)
 
 
-def daily_returns(curve):
-    """{date: simple day-over-day return}, assuming `curve` is already
-    ascending by date. The first date has no prior value and never appears
-    in the output -- there's no "return" to report for it, and treating it
-    as 0.0 would silently understate day-1 volatility/compounding for any
-    caller that summed/compounded this dict's values."""
+def _returns_over_days(value_map, days):
+    """{date: simple return vs. the previous entry in `days`} for days[1:].
+    Keyed to an explicit shared day sequence (e.g. two curves' common
+    trading days) rather than either curve's own internal date list, so a
+    date one curve has and the other doesn't can't silently misalign which
+    prior value a return gets computed against -- see callers below, which
+    both need "same-side" (strategy-vs-strategy, benchmark-vs-benchmark)
+    returns lined up against one shared date axis. A date missing from
+    `value_map` (curve has a gap on a day the other curve traded) yields no
+    return entry for that date rather than a guessed 0.0."""
     out = {}
-    prev = None
-    for row in curve:
-        if prev:
-            out[row["date"]] = row["value"] / prev - 1
-        prev = row["value"]
+    for i in range(1, len(days)):
+        prev_v = value_map.get(days[i - 1])
+        cur_v = value_map.get(days[i])
+        if prev_v is None or cur_v is None:
+            continue
+        out[days[i]] = cur_v / prev_v - 1
     return out
 
 
@@ -99,8 +104,8 @@ def apply_switch_rule(strategy_curve, benchmark_curve, regime_by_date, hold_stra
     if not days:
         return {"equity_curve": [], "n_switches": 0, "days_in_strategy": 0, "days_in_benchmark": 0}
 
-    strat_ret = daily_returns(strategy_curve)
-    bench_ret = daily_returns(benchmark_curve)
+    strat_ret = _returns_over_days(_as_map(strategy_curve), days)
+    bench_ret = _returns_over_days(_as_map(benchmark_curve), days)
     cost = switch_cost_pct / 100
 
     equity = 100.0
@@ -261,7 +266,8 @@ def regime_bucket_comparison(curve_a, curve_b, raw_regime_by_date):
     "excess_annualized_pct"}}, all values None when n_days == 0 for that
     bucket."""
     days = common_trading_days(curve_a, curve_b)
-    a_ret, b_ret = daily_returns(curve_a), daily_returns(curve_b)
+    a_ret = _returns_over_days(_as_map(curve_a), days)
+    b_ret = _returns_over_days(_as_map(curve_b), days)
     log_sums = {r: {"n_days": 0, "a_log": 0.0, "b_log": 0.0} for r in ("bull", "bear", "consolidation")}
 
     for date in days:
