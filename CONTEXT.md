@@ -10,7 +10,7 @@ stock_tracker 專案的詞彙表。只收「這個詞在這個專案裡精確指
 - 日線圖表最後一筆收盤價——只在圖表繪製時使用（如 `static/index.html:1069-1070` 畫 VAH/VAL 覆蓋線的那段），可能落後於盤中即時報價。
 - `src/monitor.py:203` 用當日 tick 序列最後一筆當現價，餵給 `src/alerts.py` 的告警判斷——這是即時監控/告警專用的現價，跟上面兩個不是同一條資料流。
 
-這三者曾經因為前端拿錯來源而顯示不一致（見 `docs/adr/0001-target-price-ownership.md` 背景段）。**這次決策刻意不統一它們**——跨 quote/chart/monitor 的現價收斂被列為獨立候選（架構調查候選 11「即時報價跨 4-5 個檔案」，Worth exploring），留待未來另一次決策再處理。
+這三者曾經因為前端拿錯來源而顯示不一致（見 `docs/adr/0001-target-price-ownership.md` 背景段）。**刻意不統一它們**——為什麼、以及未來什麼情況該重新打開這個決定，見 `docs/adr/0006-current-price-not-unified.md`（2026-09-08 `/improve-codebase-architecture` 重新核對後補記，原始判斷仍是 ADR 0001 的架構調查候選 11）。
 
 ## 訊號的 bt / bt_reason（回測可用性）
 
