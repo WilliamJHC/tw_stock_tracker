@@ -555,8 +555,10 @@ def of_summary(of_days, closes_by_date=None):
 
 # Signal predicates evaluated at historical daily index i (for win-rate backtest).
 # Only signals with cheap daily-series history are backtestable; VP/OF signals
-# are not (their data window is too short / recomputation too heavy) — the UI
-# marks those as 回測不適用.
+# are not (their data window is too short / recomputation too heavy) -- those
+# signals carry "bt": None plus "bt_reason": "vp_of_short_window" (see the VP
+# and order-flow blocks in analyze() below) so the UI can render 回測不適用
+# off that field instead of pattern-matching the signal's display text.
 BACKTEST_SIGNALS = {
     "價漲量增": lambda c, i: c["quadrant"][i] == "PU_VU",
     "價漲量縮": lambda c, i: c["quadrant"][i] == "PU_VD",
@@ -942,11 +944,11 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
         if price > vp["vah"]:
             vp_position = "above_va"
             components["vpPosition"] = 1.0
-            signals.append({"text": f"現價高於 Value Area（VAH {vp['vah']:.1f}）：多方接受、價值區上移", "bias": 1, "bt": None})
+            signals.append({"text": f"現價高於 Value Area（VAH {vp['vah']:.1f}）：多方接受、價值區上移", "bias": 1, "bt": None, "bt_reason": "vp_of_short_window"})
         elif price < vp["val"]:
             vp_position = "below_va"
             components["vpPosition"] = -1.0
-            signals.append({"text": f"現價低於 Value Area（VAL {vp['val']:.1f}）：空方主導、價值區下移", "bias": -1, "bt": None})
+            signals.append({"text": f"現價低於 Value Area（VAL {vp['val']:.1f}）：空方主導、價值區下移", "bias": -1, "bt": None, "bt_reason": "vp_of_short_window"})
         else:
             vp_position = "inside_va"
             rel = 0.0
@@ -955,11 +957,11 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
             elif vp["poc"] > vp["val"] and price < vp["poc"]:
                 rel = -(vp["poc"] - price) / (vp["poc"] - vp["val"]) * 0.5
             components["vpPosition"] = rel
-            signals.append({"text": f"現價位於 Value Area 內（POC {vp['poc']:.1f}）：籌碼密集區，趨勢待表態", "bias": 0, "bt": None})
+            signals.append({"text": f"現價位於 Value Area 內（POC {vp['poc']:.1f}）：籌碼密集區，趨勢待表態", "bias": 0, "bt": None, "bt_reason": "vp_of_short_window"})
         for lv in vp["lvn"]:
             if abs(lv - price) / price < 0.03:
                 direction = "上方" if lv > price else "下方"
-                signals.append({"text": f"{direction}逼近低量區 LVN {lv:.1f}：成交真空、穿越時速度易加快", "bias": 0, "bt": None})
+                signals.append({"text": f"{direction}逼近低量區 LVN {lv:.1f}：成交真空、穿越時速度易加快", "bias": 0, "bt": None, "bt_reason": "vp_of_short_window"})
                 break
 
     # ---- order flow ----
@@ -984,22 +986,25 @@ def analyze(daily, minute=None, tick_days=None, inst=None,
         side = "買盤" if of["delta5"] >= 0 else "賣盤"
         tag = "逐筆內外盤" if of_mode == "tick" else "分鐘K推估"
         signals.append({"text": f"近5日主動{side}淨額佔總量 {abs(pct):.1f}%（{tag}）",
-                        "bias": 1 if of["delta5"] > 0 else -1 if of["delta5"] < 0 else 0, "bt": None})
+                        "bias": 1 if of["delta5"] > 0 else -1 if of["delta5"] < 0 else 0, "bt": None,
+                        "bt_reason": "vp_of_short_window"})
         if abs(of["streak"]) >= 3:
             # same "買盤/賣盤" vocabulary as the ratio5 sentence above (and as
             # compute_attention()'s matching trigger text) -- this used to say
             # "買超/賣超" here only, a wording split with no reason behind it.
             side = "買盤" if of["streak"] > 0 else "賣盤"
             signals.append({"text": f"主動{side}已連續 {abs(of['streak'])} 個交易日",
-                            "bias": 1 if of["streak"] > 0 else -1, "bt": None})
+                            "bias": 1 if of["streak"] > 0 else -1, "bt": None, "bt_reason": "vp_of_short_window"})
         # divergence is a flat +-10 score override, not proportional to
         # w["orderFlow"] -- see the components["orderFlow"] comment above for
         # why it's added to order_flow_override instead of folded in here.
         if of["divergence"] == "bearish":
-            signals.append({"text": "量價背離：近10日價格上漲但主動賣盤佔優（出貨嫌疑）", "bias": -1, "bt": None})
+            signals.append({"text": "量價背離：近10日價格上漲但主動賣盤佔優（出貨嫌疑）", "bias": -1, "bt": None,
+                            "bt_reason": "vp_of_short_window"})
             order_flow_override = -10.0
         elif of["divergence"] == "bullish":
-            signals.append({"text": "量價背離：近10日價格下跌但主動買盤佔優（吸籌嫌疑）", "bias": 1, "bt": None})
+            signals.append({"text": "量價背離：近10日價格下跌但主動買盤佔優（吸籌嫌疑）", "bias": 1, "bt": None,
+                            "bt_reason": "vp_of_short_window"})
             order_flow_override = 10.0
         components["orderFlow"] = ratio_c
 

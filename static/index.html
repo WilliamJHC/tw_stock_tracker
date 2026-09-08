@@ -711,7 +711,7 @@ function buildDetailRow(code) {
       btStr = bt.n >= 5
         ? `<span class="bt-note">回測：近2年出現 ${bt.n} 次，20日後上漲 ${bt.wins} 次（勝率 ${bt.win_rate.toFixed(0)}%，平均 ${bt.avg_ret >= 0 ? '+' : ''}${bt.avg_ret.toFixed(1)}%）</span>`
         : `<span class="bt-note">回測：近2年僅 ${bt.n} 次，樣本不足</span>`;
-    } else if (sig.bt === null && (sig.text.includes('Value Area') || sig.text.includes('主動') || sig.text.includes('LVN') || sig.text.includes('背離'))) {
+    } else if (sig.bt_reason === 'vp_of_short_window') {
       btStr = `<span class="bt-note">（VP/OF 訊號資料窗較短，不做回測）</span>`;
     }
     return `<li class="${cls}">${sig.text}${btStr}</li>`;

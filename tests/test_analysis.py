@@ -526,13 +526,46 @@ def test_analyze_and_compute_attention_agree_on_of_streak_and_divergence_wording
     assert abs(a["of"]["streak"]) >= 3  # sanity: must actually exercise the streak signal
     assert a["of"]["divergence"] == "bearish"  # sanity: must actually exercise the divergence signal
 
-    streak_texts = [s["text"] for s in a["signals"] if s["bt"] is None and "已連續" in s["text"]]
-    divergence_texts = [s["text"] for s in a["signals"] if "量價背離" in s["text"]]
-    assert len(streak_texts) == 1
-    assert len(divergence_texts) == 1
-    assert not divergence_texts[0].startswith("⚠")  # the stray prefix is gone
+    streak_signals = [s for s in a["signals"] if s["bt"] is None and "已連續" in s["text"]]
+    divergence_signals = [s for s in a["signals"] if "量價背離" in s["text"]]
+    assert len(streak_signals) == 1
+    assert len(divergence_signals) == 1
+    assert not divergence_signals[0]["text"].startswith("⚠")  # the stray prefix is gone
+    # OF signals carry bt_reason so the frontend can render 回測不適用 off
+    # this field instead of pattern-matching sig["text"] -- see the
+    # architecture-review candidate that replaced the substring match in
+    # static/index.html.
+    assert streak_signals[0]["bt_reason"] == "vp_of_short_window"
+    assert divergence_signals[0]["bt_reason"] == "vp_of_short_window"
 
+    streak_texts = [s["text"] for s in streak_signals]
+    divergence_texts = [s["text"] for s in divergence_signals]
     att = an.compute_attention(tech_score=0, chip=None,
                                 result={"signals": a["signals"], "of": a["of"], "vp_position": None})
     assert streak_texts[0] in att["triggers"]
     assert divergence_texts[0] in att["triggers"]
+
+
+def test_vp_signals_carry_bt_reason_for_short_window():
+    """Value Area position / LVN-proximity signals always carry bt=None plus
+    bt_reason="vp_of_short_window" -- the frontend switched from
+    pattern-matching sig["text"] to reading this field (see the
+    architecture-review candidate for static/index.html's buildDetailRow())."""
+    daily = _random_daily(seed=5)
+    a = an.analyze(daily)
+    vp_signals = [s for s in a["signals"] if "Value Area" in s["text"] or "LVN" in s["text"]]
+    assert vp_signals  # sanity: the VA-position signal always fires when a["vp"] exists
+    for s in vp_signals:
+        assert s["bt"] is None
+        assert s["bt_reason"] == "vp_of_short_window"
+
+
+def test_non_vp_of_signals_have_no_bt_reason():
+    """Guard against bt_reason creeping onto categories it was never meant
+    to cover (chip/donchian/rs_ranking/etc. still show no note in the UI --
+    see the architecture-review candidate's scope decision)."""
+    daily = _random_daily(seed=5)
+    a = an.analyze(daily)
+    for s in a["signals"]:
+        if "Value Area" not in s["text"] and "LVN" not in s["text"] and "主動" not in s["text"] and "背離" not in s["text"]:
+            assert s.get("bt_reason") is None

@@ -12,6 +12,14 @@ stock_tracker 專案的詞彙表。只收「這個詞在這個專案裡精確指
 
 這三者曾經因為前端拿錯來源而顯示不一致（見 `docs/adr/0001-target-price-ownership.md` 背景段）。**這次決策刻意不統一它們**——跨 quote/chart/monitor 的現價收斂被列為獨立候選（架構調查候選 11「即時報價跨 4-5 個檔案」，Worth exploring），留待未來另一次決策再處理。
 
+## 訊號的 bt / bt_reason（回測可用性）
+
+`src/analysis.py` `analyze()` 回傳的 `signals` 陣列，每個訊號 dict 帶一個 `"bt": str | None` 欄位：非 `None` 時是 `BACKTEST_SIGNALS`（`analysis.py`）裡的一個鍵，代表這個訊號有歷史勝率統計（`result["backtest"][bt]`）；`bt` 為 `None` 代表「這個訊號沒有回測證據」，但原因不只一種——目前涵蓋 VP（Value Area 三態＋LVN 逼近）、OF（主動買賣/連續/背離）、chip 籌碼面五種、跳空缺口、布林擠壓、Donchian、5日相對強弱排名，共 7 類。
+
+**只有 VP 和 OF 這兩類**額外帶 `"bt_reason": "vp_of_short_window"`（其餘 5 類的 `bt_reason` 不存在／為 `None`），對應 `static/index.html` 的 `buildDetailRow()` 顯示「（VP/OF 訊號資料窗較短，不做回測）」這句提示——前端讀這個欄位決定要不要顯示提示，**不再**用 `sig.text.includes('Value Area'|'主動'|'LVN'|'背離')` 去猜（見架構調查候選：訊號能不能回測的判斷邏輯在前端用文字比對重新猜一次，2026-09-08 已處理）。其餘 5 類目前刻意維持裸訊號、無提示——要不要幫它們也加說明是獨立的產品文案決定，未定案。
+
+`_Avoid_`：不要以為 `bt: None` 只有一種意思，也不要在前端新增訊號時用文字內容猜測分類——這個模式已經證明脆弱（文案改字會讓判斷靜默失效）。任何「這個訊號為什麼不能回測」的新分類，都應該在 `analysis.py` 賦值 `bt`/`bt_reason` 的當下就決定，不是留給消費端事後推敲。
+
 ## 目標價（target_price）
 
 `src/analysis.py` 的 `analyze()` 函式回傳的欄位，代表「這支股票下一個該關注的量價分佈關鍵價位」。結構：
