@@ -77,6 +77,14 @@ import run_factor_backtest as rfb  # noqa: E402
 
 LOOKBACK_DAYS = 30
 
+# Sanity floor for _cached_codes(): 2148 cached codes measured 2026-08-24 (see
+# module docstring). Set well below that to tolerate normal roster churn but
+# still catch a wiped/evicted cache/factor_run/ dir (e.g. GitHub Actions cache
+# miss) -- without this, main() would loop 0 times, report an all-zero
+# "success" summary, and exit 0 while downstream scripts silently read an
+# empty universe.
+MIN_CACHED_CODES = 1500
+
 
 def _cached_codes():
     paths = sorted(glob.glob(os.path.join(rfb.RUN_CACHE_DIR, "*.json")))
@@ -193,7 +201,17 @@ def main():
     ap.add_argument("--limit", type=int, default=None, help="只處理選定範圍的前 N 檔，本機小樣本測試用")
     args = ap.parse_args()
 
-    codes = _split_half(_cached_codes(), args.half)
+    all_codes = _cached_codes()
+    if len(all_codes) < MIN_CACHED_CODES:
+        msg = (f"[全市場日線增量更新] 中止：cache/factor_run/ 只找到 {len(all_codes)} 檔快取"
+               f"（預期 >= {MIN_CACHED_CODES}），疑似 cache miss 或被清空，不繼續更新以免產生"
+               f"誤導性的全綠摘要。")
+        print(msg)
+        if not args.dry_run:
+            alerts.send_telegram(msg)
+        sys.exit(1)
+
+    codes = _split_half(all_codes, args.half)
     if args.limit:
         codes = codes[: args.limit]
     print(f"{len(codes)} cached codes to refresh (half={args.half}, lookback={LOOKBACK_DAYS} days, dry_run={args.dry_run})")
