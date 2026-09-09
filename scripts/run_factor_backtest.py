@@ -65,6 +65,18 @@ RUN_CACHE_DIR = os.path.join(BASE_DIR, "cache", "factor_run")
 FINMIND_HOURLY_LIMIT = 600
 RATE_LIMIT_BUFFER = 550  # stay under the real cap with headroom for the app's own calls
 
+# revenue_yoy_series() needs a full prior year of monthly revenue before its
+# first output row (12mo YoY match), and roe_series() needs 4 quarters of
+# TTM lead-in on top of FINANCIALS_LAG_DAYS -- so fetching revenue/financials
+# with the SAME `days` window as bars leaves each usable series starting
+# ~12-14mo AFTER bars start, not at the same point. Fetching revenue/
+# financials with `days + FUNDAMENTALS_LEAD_IN_DAYS` instead gives both
+# series enough lead-in to become usable at (or before) bars' own start.
+# 2026-09-09: verified against 2330 that FinMind has no hard floor anywhere
+# near this range (raw data reachable back to 2019 with a wide enough
+# window), so the extra lead-in is really available, not a truncated ask.
+FUNDAMENTALS_LEAD_IN_DAYS = 450
+
 
 class RateLimiter:
     """Leaky-bucket over a rolling 1h window, tracked by wall-clock request
@@ -233,9 +245,20 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
     market_by_code/twse_by_code: main()'s ds.get_universe()-derived market
     lookup and fetch_twse_table()'s market-wide dividend/split events,
     threaded through to augment_bars_with_adj_factor() so it can combine
-    TWSE's authoritative table with the per-code Yahoo cross-check."""
+    TWSE's authoritative table with the per-code Yahoo cross-check.
+
+    revenue/financials are fetched at `days + FUNDAMENTALS_LEAD_IN_DAYS`,
+    wider than bars' own `days` window -- see FUNDAMENTALS_LEAD_IN_DAYS'
+    module-level comment. A cache entry's own "fundamentals_days" key
+    records which window its revenue_series/roe_series were computed at,
+    independent of "days" (which still gates the bars/whole-entry window in
+    _load_code_cache()) -- so a cache hit with a stale/missing
+    "fundamentals_days" gets its revenue_series/roe_series/margin-trend
+    series backfilled in place, the same incremental pattern as the c_adj/
+    per_pbr_series backfills below, without forcing a full re-fetch of bars."""
     universe_data = {}
     n = len(codes)
+    fundamentals_days = days + FUNDAMENTALS_LEAD_IN_DAYS
     for i, code in enumerate(codes):
         market = market_by_code.get(code, "twse")
         twse_events = twse_by_code.get(code, [])
@@ -264,6 +287,36 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
                 per_pbr_rows = ds.get_per_pbr(code, days=days, cache=False)
                 cached = {**cached, "per_pbr_series": ff.value_series(per_pbr_rows or [])}
                 cache_dirty = True
+            # A cache entry whose revenue_series/roe_series were computed at
+            # a narrower fundamentals window (or from before this field
+            # existed at all) gets re-fetched at the current
+            # FUNDAMENTALS_LEAD_IN_DAYS-widened window and its series
+            # recomputed in place -- same best-effort shape as the c_adj
+            # backfill above: only overwrite on a successful, non-empty
+            # result, so a transient fetch failure doesn't downgrade a cache
+            # entry that already had good series, and simply gets retried
+            # again on a later run (fundamentals_days stays unbumped).
+            if cached.get("fundamentals_days", 0) < fundamentals_days:
+                print(f"[{i + 1}/{n}] {code}（快取補算基本面 lead-in，days={fundamentals_days}）")
+                limiter.before_request()
+                revenue_rows = ds.get_monthly_revenue(code, days=fundamentals_days, cache=False)
+                limiter.before_request()
+                limiter.before_request()  # get_financials() issues 2 requests internally
+                financials_rows = ds.get_financials(code, days=fundamentals_days, cache=False)
+                new_revenue_series = ff.revenue_yoy_series(revenue_rows or [])
+                new_roe_series = ff.roe_series(financials_rows or [])
+                if new_revenue_series and new_roe_series:
+                    cached = {
+                        **cached,
+                        "revenue_series": new_revenue_series,
+                        "roe_series": new_roe_series,
+                        "gross_margin_trend_series": ff.gross_margin_trend_series(financials_rows or []),
+                        "operating_margin_trend_series": ff.operating_margin_trend_series(financials_rows or []),
+                        "fundamentals_days": fundamentals_days,
+                    }
+                    cache_dirty = True
+                else:
+                    print(f"  {code}: lead-in 重抓後 revenue/roe 序列仍不足，保留原快取，下次再試")
             if cache_dirty:
                 save_code_cache(code, cached)
             universe_data[code] = {
@@ -301,10 +354,10 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
         bars = augment_bars_with_adj_factor(code, bars, limiter, market, twse_events)
 
         limiter.before_request()
-        revenue_rows = ds.get_monthly_revenue(code, days=days, cache=False)
+        revenue_rows = ds.get_monthly_revenue(code, days=fundamentals_days, cache=False)
         limiter.before_request()
         limiter.before_request()  # get_financials() issues 2 requests internally
-        financials_rows = ds.get_financials(code, days=days, cache=False)
+        financials_rows = ds.get_financials(code, days=fundamentals_days, cache=False)
         limiter.before_request()
         per_pbr_rows = ds.get_per_pbr(code, days=days, cache=False)
 
@@ -326,6 +379,7 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
             "bars": bars, "revenue_series": revenue_series, "roe_series": roe_series_,
             "per_pbr_series": value_series_, "gross_margin_trend_series": gross_margin_trend,
             "operating_margin_trend_series": operating_margin_trend, "days": days,
+            "fundamentals_days": fundamentals_days,
         })
         universe_data[code] = {
             "bars": bars, "bar_dates": [b["date"] for b in bars],
