@@ -1,12 +1,12 @@
 # 計畫：資料正確性與管線可靠度修復（稽核報告查證後）
 
 狀態：**2026-09-09 已開工**。以下四項主張已逐一對照目前程式碼與 `cache/factor_run/`、`cache/factor_run_long/` 實際檔案內容核實。目前進度：
-- 優先序 1：小規模驗證（2330/2317/5315）通過，全量 2148 檔的 c_adj/per_pbr_series 補算已在背景執行中（預估 7-8 小時，`--universe all --days 1800`）。
-- 優先序 2：根因已查明（YoY/TTM lead-in 結構性損耗，非資料源限制）；程式修法（拆 `fundamentals_days` 欄位）已實作並對 3 檔樣本實跑驗證通過（usable 序列起點成功提前到對齊 bars 起點）。全量套用要等優先序 1 目前的背景作業跑完才能開始（兩個全量網路作業不能同時跑），見下方章節。
-- 優先序 3：便宜驗證已做（用部分遷移中的快取），**確認兩支腳本的排序都會被 lot_size 翻轉**，`run_ranking_optimize.py` 甚至連自動套用的 accept/reject 決策都會翻盤，比原本推測更嚴重。最終數字要等優先序 1/2 全量作業跑完再重驗一次。
+- 優先序 1：**全量作業已跑完並驗證**。2149 檔快取中 428 檔為 skip（下市/無資料），可用 1721 檔裡 c_adj 覆蓋 1709 檔（99.3%），per_pbr_series 覆蓋 1721 檔（100%）。剩 12 檔 c_adj 缺失，經查是 yfinance 對這些代號回傳「possibly delisted / no data」，屬真實資料源缺口（非程式邏輯問題），best-effort 設計下會在下次執行再嘗試。
+- 優先序 2：根因已查明（YoY/TTM lead-in 結構性損耗，非資料源限制）；程式修法（拆 `fundamentals_days` 欄位）已實作並對 3 檔樣本實跑驗證通過（usable 序列起點成功提前到對齊 bars 起點）。**全量套用作業現正背景執行中**（見下方）。
+- 優先序 3：便宜驗證已做（用部分遷移中的快取），**確認兩支腳本的排序都會被 lot_size 翻轉**，`run_ranking_optimize.py` 甚至連自動套用的 accept/reject 決策都會翻盤，比原本推測更嚴重。最終數字要等優先序 2 全量作業跑完再重驗一次。
 - 優先序 4：`scripts/update_universe_bars.py` 的 sanity floor 已實作並實跑驗證通過（正常路徑 + 模擬空快取路徑皆確認），已 commit（`da1a6df`）。
 
-commit 紀錄：`da1a6df`（優先序 4）→ `cb21e54`（優先序 2 程式修法）→ `5aad426`（本文件）。優先序 1 的全量背景作業在 PID 25620（`python scripts/run_factor_backtest.py --universe all --days 1800`，2026-09-09 09:32 啟動），輸出寫到工作階段 scratchpad 下的 `full_backfill_run.log`——這個作業何時跑完，由負責跑這份計畫的 Claude session 自動收到背景工作完成通知並接手下一步，不需要使用者自己盯著；使用者想自行確認的話可以用工作管理員找該 PID 是否還在，或問這個 session 目前進度。
+commit 紀錄：`da1a6df`（優先序 4）→ `cb21e54`（優先序 2 程式修法）→ `5aad426`（本文件）→ `f47d8ad`（fresh-context read-back 修正）。優先序 1 的全量背景作業（PID 25620，2026-09-09 09:32 啟動）已於同日約 15:34 結束，exit code 0，無 Python 例外，輸出在工作階段 scratchpad 下的 `full_backfill_run.log`（2651 行）。優先序 2 的全量套用作業已接著啟動（`python scripts/run_factor_backtest.py --universe all --days 1800`，2026-09-09 15:38 啟動，輸出在同目錄 `full_fundamentals_leadin_run.log`）——這個作業何時跑完，由負責跑這份計畫的 Claude session 自動收到背景工作完成通知並接手下一步，不需要使用者自己盯著；使用者想自行確認的話可以看該 log 檔成長狀況，或問這個 session 目前進度。
 
 ## 查證結論總覽
 
