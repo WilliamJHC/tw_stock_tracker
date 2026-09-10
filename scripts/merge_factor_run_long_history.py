@@ -110,8 +110,12 @@ def classify_codes(verify_rows):
             active = json.load(f)
         is_enabled = "bars" in active
         row = verify_rows.get(code)
-        clean = row is not None and row["error"] is None and row["n_mismatch"] == 0
-        mismatched = row is not None and row["error"] is None and row["n_mismatch"] > 0
+        # A row only counts as "clean" if it also has no structural adj_factor
+        # violations and wasn't verified under a guessed (possibly wrong)
+        # market -- n_mismatch==0 alone isn't sufficient (see code review).
+        row_trustworthy = row is not None and row["error"] is None and not row.get("violations") and not row.get("market_guessed")
+        clean = row_trustworthy and row["n_mismatch"] == 0
+        mismatched = row_trustworthy and row["n_mismatch"] > 0
 
         if not is_enabled:
             buckets[code] = "skip" if clean else "no_data"
@@ -226,19 +230,22 @@ def main():
             try:
                 active = load_active_cache(code)
                 long_data = load_long_cache(code)
-            except (OSError, ValueError) as e:
-                print(f"  {code}: 讀取失敗（{e}），略過")
+                cutoff_date = active["bars"][0]["date"]
+                n_bars_add = sum(1 for b in long_data["bars"] if b["date"] < cutoff_date)
+                n_rev_add = 0
+                if active.get("revenue_series"):
+                    cutoff = active["revenue_series"][0]["usable_date"]
+                    n_rev_add = sum(1 for r in long_data.get("revenue_series", []) if r["usable_date"] < cutoff)
+                n_roe_add = 0
+                if active.get("roe_series"):
+                    cutoff = active["roe_series"][0]["usable_date"]
+                    n_roe_add = sum(1 for r in long_data.get("roe_series", []) if r["usable_date"] < cutoff)
+            except (OSError, ValueError, KeyError, IndexError) as e:
+                # Same exception set as merge_one()'s real-run path, so a
+                # code that would be logged-and-skipped for real doesn't
+                # instead crash the whole dry-run preview.
+                print(f"  {code}: 讀取/計算失敗（{type(e).__name__}: {e}），略過")
                 continue
-            cutoff_date = active["bars"][0]["date"]
-            n_bars_add = sum(1 for b in long_data["bars"] if b["date"] < cutoff_date)
-            n_rev_add = 0
-            if active.get("revenue_series"):
-                cutoff = active["revenue_series"][0]["usable_date"]
-                n_rev_add = sum(1 for r in long_data.get("revenue_series", []) if r["usable_date"] < cutoff)
-            n_roe_add = 0
-            if active.get("roe_series"):
-                cutoff = active["roe_series"][0]["usable_date"]
-                n_roe_add = sum(1 for r in long_data.get("roe_series", []) if r["usable_date"] < cutoff)
             total_bars += n_bars_add
             total_rev += n_rev_add
             total_roe += n_roe_add
