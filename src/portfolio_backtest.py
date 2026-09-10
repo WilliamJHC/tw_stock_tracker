@@ -30,13 +30,18 @@ product-judgment default):
     simplification the module used to have). Set lot_size=0/None to fall
     back to the old exact-fraction sizing (useful for isolating other
     effects in a test).
-  - slippage_pct: one-way market-impact/spread cost, applied only to the
-    EXECUTED fill price (buys fill above the quoted close, sells fill
-    below it) -- position SIZING (target_value_each, diff_value, how many
-    lots to trade) still uses the quoted close, matching how a real order's
-    intended size is decided before the fill price is known. Default 0.1%
-    is a product-judgment placeholder (not derived from real fill data);
-    same "明確不做" Phase 3 item 5 as lot_size.
+  - slippage_pct: one-way market-impact/spread cost, applied to the EXECUTED
+    fill price (buys fill above the quoted close, sells fill below it).
+    target_value_each/diff_value sizing uses the quoted close, but the BUY
+    leg's share-count division uses the fill price (buy_fill), not the
+    quoted close -- so the resulting cost lands at diff_value regardless of
+    slippage. (Sizing off the quoted close then costing off buy_fill used to
+    systematically overspend diff_value by the slip fraction; lot_size>0's
+    floor-to-lot rounddown almost always hid this with enough slack, but
+    lot_size=0 has none, so a full-cash buy would silently fail the cash
+    check every time -- fixed 2026-09-10.) Default 0.1% is a product-
+    judgment placeholder (not derived from real fill data); same "明確不做"
+    Phase 3 item 5 as lot_size.
   - fee_pct is a flat ROUND-TRIP cost (matches backtest.STRATEGY_PARAMS'
     convention: 0.1425% commission x2 + 0.3% tax ~= 0.6%), split evenly
     across the buy leg and the sell leg (0.3% each) rather than modeled as
@@ -55,7 +60,7 @@ PORTFOLIO_PARAMS = {
     "initial_capital": 1_000_000,  # NTD
     "top_n": ff.RANKING_TOP_N,
     "fee_pct": 0.6,  # round-trip, see module docstring
-    "lot_size": 1000,  # whole-share-lot (張) rounding, see module docstring
+    "lot_size": 0,  # 0 = odd-lot sizing (exact fraction, see module docstring); product decision 2026-09-10 to avoid whole-lot rounding distorting results at NTD 1M capital
     "slippage_pct": 0.1,  # one-way, see module docstring
     "ranking_weights": None,  # optional RANKING_WEIGHTS override, see finlab_factors.composite_scores()
     "extra_factors": None,  # optional {name: fn(bars, idx)} override, see finlab_factors.composite_scores()
@@ -262,10 +267,17 @@ def simulate(universe_data, params=None, ranks_cache=None, regime_by_date=None, 
                     diff_value = target_value_each - current_shares * px
                     if diff_value > 0:
                         buy_fill = px * (1 + slip)
-                        # sizing uses the quoted close px, not buy_fill -- see module
-                        # docstring's slippage_pct paragraph (sizing decided before the
-                        # fill price is known, matching the sell leg's use of px below).
-                        buy_shares = _floor_to_lot(diff_value / (px * (1 + leg_fee)), lot_size)
+                        # Sizing divides by buy_fill (not px) so cost below lands at
+                        # diff_value regardless of slippage. Dividing by px here used to
+                        # systematically overspend diff_value by the slip fraction (cost
+                        # uses buy_fill, sizing didn't) -- with lot_size>0 the floor-to-
+                        # lot rounddown almost always left enough slack to absorb that,
+                        # but lot_size=0 has no such slack: a full-cash buy (e.g. small
+                        # top_n, or a later code in the same rebalance left little cash
+                        # by an earlier one's overspend) would then fail the cost<=cash
+                        # check below and get silently skipped every time -- see tests
+                        # this bug surfaced when lot_size=0 became the default.
+                        buy_shares = _floor_to_lot(diff_value / (buy_fill * (1 + leg_fee)), lot_size)
                         if buy_shares <= 0:
                             continue  # too small for even one lot -- cash sits idle till next rebalance
                         cost = buy_shares * buy_fill * (1 + leg_fee)
