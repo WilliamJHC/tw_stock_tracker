@@ -69,12 +69,12 @@ SWITCH_RULES = {
 }
 
 
-def fetch_benchmark_curves(start_date="2021-07-01", cache_path=None, refresh=False):
+def fetch_benchmark_curves(start_date="2021-07-01", cache_path=None, refresh=False, symbol="0050"):
     """Returns (total_return_curve, price_curve), each a benchmark.py-shaped
-    [{"date", "value"}] curve for 0050. total_return_curve is yfinance's Adj
-    Close (splits + dividends back-adjusted -- the honest "held it and
-    reinvested everything" total-return line, and this report's MAIN
-    benchmark); price_curve is Close (splits back-adjusted only, no
+    [{"date", "value"}] curve for `symbol` (default 0050). total_return_curve
+    is yfinance's Adj Close (splits + dividends back-adjusted -- the honest
+    "held it and reinvested everything" total-return line, and this report's
+    MAIN benchmark); price_curve is Close (splits back-adjusted only, no
     dividends) kept as a stricter side-reference, since the strategy side
     has no dividend reinvestment of its own (cache/factor_run/*.json's
     c_adj coverage is 0/2148 as of this report's design -- see the plan's
@@ -82,7 +82,7 @@ def fetch_benchmark_curves(start_date="2021-07-01", cache_path=None, refresh=Fal
 
     Calls data_sources._yf_history_since() DIRECTLY -- same cross-module
     precedent as scripts/build_adj_factors.py's fetch_yahoo_adj_close().
-    Deliberately NEVER data_sources.get_daily("0050", ...): that shares its
+    Deliberately NEVER data_sources.get_daily(symbol, ...): that shares its
     cache file (cache/daily_0050.json) with the running app's own 730-day
     frontend cache, and 0050's 2025 1:4 split produces a false cliff in
     FinMind's unadjusted price there (158.75 -> 106.2) -- see the plan's
@@ -93,7 +93,7 @@ def fetch_benchmark_curves(start_date="2021-07-01", cache_path=None, refresh=Fal
     was fetched with the same start_date -- it does NOT check whether the
     cache is stale relative to today; pass --refresh-benchmark to force a
     re-fetch when you want today's latest bar."""
-    cache_path = cache_path or os.path.join(BASE_DIR, "cache", "benchmark_0050.json")
+    cache_path = cache_path or os.path.join(BASE_DIR, "cache", f"benchmark_{symbol}.json")
     if not refresh and os.path.exists(cache_path):
         try:
             with open(cache_path, encoding="utf-8") as f:
@@ -103,7 +103,7 @@ def fetch_benchmark_curves(start_date="2021-07-01", cache_path=None, refresh=Fal
         except (OSError, ValueError, KeyError):
             pass
 
-    df = ds._yf_history_since("0050", start_date, "1d")
+    df = ds._yf_history_since(symbol, start_date, "1d")
     total_return_curve, price_curve = [], []
     for ts, row in df.iterrows():
         close, adj_close = row["Close"], row["Adj Close"]
@@ -186,9 +186,9 @@ def evaluate_candidate(candidate, sim, total_return_curve, raw_regime_by_date, e
 
 # ------------------------------------------------------------- printing ----
 
-def print_overview(results):
+def print_overview(results, benchmark_symbol="0050"):
     print("=== 總覽（全期間，較起點: 見各候選 common_start） ===")
-    print(f"{'candidate':<18}{'line':<10}{'total':>10}{'0050':>10}{'excess':>10}{'MDD':>9}{'0050 MDD':>10}{'switch':>8}  beat")
+    print(f"{'candidate':<18}{'line':<10}{'total':>10}{benchmark_symbol:>10}{'excess':>10}{'MDD':>9}{benchmark_symbol + ' MDD':>10}{'switch':>8}  beat")
     for r in results:
         for line_id in ("pure", "rule_a", "rule_b"):
             full = r["comparisons"][line_id]["full"]
@@ -222,9 +222,9 @@ def print_rolling(results, window_months):
         print()
 
 
-def print_train_test(results, train_range, test_range):
+def print_train_test(results, train_range, test_range, benchmark_symbol="0050"):
     print(f"=== Train/Test 分段（train {train_range[0]}..{train_range[1]}, test {test_range[0]}..{test_range[1]}） ===")
-    print(f"{'candidate':<18}{'line':<10}{'seg':<6}{'total':>10}{'0050':>10}{'excess':>10}  beat")
+    print(f"{'candidate':<18}{'line':<10}{'seg':<6}{'total':>10}{benchmark_symbol:>10}{'excess':>10}  beat")
     for r in results:
         for line_id in ("pure", "rule_a", "rule_b"):
             for seg in ("train", "test"):
@@ -240,9 +240,9 @@ def print_train_test(results, train_range, test_range):
     print()
 
 
-def print_regime_buckets(results):
+def print_regime_buckets(results, benchmark_symbol="0050"):
     print("=== 盤勢分桶（背景統計，原始未防抖分類；年化） ===")
-    print(f"{'candidate':<18}{'line':<10}{'regime':<14}{'n_days':>7}{'ann':>10}{'0050 ann':>10}{'excess ann':>11}")
+    print(f"{'candidate':<18}{'line':<10}{'regime':<14}{'n_days':>7}{'ann':>10}{benchmark_symbol + ' ann':>10}{'excess ann':>11}")
     for r in results:
         for line_id in ("pure", "rule_a", "rule_b"):
             for regime in ("bull", "bear", "consolidation"):
@@ -258,15 +258,15 @@ def print_regime_buckets(results):
     print()
 
 
-def print_verdict(results, min_win_rate_pct):
-    print(f"=== 採用門檻判定（全期>0050 AND 12個月滾動勝率>={min_win_rate_pct:.0f}% AND 留出測試期>0050） ===")
+def print_verdict(results, min_win_rate_pct, benchmark_symbol="0050"):
+    print(f"=== 採用門檻判定（全期>{benchmark_symbol} AND 12個月滾動勝率>={min_win_rate_pct:.0f}% AND 留出測試期>{benchmark_symbol}） ===")
     print(f"{'candidate':<18}{'rule':<8}{'full':>6}{'rolling':>9}{'test':>6}  結論")
     any_pass = False
     for r in results:
         for rule_id in ("rule_a", "rule_b"):
             v = r["verdict"][rule_id]
             checks = v["checks"]
-            conclusion = "支持切換" if v["pass"] else "繼續抱 0050"
+            conclusion = "支持切換" if v["pass"] else f"繼續抱 {benchmark_symbol}"
             any_pass = any_pass or v["pass"]
             print(
                 f"{r['id']:<18}{rule_id:<8}"
@@ -275,12 +275,12 @@ def print_verdict(results, min_win_rate_pct):
                 f"{'V' if checks['test_period_beats'] else 'x':>6}  {conclusion}"
             )
     print()
-    print("整體結論：" + ("至少一組候選×規則通過三項門檻，證據支持切換。" if any_pass else "沒有任何候選×規則三項門檻同時通過 -- 繼續抱 0050。"))
+    print("整體結論：" + ("至少一組候選×規則通過三項門檻，證據支持切換。" if any_pass else f"沒有任何候選×規則三項門檻同時通過 -- 繼續抱 {benchmark_symbol}。"))
     print()
 
 
 def build_json_report(results, args, universe_data, total_return_curve, raw_regime_by_date, today_regime,
-                       train_range, test_range):
+                       train_range, test_range, benchmark_symbol="0050"):
     n_by_regime = {"bull": 0, "bear": 0, "consolidation": 0, "none": 0}
     for r in raw_regime_by_date.values():
         n_by_regime[r if r in n_by_regime else "none"] += 1
@@ -294,7 +294,7 @@ def build_json_report(results, args, universe_data, total_return_curve, raw_regi
         },
         "universe": {"n_codes": len(universe_data)},
         "benchmark": {
-            "source": "yfinance", "ticker": "0050.TW",
+            "source": "yfinance", "ticker": f"{benchmark_symbol}.TW",
             "n_bars": len(total_return_curve),
             "start": total_return_curve[0]["date"] if total_return_curve else None,
             "end": total_return_curve[-1]["date"] if total_return_curve else None,
@@ -332,6 +332,7 @@ def main():
     ap.add_argument("--test-months", type=int, default=12)
     ap.add_argument("--min-win-rate", type=float, default=60.0)
     ap.add_argument("--refresh-benchmark", action="store_true")
+    ap.add_argument("--benchmark-symbol", type=str, default="0050", help="基準標的代碼（預設 0050）；非 0050 時快取寫到 cache/benchmark_{symbol}.json，不覆蓋 cache/benchmark_0050.json")
     ap.add_argument("--json-out", type=str, default=None)
     args = ap.parse_args()
     args.window_months = tuple(int(x) for x in args.window_months.split(","))
@@ -356,17 +357,17 @@ def main():
     print(f"  原始分類天數: {n_by_regime}"
           + (f"（空頭 {n_by_regime['bear'] / total_classified * 100:.1f}%）" if total_classified else ""))
 
-    print("抓取 0050 基準線（yfinance） ...")
-    total_return_curve, price_curve = fetch_benchmark_curves(refresh=args.refresh_benchmark)
+    print(f"抓取 {args.benchmark_symbol} 基準線（yfinance） ...")
+    total_return_curve, price_curve = fetch_benchmark_curves(refresh=args.refresh_benchmark, symbol=args.benchmark_symbol)
     print(f"  {len(total_return_curve)} bars, {total_return_curve[0]['date']}..{total_return_curve[-1]['date']}")
     price_only_cmp = bm.full_period_comparison(price_curve, total_return_curve)
     if price_only_cmp:
         # Side reference only (not used anywhere else below): how much of
-        # 0050's total return over this window came from dividends alone --
-        # the strategy side has no reinvested-dividend equivalent, so this
-        # quantifies how much the main comparison already favors 0050 (see
-        # the plan's known-limitation #2).
-        print(f"  0050 含息 vs 不含息（同期）：{price_only_cmp['b_ret_pct']:.1f}% vs {price_only_cmp['a_ret_pct']:.1f}%"
+        # the benchmark's total return over this window came from dividends
+        # alone -- the strategy side has no reinvested-dividend equivalent,
+        # so this quantifies how much the main comparison already favors the
+        # benchmark (see the plan's known-limitation #2).
+        print(f"  {args.benchmark_symbol} 含息 vs 不含息（同期）：{price_only_cmp['b_ret_pct']:.1f}% vs {price_only_cmp['a_ret_pct']:.1f}%"
               f"（股息貢獻約 {price_only_cmp['b_ret_pct'] - price_only_cmp['a_ret_pct']:.1f} 個百分點）")
 
     calendar = pb._trading_calendar(universe_data)
@@ -398,23 +399,23 @@ def main():
         results.append(evaluated)
 
     print()
-    print_overview(results)
+    print_overview(results, benchmark_symbol=args.benchmark_symbol)
     print_rolling(results, args.window_months)
-    print_train_test(results, train_range, test_range)
-    print_regime_buckets(results)
-    print_verdict(results, args.min_win_rate)
+    print_train_test(results, train_range, test_range, benchmark_symbol=args.benchmark_symbol)
+    print_regime_buckets(results, benchmark_symbol=args.benchmark_symbol)
+    print_verdict(results, args.min_win_rate, benchmark_symbol=args.benchmark_symbol)
 
     today_regime = mr.current_regime(taiex)
     if today_regime is None:
         print("今日盤勢：尚無足夠歷史可判斷")
     else:
-        rule_a_holds = "策略" if today_regime in SWITCH_RULES["rule_a"] else "0050"
-        rule_b_holds = "策略" if today_regime in SWITCH_RULES["rule_b"] else "0050"
+        rule_a_holds = "策略" if today_regime in SWITCH_RULES["rule_a"] else args.benchmark_symbol
+        rule_b_holds = "策略" if today_regime in SWITCH_RULES["rule_b"] else args.benchmark_symbol
         print(f"今日盤勢（防抖）{today_regime} → 規則 A 持有 {rule_a_holds}／規則 B 持有 {rule_b_holds}")
 
     if args.json_out:
         report = build_json_report(results, args, universe_data, total_return_curve, raw_regime_by_date,
-                                    today_regime, train_range, test_range)
+                                    today_regime, train_range, test_range, benchmark_symbol=args.benchmark_symbol)
         with open(args.json_out, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
         print(f"\nwrote {args.json_out}")
