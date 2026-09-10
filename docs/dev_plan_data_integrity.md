@@ -5,6 +5,7 @@
 - 優先序 2：根因已查明（YoY/TTM lead-in 結構性損耗，非資料源限制）；程式修法（拆 `fundamentals_days` 欄位）已實作並對 3 檔樣本實跑驗證通過（usable 序列起點成功提前到對齊 bars 起點）。**全量套用作業已跑完並驗證**：1721 檔可用代號中 1675 檔（97.3%）`fundamentals_days` 已補到 2250（=1800+450 lead-in），抽驗 2330 確認 `revenue_series[0].usable_date`（2021-08-10）已提前到 bars 起點（2021-08-16）之前。剩 46 檔仍卡在 0，log 明確記錄為「lead-in 重抓後 revenue/roe 序列仍不足」，屬真實資料不足（非程式邏輯錯誤），best-effort 設計下會在下次執行再嘗試。
 - 優先序 3：**已定案**。用乾淨快取重驗，確認兩支腳本的排序都會被 lot_size 翻轉，結論成立。使用者決定 `PORTFOLIO_PARAMS` 預設改為「零股、本金 100 萬」，已實作（`lot_size` 從 1000 改成 0）。改動過程中意外發現並修好零股模式一個潛藏 bug（買進算股數時滑價估算方式導致系統性超支，資金打得滿時會悄悄買不到）——修好後全專案 512 個測試通過，並用修正後的程式碼重跑三支相關腳本，結論均不受影響。詳見下方章節。
 - 優先序 4：`scripts/update_universe_bars.py` 的 sanity floor 已實作並實跑驗證通過（正常路徑 + 模擬空快取路徑皆確認），已 commit（`da1a6df`）。
+- 優先序 5：**驗證＋合併已全量跑完並驗證，Priority 3 已重跑**。`cache/factor_run/` 目前共 2149 檔，其中 2148 檔在 `cache/factor_run_long/` 裡有對應檔案、已全量驗證：1901 檔乾淨可信、13 檔啟用中但重算後對不上（`3114` 疑似疊加了錯誤的 ~100 倍比例，`cache/factor_run/3114.json` 本身沒這問題，只有孤兒目錄那份算錯）、234 檔在 `factor_run_long` 裡其實也是 `skip:true`；剩下 1 檔（`3718`）連 `factor_run_long` 裡都沒有對應檔案，2148+1=2149——**修正原計畫「427 檔有資料」的誤判**：428 檔 skip 裡只有 193 檔真的有可用長歷史（換長歷史後流動性+基本面都能通過，屬「復活候選」），另外 235 檔（234+1）是真的資料缺口。合併已對 1708 檔（1901 乾淨 − 193 復活候選，這些目前仍是 skip 狀態不動）正式套用，0 檔失敗，回測歷史從 ~5 年延伸到 ~14 年，寫入前已備份整個 `cache/factor_run/` 到 `cache/factor_run_backup_pre_longmerge/`。用延伸後的快取重跑 Priority 3：`run_strategy_search.py` 結論不變（winner=baseline, accept=False）；`run_ranking_optimize.py` winner 從 5 年樣本時的 `ic_suggested` 變成 `active`，但兩次的實際結果都是「維持現況、不套用改動」，治理結論不變。詳見下方優先序 5 章節「執行結果」。
 
 commit 紀錄：`da1a6df`（優先序 4）→ `cb21e54`（優先序 2 程式修法）→ `5aad426`（本文件）→ `f47d8ad`（fresh-context read-back 修正）→ `d930ce4`（優先序 1 全量結果 + 啟動優先序 2）→ `800bdba`（優先序 2 全量結果 + report_vs_benchmark 重驗）→ `1fda8cc`（優先序 3 定案：lot_size 預設改零股，並修好零股模式滑價超支 bug）。優先序 1 的全量背景作業（PID 25620，2026-09-09 09:32 啟動）已於同日約 15:34 結束，exit code 0，無 Python 例外，輸出在工作階段 scratchpad 下的 `full_backfill_run.log`（2651 行）。優先序 2 的全量套用作業（`python scripts/run_factor_backtest.py --universe all --days 1800`，2026-09-09 15:38 啟動，輸出在同目錄 `full_fundamentals_leadin_run.log`，2447 行）已於 2026-09-10 跑完，exit code 0，無 Python 例外；跑完後的排名法多因子回測摘要（universe=all）：`total_return_pct=20.83`、`cagr_pct=3.85`、`sharpe=0.60`、`max_drawdown_pct=-11.86`、trades=267（1721/2149 檔通過流動性+基本面篩選）——這組數字比優先序 1 剛跑完、優先序 2 尚未套用時的版本（total_return 17.23% / sharpe 0.49 / trades 187）全面改善，符合「基本面覆蓋起點提前→更早開始交易→樣本數增加」的預期方向。
 
@@ -108,13 +109,29 @@ commit 紀錄：`da1a6df`（優先序 4）→ `cb21e54`（優先序 2 程式修�
 - **2021-08 之後的重疊區間，已交叉驗證一致**：隨機抽 16 檔（2330 + 15 檔隨機樣本），比對 `factor_run_long` 與剛驗證過的 `factor_run` 兩邊在重疊日期的 `c_adj/c` 調整比例，共 15,729+1,218 筆日期、**0 筆不符**。`factor_run` 現在的 c_adj 是用 `scripts/run_factor_backtest.py` 的 `augment_bars_with_adj_factor()` 算的，這函式直接 reuse `build_adj_factors.py`/`src/adjust.py` 的 TWSE 除權息表+Yahoo 交叉比對+不變量檢查邏輯（`backtest.db` 那條線用的同一套算法）——兩邊完全一致，強烈顯示 `factor_run_long` 是用相同或等價的算法產生的，這段區間可以直接信任。
 - **2012~2021-08 這段（多出來的 9 年）沒有獨立資料可比對**，因為 `factor_run` 本身就沒有這段。要驗證只能重新拉這幾年的 TWSE 除權息表＋Yahoo 資料，用同一套算法重算一次、跟 `factor_run_long` 存的值比對——不是重抓股價本身（那個已經有了），只是重抓「有沒有發生公司行動、發生在哪天」這個較輕量的資料，跟 `build_adj_factors.py` 現有邏輯完全一樣，只是往前多抓 9 年份。使用者已決定：**全量重驗**（2148 檔全跑，不只抽樣）。
 - 目標格式決策：**JSON（併入 `cache/factor_run/*.json`），不建 SQL 表**。理由：現有消費端（`report_factor_ic.load_cached_universe()` 等）一律是「glob 全部檔案、每檔整包讀進記憶體、跑向量化的時間序列運算」，從來不需要條件查詢/join/部分讀取——SQL 能提供的優勢在這個存取模式下完全用不到，硬做只是多一層 schema／migration／connection 管理成本，不符合「不過度工程化」。也符合檔案存放慣例（`cache/` 本來就是產出物與快取的位置）。這條路徑完全不影響 `backtest.db` 那條給舊版單股回測用的 SQLite 路徑，兩者不互通、這次不動它。
-- **意外發現、需要在合併時處理的邊界情況**：目前 `cache/factor_run/` 裡 428 檔標記 `skip: true`（下市/無資料，Priority 1 記錄過），但這 428 檔裡有 **427 檔在 `factor_run_long` 裡其實有資料**（只有 1 檔兩邊都沒有）。這代表大部分被標 skip 的代碼，並不是「完全查無資料」，可能是「近期流動性不足」或其他篩選條件，不是真的資料源缺口。合併時要先查清楚這 427 檔各自被 skip 的原因，再決定合併後是否要讓部分代碼「復活」（有了 9 年更長歷史後，流動性篩選門檻可能改變結果）——這是實作階段才需要解的分支，這裡先記錄，不在這次規劃階段猜測結論。
 
-**建議動作（尚未執行，待你看過這份計畫後再開工）**：
-1. 寫一支一次性驗證腳本：對全部 2148 檔，重新用 `build_adj_factors.py`/`adjust.py` 的邏輯，抓 2012～2021-08 這段的 TWSE 年度除權息表 + Yahoo 資料，算出這段期間「應該」的 adj_factor，跟 `cache/factor_run_long/*.json` 裡存的值逐日比對，超過容忍度（沿用 `build_adj_factors.py` 現有的 `STEP_THRESHOLD=0.02`）就記錄下來、不直接信任。網路作業，規模與時間量級跟這次優先序 1/2 相近（抓的是公司行動資料不是股價，理論上較輕量，但 2148 檔仍要抓好幾小時）。
-2. 驗證通過（或標記例外）後，寫一支合併腳本：把 `factor_run_long` 裡 2012-05 到 `factor_run` 現有 `bars[0].date`（2021-08-16 前後，各代碼略有不同）之間的 `bars`/`revenue_series`/`roe_series` 前段資料，接到 `factor_run` 現有的 JSON 前面，`per_pbr_series`/`margin_trend`/`fundamentals_days`/`skip`/`days` 等新欄位維持 `factor_run` 現有值不變（`factor_run_long` 沒有這些欄位）。對驗證失敗的代碼，保留現狀（不合併，記錄成已知缺口，下次再處理），不要因為少數代碼卡住就擋下整批。
-3. 合併前先查清楚上面提到的 427 檔 skip 邊界情況的實際 skip 原因，決定合併後要不要重新評估 skip 狀態。
-4. 全部跑完後，重跑一次 Priority 3 的 `run_strategy_search.py`/`run_ranking_optimize.py` 比較（歷史變長，樣本數增加，門檻判定的樣本外表現有機會再變一次），並視情況決定 `cache/factor_run_long/` 原始目錄要不要保留（併入後若確認完整可用，這個孤兒目錄本身可以刪除，不用兩份重複資料同時存在）。
+（以上「已查明的事實」是優先序 5 開工前的查證與決策脈絡，記錄當時的判斷依據；下方「執行結果」一節記錄後續實際執行、跑出來的數字與最終結論——本優先序**已經做完**，見文件開頭狀態列。）
+- **意外發現、原計畫誤判已修正**：目前 `cache/factor_run/` 裡 428 檔標記 `skip: true`（下市/無資料，Priority 1 記錄過）。原計畫以為「427 檔在 factor_run_long 裡其實有資料」，**全量查證後發現這是誤判**——428 檔裡真正有可用長歷史（bars 非空、換長歷史後流動性+基本面都能通過）的只有 **193 檔**，另外 **234 檔在 `factor_run_long` 裡自己也是 `{"skip": true}`**（沒有真正的 bars，之前的抽樣沒抓到這個區別），加上 1 檔（`3718`）兩邊都沒有檔案，合計 235 檔是真的資料缺口，不是 427 檔。193 檔的部分：流動性翻盤與「有 revenue+roe 序列」完全對應（193 vs 234 兩組互斥且加總正確），代表原本因窗口太窄被判不合格的代碼，換長歷史後基本面資料也同時存在，不是巧合。
+
+## 執行結果（2026-09-10）
+
+**全量驗證**（`scripts/verify_factor_run_long_adjfactors.py`，全新腳本，重用 `resolve_adjustment_actions()`/`build_adj_factor()`/`validate_adj_factor()`，對 `cache/factor_run_long/` 目錄下全部 2148 檔重算 adj_factor 跟其存值逐日比對，只需 1 次 TWSE 年度表 request＋每檔 1 次 Yahoo request，沒有 FinMind 額度限制，比優先序 1/2 快很多；另有 1 檔 `3718` 因為連 `factor_run_long` 都沒有檔案，不在這 2148 檔之內，單獨用本地比對抓出）：
+- 2148 檔裡 1914 檔有真正的 bars 可驗證（其餘 234 檔是 `factor_run_long` 自身的 skip 記錄）；加計 3718 這 1 檔完全沒資料，`cache/factor_run/` 全體 2149 檔中共 235 檔（234+1）略過驗證
+- 1901 檔（1914 中）完全乾淨（`n_mismatch=0`，含已知減資案例 2327 也正確處理，`violations` 全部是空列表）
+- **13 檔目前生產環境啟用中的代碼重算後對不上**：`1438` `2442` `3114` `3150` `3338` `4931` `5222` `5278` `6533` `6821` `8045` `8059` `8277`。其中 12 檔呈現「整段歷史等比例偏移」的樣式（像漏抓/多抓了一次公司行動），`3114`（上櫃股）最嚴重——查證發現 `factor_run_long` 存的 `c_adj` 在 2025-04-28 附近疑似錯誤疊加了約 100 倍的比例，而**目前正式使用的 `cache/factor_run/3114.json`（僅 2021-08 起的資料）沒有這個問題**，代表現行生產邏輯是對的，只有孤兒目錄那份舊資料本身算錯。這 13 檔全部從合併範圍排除，保留現狀，記為已知缺口。
+- 這 13 檔全部屬於「目前啟用中」的代碼，跟 193 檔復活候選沒有交集（已交叉核對）。
+
+**全量合併**（`scripts/merge_factor_run_long_history.py`，全新腳本，內建自動備份整個 `cache/factor_run/` 到 `cache/factor_run_backup_pre_longmerge/`、`--dry-run`、冪等性標記 `long_history_merged`）：對 1708 檔（1901 檔乾淨中，扣掉 193 檔「復活候選」——見上方「已查明的事實」最後一點，這些目前仍是 skip 狀態、這次不動——剩下的即是 1708 檔目前啟用中且驗證乾淨的代碼）正式套用，1708 檔全數成功、0 檔失敗。抽驗 2330：`bars[0]` 從 `2021-08-16` 延伸到 `2012-05-02`（n_bars 1218→3500），`revenue_series`/`roe_series` 長度隨之增加（61→159、21→51）。13 檔 mismatch 代碼、193 檔復活候選、235 檔無資料，合計 441 檔正確維持原狀未被觸碰（獨立核對過）。
+
+**Priority 3 重跑**（用延伸後的 14 年快取，兩支腳本都用 `--dry-run`，不寫 meta/optimization_runs、不發 Telegram、不套用任何自動決策）：
+- `run_strategy_search.py`：train=2012-05-02~2025-12-22，test=2026-02-23~2026-08-20，winner=point_best=`baseline`，`decision={"accept": False, "reasons": ["PBO 0.83 > 0.5 -- overfitting probability too high", "DSR 0.69 < 0.95 -- not significant after trial-count penalty"]}`——跟 5 年樣本時的結論一致，沒有新候選通過關卡。
+- `run_ranking_optimize.py`：winner=point_best=`active`，`decision={"accept": True, "reasons": []}`，`action=keep`——跟 5 年樣本時（winner 收斂到 `ic_suggested`）不同，但**實際效果相同**：兩次都是「維持現況、不套用改動」（5 年樣本時 winner 雖是 `ic_suggested` 但 `accept=False` 沒有觸發自動套用；14 年樣本時 winner 本身就是現況 `active`，`action=keep` 沒有東西可套用）。治理結論不受影響：`run_ranking_optimize.py` 的排序仍會隨樣本/lot_size 變動，不該照單全收自動套用，這點原計畫優先序 3 的判斷依然成立。
+
+**`cache/factor_run_long/` 去留建議：暫不刪除**。理由：193 檔復活候選、13 檔 mismatch 代碼的原始長歷史資料**只存在 `factor_run_long`**（不在任何其他地方，也沒有 git 歷史可還原），這兩項都還是未解決的後續議題（193 檔是否要讓它們從 skip 復活是獨立決策，需要重新走一次完整的 `fetch_universe_data()` 流程幫它們補上符合現行 `fundamentals_days` 窗口的 revenue/roe，不是本次合併的範圍；13 檔若之後想查清楚具體是哪個公司行動被漏算/多算，也需要這份原始資料）。等這兩項後續議題有結論後，再重新評估要不要刪除孤兒目錄。
+
+**過程中順手發現、未動手修的既有資料品質問題（記錄不修，超出本次範圍）**：`cache/factor_run/2330.json` 的 `revenue_series` 裡 `usable_date: "2026-04-21"` 出現兩次（重複），跟這次合併無關，是既有資料本身的問題。
+
+**副產品清理**：合併作業前留下兩個備份目錄——`cache/factor_run_backup_pre_longmerge/`（全量合併前的正式備份，1708 檔合併前的完整快照）與 `cache/factor_run_backup_pre_longmerge_agent_test_20260910/`（實作腳本時小樣本測試留下的備份，內容跟前者幾乎一樣，屬多餘備援，兩者都在 `.gitignore` 範圍內、不占版控空間，僅占本機磁碟；可以留著當雙重保險，或之後確認合併結果穩定後手動刪除後者）。
 
 ---
 
@@ -122,9 +139,15 @@ commit 紀錄：`da1a6df`（優先序 4）→ `cb21e54`（優先序 2 程式修�
 
 - 最初的四項主張查證階段是唯讀的：讀程式碼、讀 JSON 快取內容、讀既有文件，沒有執行任何腳本、沒有連網、沒有改動任何檔案。使用者「開工」後才開始的優先序 1/2/4 修復與驗證動作有真的跑腳本、連網（FinMind/TWSE/Yahoo）、寫入 `cache/factor_run/*.json`、以及 3 個 git commit，細節見各優先序章節。
 - 抽驗樣本限定 2330、2317、5315 三檔，未逐一核對全庫 2148 檔（但 `docs/regime_switch_vs_0050.md` 裡的既有記錄與抽驗結果一致，交叉印證了全庫層級的說法）。
-- `cache/factor_run_long/` 的資料新鮮度與可用性已在優先序 5 進一步查證：2021-08 後的重疊區間抽驗一致（0 筆不符），2012~2021-08 這段尚未驗證，計畫見優先序 5。
+- `cache/factor_run_long/` 的資料新鮮度與可用性：優先序 5 已全量查證完成，2021-08 後的重疊區間抽驗一致（0 筆不符），2012~2021-08 這段已用 `scripts/verify_factor_run_long_adjfactors.py` 全量重算比對，1901/1914 檔乾淨，13 檔已知例外排除在合併之外，細節見優先序 5「執行結果」。
 - 第三優先（盤勢分桶歸因，選股 alpha vs 再平衡成本拆解）與低優先（MIS 輪詢壓測）維持原報告的判斷，本次未展開查證——這兩項本身就是「下一步該做什麼」的研究提案，不是可查證的既存事實主張。
 
 ## 建議處理順序
 
-優先序 1（c_adj）→ 優先序 2（基本面起點）→ 優先序 3（整張捨入驗證，兩支腳本都測）→ 優先序 4（sanity floor，改動最小可隨時插入）。1、2 會動到 `cache/factor_run/` 全量重跑，動作最大也最該先做，因為後面所有分析都建立在這份快取之上。優先序 5（`factor_run_long` 併入）是 1、2 之後新增的延伸工作，不影響前四項已完成的結論，等你看過計畫決定要不要開工。
+優先序 1（c_adj）→ 優先序 2（基本面起點）→ 優先序 3（整張捨入驗證，兩支腳本都測）→ 優先序 4（sanity floor，改動最小可隨時插入）→ 優先序 5（`factor_run_long` 驗證＋併入）。全部五項均已完成並驗證，見文件開頭狀態列與各優先序章節。
+
+## 尚待決定的後續事項（優先序 5 衍生，不阻塞已完成的結論）
+
+1. **193 檔「復活候選」**：目前仍是 `skip: true`，`factor_run_long` 顯示換長歷史後流動性+基本面都能通過。要不要讓它們正式復活，需要重新走一次 `fetch_universe_data()` 完整流程（用現行 `fundamentals_days` 窗口重抓 revenue/financials，不能只搬 `factor_run_long` 裡窗口較窄的舊序列），屬於獨立的網路作業與決策，這次未執行。
+2. **13 檔 mismatch 代碼**：若要查清楚具體是哪個公司行動被漏算/多算（例如 `3114` 的 100 倍落差），需要更深入比對 Yahoo/TWSE 原始資料，這次只做到「排除、不信任」，未深挖根因。
+3. `cache/factor_run_backup_pre_longmerge_agent_test_20260910/` 是實作測試階段留下的多餘備份，跟正式備份內容重複，可在確認合併結果穩定後手動刪除（不占版控空間，純本機磁碟）。
