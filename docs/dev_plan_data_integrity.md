@@ -3,10 +3,10 @@
 狀態：**2026-09-09 已開工**。以下四項主張已逐一對照目前程式碼與 `cache/factor_run/`、`cache/factor_run_long/` 實際檔案內容核實。目前進度：
 - 優先序 1：**全量作業已跑完並驗證**。2149 檔快取中 428 檔為 skip（下市/無資料），可用 1721 檔裡 c_adj 覆蓋 1709 檔（99.3%），per_pbr_series 覆蓋 1721 檔（100%）。剩 12 檔 c_adj 缺失，經查是 yfinance 對這些代號回傳「possibly delisted / no data」，屬真實資料源缺口（非程式邏輯問題），best-effort 設計下會在下次執行再嘗試。
 - 優先序 2：根因已查明（YoY/TTM lead-in 結構性損耗，非資料源限制）；程式修法（拆 `fundamentals_days` 欄位）已實作並對 3 檔樣本實跑驗證通過（usable 序列起點成功提前到對齊 bars 起點）。**全量套用作業已跑完並驗證**：1721 檔可用代號中 1675 檔（97.3%）`fundamentals_days` 已補到 2250（=1800+450 lead-in），抽驗 2330 確認 `revenue_series[0].usable_date`（2021-08-10）已提前到 bars 起點（2021-08-16）之前。剩 46 檔仍卡在 0，log 明確記錄為「lead-in 重抓後 revenue/roe 序列仍不足」，屬真實資料不足（非程式邏輯錯誤），best-effort 設計下會在下次執行再嘗試。
-- 優先序 3：便宜驗證已做（用部分遷移中的快取），**確認兩支腳本的排序都會被 lot_size 翻轉**，`run_ranking_optimize.py` 甚至連自動套用的 accept/reject 決策都會翻盤，比原本推測更嚴重。**待辦：用現在已全量遷移完成的乾淨快取重跑，取得最終數字**（見下方待辦）。
+- 優先序 3：**已定案**。用乾淨快取重驗，確認兩支腳本的排序都會被 lot_size 翻轉，結論成立。使用者決定 `PORTFOLIO_PARAMS` 預設改為「零股、本金 100 萬」，已實作（`lot_size` 從 1000 改成 0）。改動過程中意外發現並修好零股模式一個潛藏 bug（買進算股數時滑價估算方式導致系統性超支，資金打得滿時會悄悄買不到）——修好後全專案 512 個測試通過，並用修正後的程式碼重跑三支相關腳本，結論均不受影響。詳見下方章節。
 - 優先序 4：`scripts/update_universe_bars.py` 的 sanity floor 已實作並實跑驗證通過（正常路徑 + 模擬空快取路徑皆確認），已 commit（`da1a6df`）。
 
-commit 紀錄：`da1a6df`（優先序 4）→ `cb21e54`（優先序 2 程式修法）→ `5aad426`（本文件）→ `f47d8ad`（fresh-context read-back 修正）→ `d930ce4`（優先序 1 全量結果 + 啟動優先序 2）。優先序 1 的全量背景作業（PID 25620，2026-09-09 09:32 啟動）已於同日約 15:34 結束，exit code 0，無 Python 例外，輸出在工作階段 scratchpad 下的 `full_backfill_run.log`（2651 行）。優先序 2 的全量套用作業（`python scripts/run_factor_backtest.py --universe all --days 1800`，2026-09-09 15:38 啟動，輸出在同目錄 `full_fundamentals_leadin_run.log`，2447 行）已於 2026-09-10 跑完，exit code 0，無 Python 例外；跑完後的排名法多因子回測摘要（universe=all）：`total_return_pct=20.83`、`cagr_pct=3.85`、`sharpe=0.60`、`max_drawdown_pct=-11.86`、trades=267（1721/2149 檔通過流動性+基本面篩選）——這組數字比優先序 1 剛跑完、優先序 2 尚未套用時的版本（total_return 17.23% / sharpe 0.49 / trades 187）全面改善，符合「基本面覆蓋起點提前→更早開始交易→樣本數增加」的預期方向。
+commit 紀錄：`da1a6df`（優先序 4）→ `cb21e54`（優先序 2 程式修法）→ `5aad426`（本文件）→ `f47d8ad`（fresh-context read-back 修正）→ `d930ce4`（優先序 1 全量結果 + 啟動優先序 2）→ `800bdba`（優先序 2 全量結果 + report_vs_benchmark 重驗）→ `1fda8cc`（優先序 3 定案：lot_size 預設改零股，並修好零股模式滑價超支 bug）。優先序 1 的全量背景作業（PID 25620，2026-09-09 09:32 啟動）已於同日約 15:34 結束，exit code 0，無 Python 例外，輸出在工作階段 scratchpad 下的 `full_backfill_run.log`（2651 行）。優先序 2 的全量套用作業（`python scripts/run_factor_backtest.py --universe all --days 1800`，2026-09-09 15:38 啟動，輸出在同目錄 `full_fundamentals_leadin_run.log`，2447 行）已於 2026-09-10 跑完，exit code 0，無 Python 例外；跑完後的排名法多因子回測摘要（universe=all）：`total_return_pct=20.83`、`cagr_pct=3.85`、`sharpe=0.60`、`max_drawdown_pct=-11.86`、trades=267（1721/2149 檔通過流動性+基本面篩選）——這組數字比優先序 1 剛跑完、優先序 2 尚未套用時的版本（total_return 17.23% / sharpe 0.49 / trades 187）全面改善，符合「基本面覆蓋起點提前→更早開始交易→樣本數增加」的預期方向。
 
 ## 查證結論總覽
 
@@ -72,10 +72,19 @@ commit 紀錄：`da1a6df`（優先序 4）→ `cb21e54`（優先序 2 程式修�
 - `run_strategy_search.py` 的候選：`lot_size=1000` 下 winner=`with_both`（point_best 同為 `with_both`，candidate_scores：baseline 6.20、with_both 6.86）；`lot_size=0` 下 winner 翻成 `baseline`（point_best 同為 `baseline`，candidate_scores 全面改觀：baseline 26.9、with_both 21.5）。**排序翻轉的定性結論在乾淨快取下依然成立**，兩種 lot_size 下 `decision["accept"]` 都是 False。
 - `run_ranking_optimize.py` 的候選：`lot_size=1000` 下 winner（plateau most_common）=`ic_suggested`、但 point_best=`active`（candidate_scores：active 5.21、ic_suggested 4.01）；`lot_size=0` 下 winner 與 point_best 一致收斂為 `ic_suggested`（candidate_scores：active 45.4、ic_suggested 51.4）。**這次兩種 lot_size 下 `decision["accept"]` 都是 False，跟優先序 1 剛跑完時（用部分遷移中的快取）觀察到的「accept 從 False 翻成 True」不同**——用乾淨快取重驗後，accept 決策本身這次沒有翻盤，但 winner 與 point_best 是否一致依然會隨 lot_size 改變（point_best 從 active 變成與 winner 一致的 ic_suggested）。這說明先前「accept 會翻盤」的說法對當時那組（遷移中、不完整的）快取成立，但不是在所有快取狀態下都必然重現——**排序/評分對 lot_size 敏感**這個核心結論不變，但「連 accept 都會自動翻盤」不宜當成放諸四海皆準的定論，需視當下候選權重與快取狀態而定。
 
+**預設值決策已拍板並實作（2026-09-10）**：你決定「可買零股、本金維持 100 萬」。`src/portfolio_backtest.py` 的 `PORTFOLIO_PARAMS["lot_size"]` 已從 `1000` 改成 `0`（commit `1fda8cc`）。
+
+**改預設值時意外揪出並修好一個潛藏 bug**：把 `lot_size` 設成 0 之後，`tests/test_portfolio_backtest.py` 有 4 個測試當場失敗。查證後發現不是改壞的，是零股模式原本就有的問題——買進算股數時用「收盤價」，但實際扣款用「收盤價 × (1+滑價 0.1%)」的成交價，導致實際花費系統性超過預算約滑價比例；整張模式下無條件捨去到千股整數留下的現金餘裕，長期意外蓋掉了這個超支，從沒真的發作過，零股模式沒有這個餘裕，資金打得比較滿時（部位集中、或同一天要連續買多檔）就會現金判定不足、悄悄跳過買進，嚴重時整段回測一張都買不到。已修正（分母改用含滑價的成交價，讓花費精準對齊預算），29 個 `test_portfolio_backtest.py` 測試與全專案 512 個測試全數通過，同一 commit（`1fda8cc`）。
+
+**用修好的程式碼重驗一次最終數字（2026-09-10）**：上面「最終數字」段落是用修 bug *之前* 的零股模式跑的，數字有微幅誤差（bug 讓零股模式的花費比預算多花一點點，score 略受影響），修好後重跑：
+- `run_strategy_search.py`：`lot_size=1000` 下 winner=`with_both`（candidate_scores：baseline 6.20、with_both 6.75）；`lot_size=0` 下 winner 仍翻成 `baseline`（candidate_scores：baseline 26.87、with_both 21.34）。**排序翻轉的結論不變**，數字跟 bug 修正前只有小數點後差異。
+- `run_ranking_optimize.py`：`lot_size=1000` 下 winner=`ic_suggested`／point_best=`active`（active 5.21、ic_suggested 4.01，跟修 bug 前完全一致——這支腳本的候選集用的 top_n 較大，資金沒打得那麼滿，本來就沒踩到這個 bug）；`lot_size=0` 下 winner/point_best 收斂為 `ic_suggested`（active 45.43、ic_suggested 51.35，跟修 bug 前幾乎相同）。**結論不變**。
+- `report_vs_benchmark.py` 也重跑過（該腳本 `--lot-size` 預設本來就是 0）：三道門檻判定結果逐格比對跟 bug 修正前完全相同，「繼續抱 0050」整體結論不受影響——同樣因為候選都用 top_n=10/20，資金沒打得夠滿，沒踩到這個 bug。
+
 **結論與建議動作**：
 1. ~~等優先序 1、2 的兩輪全量作業都跑完、快取穩定後，重跑取得最終數字~~ — 已完成，見上方最終數字。
-2. `run_strategy_search.py` 與 `run_ranking_optimize.py` 產出的任何既有結論（包括已經寫進 ADR 的審核輸入，例如 `docs/adr/0003-manual-review-for-strategy-logic-search.md`——repo 裡還有另一份同編號但主題不同的 `docs/adr/0003-recommendation-pipeline-user-facing-scope.md`，注意不要對錯檔案）都要標記為「需要用修正後的參數重跑」，不要直接沿用舊結論。
-3. 應該修的不是「拿哪個 lot_size 當標準」這種一次性調參，而是 `src/portfolio_backtest.py` 的 `PORTFOLIO_PARAMS` 預設 `initial_capital`/`lot_size` 組合本身——目前的 100 萬本金＋千股一張，會讓大多數個股連一張都買不起，這是資金規模設定跟台股股價分布不匹配的問題，兩支腳本目前都沒有覆寫這兩個鍵，才會全部繼承這組不合理的預設。要不要調整預設值本身（例如提高 `initial_capital` 或允許零股）是取捨判斷，留給你決定，這裡不擅自改。
+2. ~~要不要調整 `PORTFOLIO_PARAMS` 預設值（`initial_capital`/`lot_size`）~~ — 已決策並實作：零股、本金 100 萬（commit `1fda8cc`），意外附帶修好零股模式的滑價超支 bug。
+3. `run_strategy_search.py` 與 `run_ranking_optimize.py` 產出的任何既有結論（包括已經寫進 ADR 的審核輸入，例如 `docs/adr/0003-manual-review-for-strategy-logic-search.md`——repo 裡還有另一份同編號但主題不同的 `docs/adr/0003-recommendation-pipeline-user-facing-scope.md`，注意不要對錯檔案）都要標記為「需要用修正後的參數重跑」，不要直接沿用舊結論。這件事本身尚未執行，留待下次真的要跑這兩支腳本產生正式建議時處理。
 
 ---
 
