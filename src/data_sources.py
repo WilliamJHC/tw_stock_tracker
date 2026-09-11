@@ -173,6 +173,7 @@ def _yf_history_since(code, start_date, interval):
         try:
             df = yf.Ticker(code + suffix).history(start=start_date, interval=interval, auto_adjust=False)
             if df is not None and len(df) > 0:
+                df.attrs["resolved_ticker"] = code + suffix
                 return df
         except Exception:
             continue

@@ -30,8 +30,17 @@ import statistics
 import metrics as mt
 
 
-def _as_map(curve):
+def as_map(curve):
     return {row["date"]: row["value"] for row in curve}
+
+
+def value_curve(rows, key="equity"):
+    """Normalizes any [{"date", key: float}, ...] series (e.g.
+    portfolio_backtest.simulate()'s "equity" curve) onto this module's
+    shared "value" key -- see module docstring. Public because more than
+    one caller (scripts/report_vs_benchmark.py and its one-off siblings)
+    needs this same normalization, not just report_vs_benchmark.py itself."""
+    return [{"date": r["date"], "value": r[key]} for r in rows]
 
 
 def common_trading_days(curve_a, curve_b):
@@ -104,8 +113,8 @@ def apply_switch_rule(strategy_curve, benchmark_curve, regime_by_date, hold_stra
     if not days:
         return {"equity_curve": [], "n_switches": 0, "days_in_strategy": 0, "days_in_benchmark": 0}
 
-    strat_ret = _returns_over_days(_as_map(strategy_curve), days)
-    bench_ret = _returns_over_days(_as_map(benchmark_curve), days)
+    strat_ret = _returns_over_days(as_map(strategy_curve), days)
+    bench_ret = _returns_over_days(as_map(benchmark_curve), days)
     cost = switch_cost_pct / 100
 
     equity = 100.0
@@ -169,7 +178,7 @@ def full_period_comparison(curve_a, curve_b, start=None, end=None):
     if len(days) < 2:
         return {}
 
-    a_map, b_map = _as_map(curve_a), _as_map(curve_b)
+    a_map, b_map = as_map(curve_a), as_map(curve_b)
     a_vals = [a_map[d] for d in days]
     b_vals = [b_map[d] for d in days]
     a_ret = (a_vals[-1] / a_vals[0] - 1) * 100
@@ -266,8 +275,8 @@ def regime_bucket_comparison(curve_a, curve_b, raw_regime_by_date):
     "excess_annualized_pct"}}, all values None when n_days == 0 for that
     bucket."""
     days = common_trading_days(curve_a, curve_b)
-    a_ret = _returns_over_days(_as_map(curve_a), days)
-    b_ret = _returns_over_days(_as_map(curve_b), days)
+    a_ret = _returns_over_days(as_map(curve_a), days)
+    b_ret = _returns_over_days(as_map(curve_b), days)
     log_sums = {r: {"n_days": 0, "a_log": 0.0, "b_log": 0.0} for r in ("bull", "bear", "consolidation")}
 
     for date in days:

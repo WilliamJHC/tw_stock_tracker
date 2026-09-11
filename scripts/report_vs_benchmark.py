@@ -1,21 +1,25 @@
 # -*- coding: utf-8 -*-
 """Does a fixed, event-driven "hold the multi-factor strategy, switch to
-0050 on a pre-determined market-regime signal" rule actually beat holding
-0050 outright -- see docs/regime_switch_vs_0050.md and
+the benchmark on a pre-determined market-regime signal" rule actually beat
+holding the benchmark outright -- see docs/regime_switch_vs_0050.md and
 plans/0050-all-time-optimized-wolf.md (/grill-me, 2026-09-07) for the full
-design. No network for the strategy side (off cache/factor_run/*.json, same
-source scripts/report_factor_ic.py/run_strategy_search.py already share via
-report_factor_ic.load_cached_universe()); one cached yfinance pull for 0050
-itself (see fetch_benchmark_curves()).
+design (that design used 0050 specifically; --benchmark-symbol below lets
+this same report run against any other yfinance-listed TW ticker, e.g. 0051,
+to separate stock-picking alpha from a concentrated benchmark's composition
+effect -- see fetch_benchmark_curves()'s docstring). No network for the
+strategy side (off cache/factor_run/*.json, same source
+scripts/report_factor_ic.py/run_strategy_search.py already share via
+report_factor_ic.load_cached_universe()); one cached yfinance pull for the
+benchmark itself (see fetch_benchmark_curves()).
 
 This is intentionally NOT src/backtest.py's "does timing beat buy&hold on
 ONE stock" question (already answered: no) -- it's a portfolio-level,
 regime-conditional ALLOCATION question: given you're already running the
 multi-factor strategy, is there an honest, no-lookahead rule for when to
-step out of it into 0050 instead. Two rules are tested, fixed in advance
-(no search over rule variants):
-  Rule A: hold the strategy in bull/consolidation, 0050 in bear.
-  Rule B: hold the strategy only in bull, 0050 in bear/consolidation.
+step out of it into the benchmark instead. Two rules are tested, fixed in
+advance (no search over rule variants):
+  Rule A: hold the strategy in bull/consolidation, the benchmark in bear.
+  Rule B: hold the strategy only in bull, the benchmark in bear/consolidation.
 
 Usage:
     python scripts/report_vs_benchmark.py
@@ -25,6 +29,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import sys
 import time
 
@@ -69,16 +74,28 @@ SWITCH_RULES = {
 }
 
 
+# TW stock/ETF codes are 4-6 alphanumerics (e.g. "0050", "00891B") -- this
+# is a filesystem-safety allowlist for --benchmark-symbol, not a real code
+# validator: it exists only to keep the value out of cache_path's f-string
+# (no "/", "\", "." -- blocks path traversal like "../../foo") before it
+# ever reaches a yfinance-suffix guess, not to confirm the code trades.
+_SYMBOL_RE = re.compile(r"^[0-9A-Za-z]{1,10}$")
+
+
 def fetch_benchmark_curves(start_date="2021-07-01", cache_path=None, refresh=False, symbol="0050"):
-    """Returns (total_return_curve, price_curve), each a benchmark.py-shaped
-    [{"date", "value"}] curve for `symbol` (default 0050). total_return_curve
-    is yfinance's Adj Close (splits + dividends back-adjusted -- the honest
-    "held it and reinvested everything" total-return line, and this report's
-    MAIN benchmark); price_curve is Close (splits back-adjusted only, no
-    dividends) kept as a stricter side-reference, since the strategy side
-    has no dividend reinvestment of its own (cache/factor_run/*.json's
-    c_adj coverage is 0/2148 as of this report's design -- see the plan's
-    known limitations).
+    """Returns (total_return_curve, price_curve, resolved_ticker), where the
+    first two are benchmark.py-shaped [{"date", "value"}] curves for `symbol`
+    (default 0050) and resolved_ticker is the actual "<symbol>.TW"/".TWO"
+    yfinance resolved to (see data_sources._yf_history_since()'s .attrs
+    stamp -- without this, a report would have to guess the suffix, and
+    guess wrong for any TPEX/OTC code that only resolves via .TWO).
+    total_return_curve is yfinance's Adj Close (splits + dividends
+    back-adjusted -- the honest "held it and reinvested everything"
+    total-return line, and this report's MAIN benchmark); price_curve is
+    Close (splits back-adjusted only, no dividends) kept as a stricter
+    side-reference, since the strategy side has no dividend reinvestment of
+    its own (cache/factor_run/*.json's c_adj coverage is 0/2148 as of this
+    report's design -- see the plan's known limitations).
 
     Calls data_sources._yf_history_since() DIRECTLY -- same cross-module
     precedent as scripts/build_adj_factors.py's fetch_yahoo_adj_close().
@@ -89,21 +106,28 @@ def fetch_benchmark_curves(start_date="2021-07-01", cache_path=None, refresh=Fal
     verification step. This function keeps its own cache file instead, and
     never touches cache/daily_0050.json.
 
-    refresh=False (default) reuses cache_path as-is whenever it exists and
-    was fetched with the same start_date -- it does NOT check whether the
-    cache is stale relative to today; pass --refresh-benchmark to force a
-    re-fetch when you want today's latest bar."""
+    refresh=False (default) reuses cache_path as-is whenever it exists,
+    matches this `symbol`, AND was fetched with the same start_date -- it
+    does NOT check whether the cache is stale relative to today; pass
+    --refresh-benchmark to force a re-fetch when you want today's latest
+    bar. Raises ValueError for a `symbol` that fails _SYMBOL_RE (see its
+    comment) and lets data_sources.SourceError propagate for a
+    well-formed but unresolvable one -- callers should catch both."""
+    if not _SYMBOL_RE.match(symbol):
+        raise ValueError(f"invalid --benchmark-symbol {symbol!r}: expected 1-10 alphanumeric characters")
+
     cache_path = cache_path or os.path.join(BASE_DIR, "cache", f"benchmark_{symbol}.json")
     if not refresh and os.path.exists(cache_path):
         try:
             with open(cache_path, encoding="utf-8") as f:
                 cached = json.load(f)
-            if cached.get("start_date") == start_date:
-                return cached["total_return_curve"], cached["price_curve"]
+            if cached.get("symbol") == symbol and cached.get("start_date") == start_date:
+                return cached["total_return_curve"], cached["price_curve"], cached.get("resolved_ticker", f"{symbol}.TW")
         except (OSError, ValueError, KeyError):
             pass
 
     df = ds._yf_history_since(symbol, start_date, "1d")
+    resolved_ticker = df.attrs.get("resolved_ticker", f"{symbol}.TW")
     total_return_curve, price_curve = [], []
     for ts, row in df.iterrows():
         close, adj_close = row["Close"], row["Adj Close"]
@@ -115,12 +139,11 @@ def fetch_benchmark_curves(start_date="2021-07-01", cache_path=None, refresh=Fal
 
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump({"start_date": start_date, "total_return_curve": total_return_curve, "price_curve": price_curve}, f)
-    return total_return_curve, price_curve
-
-
-def _value_curve(rows, key="equity"):
-    return [{"date": r["date"], "value": r[key]} for r in rows]
+        json.dump({
+            "start_date": start_date, "symbol": symbol, "resolved_ticker": resolved_ticker,
+            "total_return_curve": total_return_curve, "price_curve": price_curve,
+        }, f)
+    return total_return_curve, price_curve, resolved_ticker
 
 
 def _common_start(raw_regime_by_date, trade_dates):
@@ -138,10 +161,10 @@ def evaluate_candidate(candidate, sim, total_return_curve, raw_regime_by_date, e
                         switch_cost_pct, window_months, train_range, test_range, min_win_rate_pct):
     """Runs both switch rules against one candidate's simulate() result and
     computes every comparison the report needs off the resulting three
-    lines (pure/rule_a/rule_b) vs. 0050's total-return curve. Returns None
-    if this candidate never traded or its trades start after the whole
-    comparison window is exhausted (nothing to evaluate)."""
-    equity_curve = _value_curve(sim["equity_curve"])
+    lines (pure/rule_a/rule_b) vs. the benchmark's total-return curve.
+    Returns None if this candidate never traded or its trades start after
+    the whole comparison window is exhausted (nothing to evaluate)."""
+    equity_curve = bm.value_curve(sim["equity_curve"])
     trade_dates = [t["date"] for t in sim["trades"]]
     common_start = _common_start(raw_regime_by_date, trade_dates)
     if common_start is None or not equity_curve:
@@ -153,7 +176,7 @@ def evaluate_candidate(candidate, sim, total_return_curve, raw_regime_by_date, e
             equity_curve, total_return_curve, eff_regime_by_date, hold_strategy_in=hold_in,
             switch_cost_pct=switch_cost_pct, start_date=common_start,
         )
-        lines[rule_id] = {"curve": _value_curve(result["equity_curve"], key="equity"), "n_switches": result["n_switches"]}
+        lines[rule_id] = {"curve": bm.value_curve(result["equity_curve"], key="equity"), "n_switches": result["n_switches"]}
 
     train_start, train_end = train_range
     test_start, test_end = test_range
@@ -280,7 +303,7 @@ def print_verdict(results, min_win_rate_pct, benchmark_symbol="0050"):
 
 
 def build_json_report(results, args, universe_data, total_return_curve, raw_regime_by_date, today_regime,
-                       train_range, test_range, benchmark_symbol="0050"):
+                       train_range, test_range, benchmark_symbol="0050", resolved_ticker=None):
     n_by_regime = {"bull": 0, "bear": 0, "consolidation": 0, "none": 0}
     for r in raw_regime_by_date.values():
         n_by_regime[r if r in n_by_regime else "none"] += 1
@@ -294,7 +317,7 @@ def build_json_report(results, args, universe_data, total_return_curve, raw_regi
         },
         "universe": {"n_codes": len(universe_data)},
         "benchmark": {
-            "source": "yfinance", "ticker": f"{benchmark_symbol}.TW",
+            "source": "yfinance", "ticker": resolved_ticker or f"{benchmark_symbol}.TW",
             "n_bars": len(total_return_curve),
             "start": total_return_curve[0]["date"] if total_return_curve else None,
             "end": total_return_curve[-1]["date"] if total_return_curve else None,
@@ -358,8 +381,14 @@ def main():
           + (f"（空頭 {n_by_regime['bear'] / total_classified * 100:.1f}%）" if total_classified else ""))
 
     print(f"抓取 {args.benchmark_symbol} 基準線（yfinance） ...")
-    total_return_curve, price_curve = fetch_benchmark_curves(refresh=args.refresh_benchmark, symbol=args.benchmark_symbol)
-    print(f"  {len(total_return_curve)} bars, {total_return_curve[0]['date']}..{total_return_curve[-1]['date']}")
+    try:
+        total_return_curve, price_curve, resolved_ticker = fetch_benchmark_curves(
+            refresh=args.refresh_benchmark, symbol=args.benchmark_symbol,
+        )
+    except (ValueError, ds.SourceError) as e:
+        print(f"卡點：{args.benchmark_symbol} 基準線抓取失敗 -- {e}")
+        sys.exit(1)
+    print(f"  ({resolved_ticker}) {len(total_return_curve)} bars, {total_return_curve[0]['date']}..{total_return_curve[-1]['date']}")
     price_only_cmp = bm.full_period_comparison(price_curve, total_return_curve)
     if price_only_cmp:
         # Side reference only (not used anywhere else below): how much of
@@ -415,7 +444,8 @@ def main():
 
     if args.json_out:
         report = build_json_report(results, args, universe_data, total_return_curve, raw_regime_by_date,
-                                    today_regime, train_range, test_range, benchmark_symbol=args.benchmark_symbol)
+                                    today_regime, train_range, test_range, benchmark_symbol=args.benchmark_symbol,
+                                    resolved_ticker=resolved_ticker)
         with open(args.json_out, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
         print(f"\nwrote {args.json_out}")

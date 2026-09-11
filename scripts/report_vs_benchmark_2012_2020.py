@@ -37,6 +37,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 import benchmark as bm  # noqa: E402
+import metrics as mt  # noqa: E402
 import portfolio_backtest as pb  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -83,7 +84,7 @@ def _fix_yfinance_0050_scale_artifact(curve):
     dates aren't both present, rather than guessing -- this is a narrow,
     verified, one-off patch for this exact observed artifact, not a
     general-purpose split detector."""
-    by_date = _as_map(curve)
+    by_date = bm.as_map(curve)
     before_val = by_date.get(ARTIFACT_PRECEDING_DATE)
     after_val = by_date.get(ARTIFACT_BOUNDARY_DATE)
     if before_val is None or after_val is None:
@@ -100,10 +101,6 @@ def _fix_yfinance_0050_scale_artifact(curve):
     return corrected, factor
 
 
-def _as_map(curve):
-    return {row["date"]: row["value"] for row in curve}
-
-
 def main():
     universe_data = rfi.load_cached_universe()
     print(f"{len(universe_data)} codes loaded from {rfi.RUN_CACHE_DIR}")
@@ -113,13 +110,16 @@ def main():
 
     print(f"抓取 0050 基準線（yfinance, start_date={BENCHMARK_START_DATE}） ...")
     try:
-        total_return_curve, _price_curve = rvb.fetch_benchmark_curves(
-            start_date=BENCHMARK_START_DATE, cache_path=BENCHMARK_CACHE_PATH,
+        total_return_curve, _price_curve, resolved_ticker = rvb.fetch_benchmark_curves(
+            start_date=BENCHMARK_START_DATE, cache_path=BENCHMARK_CACHE_PATH, symbol="0050",
         )
     except Exception as e:
         print(f"卡點：0050 基準線抓取失敗 -- {e!r}")
         sys.exit(1)
-    print(f"  {len(total_return_curve)} bars, {total_return_curve[0]['date']}..{total_return_curve[-1]['date']}")
+    if not total_return_curve:
+        print("卡點：0050 基準線抓取成功但沒有可用資料點（可能整批 Close/Adj Close 都是 NaN）")
+        sys.exit(1)
+    print(f"  ({resolved_ticker}) {len(total_return_curve)} bars, {total_return_curve[0]['date']}..{total_return_curve[-1]['date']}")
 
     total_return_curve, artifact_factor = _fix_yfinance_0050_scale_artifact(total_return_curve)
     if artifact_factor is not None:
@@ -137,7 +137,7 @@ def main():
     # direct 0050 return over a DIFFERENT (wider, benchmark-only) window
     # and comparing it to full_period_comparison()'s b_ret_pct would be an
     # apples-to-oranges mismatch, not a real cross-check.
-    bench_by_date = _as_map(total_return_curve)
+    bench_by_date = bm.as_map(total_return_curve)
 
     shared_ranks_cache = {}
     rows = []
@@ -146,7 +146,7 @@ def main():
         t0 = time.time()
         sim = pb.simulate(universe_data, params=params, ranks_cache=shared_ranks_cache)
         elapsed = time.time() - t0
-        equity_curve = rvb._value_curve(sim["equity_curve"])
+        equity_curve = bm.value_curve(sim["equity_curve"])
         n_trades = len(sim["trades"])
         first_date = equity_curve[0]["date"] if equity_curve else None
         print(f"[{candidate['id']}] {elapsed:.1f}s  n_trades={n_trades}  first_equity_date={first_date}")
@@ -168,7 +168,8 @@ def main():
             continue
         mark = "*" if c["beat"] else ""
         window_str = f"{c['start']}..{c['end']}"
-        print(f"{r['id']:<18}{window_str:>24}{c['a_ret_pct']:>9.1f}%{c['b_ret_pct']:>9.1f}%{c['excess_pct']:>9.1f}%  {mark}")
+        print(f"{r['id']:<18}{window_str:>24}{mt.fmt_pct(c['a_ret_pct'], 10)}{mt.fmt_pct(c['b_ret_pct'], 10)}"
+              f"{mt.fmt_pct(c['excess_pct'], 10)}  {mark}")
 
     # Cross-check: for each candidate that DID produce a comparison, redo
     # 0050's start/end value ratio directly off total_return_curve, using
