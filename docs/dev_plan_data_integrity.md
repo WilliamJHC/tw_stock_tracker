@@ -148,7 +148,7 @@ commit 紀錄：`da1a6df`（優先序 4）→ `cb21e54`（優先序 2 程式修�
 
 ## 尚待決定的後續事項（優先序 5 衍生，不阻塞已完成的結論）
 
-1. **193 檔「復活候選」**：目前仍是 `skip: true`，`factor_run_long` 顯示換長歷史後流動性+基本面都能通過。要不要讓它們正式復活，需要重新走一次 `fetch_universe_data()` 完整流程（用現行 `fundamentals_days` 窗口重抓 revenue/financials，不能只搬 `factor_run_long` 裡窗口較窄的舊序列），屬於獨立的網路作業與決策，這次未執行。
+1. **193 檔「復活候選」**：**已執行並驗證（2026-09-14）**。新增 `scripts/reevaluate_skip_revival_candidates.py`，清掉這 193 檔目前的 `skip:true` 快取後，重新走一次 `fetch_universe_data()` 完整流程（`days=1800`，`fundamentals_days=2250`，跟現行其餘 1708 檔一致的窗口，不是搬 `factor_run_long` 裡窗口較窄的舊序列）。結果：**100 檔正式復活**（拿到真實 bars/revenue/roe，`cache/factor_run/{code}.json` 已不再是 `skip:true`），**93 檔仍不符資格**維持 `skip:true`（其中 11 檔在這次重抓時 TWSE 直接回「no data」，其餘是流動性或基本面序列仍不足，log 明確記錄原因）。原始 193 檔的舊快取內容備份在 `cache/factor_run_backup_pre_skip_reeval/`（未進版控）。跑完後全專案 512 個測試仍全數通過（此操作只碰 `cache/`，不動程式邏輯）。**尚未做的後續**：這 100 檔新加入可用集合後，`run_strategy_search.py`/`run_ranking_optimize.py`/`report_vs_benchmark.py` 的既有結論都該視為過期，需要重跑才能反映新樣本（跟下面第 6 項待重跑的原因疊加在一起，一次處理即可）。
 2. **13 檔 mismatch 代碼**：若要查清楚具體是哪個公司行動被漏算/多算（例如 `3114` 的 100 倍落差），需要更深入比對 Yahoo/TWSE 原始資料，這次只做到「排除、不信任」，未深挖根因。
 3. `cache/factor_run_backup_pre_longmerge_agent_test_20260910/` 是實作測試階段留下的多餘備份，跟正式備份內容重複，可在確認合併結果穩定後手動刪除（不占版控空間，純本機磁碟）。
 4. **`MISMATCH_THRESHOLD` 沿用 `STEP_THRESHOLD`（2%）語意上不完全貼切**：`verify_factor_run_long_adjfactors.py` 拿 `build_adj_factors.py` 偵測「單一天內跳動」用的門檻，去比對長達 14 年、多次覆合的累積調整因子差異，理論上若某檔漏算一個比例落在 2% 內的除權息事件，`n_mismatch` 仍可能維持 0（`validate_adj_factor()` 的結構性檢查也抓不到「整段平滑但少算一步」這種情況）。目前 1901 檔判定乾淨的結果沒有再用其他方法交叉驗證過，屬已知風險但未證實有實際案例，記錄備查。
