@@ -121,7 +121,12 @@ def fetch_benchmark_curves(start_date="2021-07-01", cache_path=None, refresh=Fal
         try:
             with open(cache_path, encoding="utf-8") as f:
                 cached = json.load(f)
-            if cached.get("symbol") == symbol and cached.get("start_date") == start_date:
+            # .get("symbol", "0050") -- a cache file written before --benchmark-symbol
+            # existed never stored a "symbol" key at all, and always held 0050 data;
+            # treating a missing key as implicit "0050" keeps such a cache valid
+            # instead of forcing an unnecessary network re-fetch on first run after
+            # upgrading (self-heals: the next write always stamps "symbol").
+            if cached.get("symbol", "0050") == symbol and cached.get("start_date") == start_date:
                 return cached["total_return_curve"], cached["price_curve"], cached.get("resolved_ticker", f"{symbol}.TW")
         except (OSError, ValueError, KeyError):
             pass
@@ -387,6 +392,9 @@ def main():
         )
     except (ValueError, ds.SourceError) as e:
         print(f"卡點：{args.benchmark_symbol} 基準線抓取失敗 -- {e}")
+        sys.exit(1)
+    if not total_return_curve:
+        print(f"卡點：{args.benchmark_symbol} 基準線抓取成功但沒有可用資料點（可能整批 Close/Adj Close 都是 NaN）")
         sys.exit(1)
     print(f"  ({resolved_ticker}) {len(total_return_curve)} bars, {total_return_curve[0]['date']}..{total_return_curve[-1]['date']}")
     price_only_cmp = bm.full_period_comparison(price_curve, total_return_curve)
