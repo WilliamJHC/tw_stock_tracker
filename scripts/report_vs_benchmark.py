@@ -117,6 +117,7 @@ def fetch_benchmark_curves(start_date="2021-07-01", cache_path=None, refresh=Fal
         raise ValueError(f"invalid --benchmark-symbol {symbol!r}: expected 1-10 alphanumeric characters")
 
     cache_path = cache_path or os.path.join(BASE_DIR, "cache", f"benchmark_{symbol}.json")
+    total_return_curve = price_curve = resolved_ticker = None
     if not refresh and os.path.exists(cache_path):
         try:
             with open(cache_path, encoding="utf-8") as f:
@@ -127,27 +128,33 @@ def fetch_benchmark_curves(start_date="2021-07-01", cache_path=None, refresh=Fal
             # instead of forcing an unnecessary network re-fetch on first run after
             # upgrading (self-heals: the next write always stamps "symbol").
             if cached.get("symbol", "0050") == symbol and cached.get("start_date") == start_date:
-                return cached["total_return_curve"], cached["price_curve"], cached.get("resolved_ticker", f"{symbol}.TW")
+                total_return_curve = cached["total_return_curve"]
+                price_curve = cached["price_curve"]
+                resolved_ticker = cached.get("resolved_ticker", f"{symbol}.TW")
         except (OSError, ValueError, KeyError):
             pass
 
-    df = ds._yf_history_since(symbol, start_date, "1d")
-    resolved_ticker = df.attrs.get("resolved_ticker", f"{symbol}.TW")
-    total_return_curve, price_curve = [], []
-    for ts, row in df.iterrows():
-        close, adj_close = row["Close"], row["Adj Close"]
-        if close != close or adj_close != adj_close:  # NaN, same convention as data_sources._df_to_hist
-            continue
-        date = ts.date().isoformat()
-        price_curve.append({"date": date, "value": float(close)})
-        total_return_curve.append({"date": date, "value": float(adj_close)})
+    if total_return_curve is None:
+        df = ds._yf_history_since(symbol, start_date, "1d")
+        resolved_ticker = df.attrs.get("resolved_ticker", f"{symbol}.TW")
+        total_return_curve, price_curve = [], []
+        for ts, row in df.iterrows():
+            close, adj_close = row["Close"], row["Adj Close"]
+            if close != close or adj_close != adj_close:  # NaN, same convention as data_sources._df_to_hist
+                continue
+            date = ts.date().isoformat()
+            price_curve.append({"date": date, "value": float(close)})
+            total_return_curve.append({"date": date, "value": float(adj_close)})
 
-    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump({
-            "start_date": start_date, "symbol": symbol, "resolved_ticker": resolved_ticker,
-            "total_return_curve": total_return_curve, "price_curve": price_curve,
-        }, f)
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "start_date": start_date, "symbol": symbol, "resolved_ticker": resolved_ticker,
+                "total_return_curve": total_return_curve, "price_curve": price_curve,
+            }, f)
+
+    if not total_return_curve:
+        raise ds.SourceError(f"{symbol} 基準線抓取成功但沒有可用資料點（可能整批 Close/Adj Close 都是 NaN）")
     return total_return_curve, price_curve, resolved_ticker
 
 
@@ -392,9 +399,6 @@ def main():
         )
     except (ValueError, ds.SourceError) as e:
         print(f"卡點：{args.benchmark_symbol} 基準線抓取失敗 -- {e}")
-        sys.exit(1)
-    if not total_return_curve:
-        print(f"卡點：{args.benchmark_symbol} 基準線抓取成功但沒有可用資料點（可能整批 Close/Adj Close 都是 NaN）")
         sys.exit(1)
     print(f"  ({resolved_ticker}) {len(total_return_curve)} bars, {total_return_curve[0]['date']}..{total_return_curve[-1]['date']}")
     price_only_cmp = bm.full_period_comparison(price_curve, total_return_curve)

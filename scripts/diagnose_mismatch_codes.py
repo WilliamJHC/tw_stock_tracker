@@ -49,20 +49,18 @@ def main():
 
     universe = ds.get_universe(cache=True) or []
     market_by_code = {u["code"]: u["market"] for u in universe}
-    first_bar_dates = []
+    long_data_by_code = {}
     for c in codes:
         with open(os.path.join(LONG_DIR, f"{c}.json"), encoding="utf-8") as f:
-            first_bar_dates.append(json.load(f)["bars"][0]["date"])
-    start_year = int(min(first_bar_dates)[:4])
+            long_data_by_code[c] = json.load(f)
+    start_year = int(min(d["bars"][0]["date"] for d in long_data_by_code.values())[:4])
     years = range(start_year, dt.date.today().year + 1)
     print(f"抓取 TWSE 除權息表（{years[0]}-{years[-1]}）...")
     twse_by_code = rfb.fetch_twse_table(years, codes)
 
     for row in rows:
         code = row["code"]
-        with open(os.path.join(LONG_DIR, f"{code}.json"), encoding="utf-8") as f:
-            long_data = json.load(f)
-        bars = long_data["bars"]
+        bars = long_data_by_code[code]["bars"]
         market = market_by_code.get(code, "twse")
         twse_events = twse_by_code.get(code, [])
 
