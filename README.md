@@ -209,7 +209,12 @@ Secrets 沿用「手機雲端版」同一個 Environment「Cloudflare」底下�
 
 ## 回測與建議
 
-`run_backtest.py` 建立/更新一個獨立的 SQLite 回測資料庫（`data/backtest.db`，已 `.gitignore`，不會進版控），提供決策面板的信心度徽章與展開列的回測績效區塊。**這是離線批次工具，不會在啟動 `app.py` 或每次分析時自動執行**——資料是手動跑出來的一份快照，過期了要自己重跑。
+`run_backtest.py` 建立/更新一個獨立的 SQLite 回測資料庫（`data/backtest.db`，已 `.gitignore`，不會進版控），提供決策面板的信心度徽章與展開列的回測績效區塊。**這是離線批次工具，不會在啟動 `app.py` 或每次分析時自動執行**——資料是快照，過期了要重跑；2026-09-21 起有雙軌雙週自動重跑（各自獨立、互不同步）：
+
+- **本機**：Windows 工作排程每月 1、15 號 07:30 執行 `scripts\run_backtest_biweekly.bat`（`--refresh-data`），更新的是這台機器磁碟上的 `data/backtest.db`，也就是本機 `app.py` 讀到的那份。一次性註冊：`powershell -ExecutionPolicy Bypass -File scripts\register_backtest_task.ps1`（機器要開著且連網才會準時跑；漏跑只會讓「上次回測」時間停在上一次，不會出錯）。log 在 `logs/run_backtest_biweekly.log`。
+- **GitHub Actions**：`.github/workflows/run_backtest.yml` 每月 1、15 號跑同一支腳本，寫回 Actions 自己 cache 的那份 `backtest.db`（跟 `optimize.yml`/`daily_recommendations.yml` 共用 `optimize-state-` 血統）。這份**不會**同步回本機，也不影響靜態快照/雲端版——雲端版本來就沒有回測面板（見下方「四項已知限制」第 3 點）。
+
+也可以隨時手動重跑（見下方 CLI 用法），不用等排程。
 
 ### CLI 用法
 

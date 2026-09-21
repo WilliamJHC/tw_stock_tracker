@@ -7,5 +7,6 @@ __pycache__/
 .env
 desktop.ini
 dist/
+logs/
 .claude/hookify.*.local.md
 legacy/

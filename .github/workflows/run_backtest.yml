@@ -1,0 +1,66 @@
+name: run-backtest
+
+# 雙週（每月 1、15 號，近似雙週一次，理由同 optimize.yml 的註解）重跑
+# src/run_backtest.py --refresh-data，讓 meta.last_run_at 不會無限期停在
+# 上次手動跑的日期。這是「雲端那份 backtest.db 快照」的雙週更新，跟開發者
+# 本機 Windows 工作排程各自獨立、互不影響——本機 app.py 讀的是本機磁碟上
+# 的 src/data/backtest.db，不會因為這個 workflow 而改變（見 README「回測與
+# 建議」一節：回測面板只在本機即時模式才顯示，靜態快照/雲端版本來就沒有
+# 這塊）。這個 workflow 的產出只餵給 optimize.yml/daily_recommendations.yml
+# 共用讀寫的那份 optimize-state- cache 血統。
+on:
+  schedule:
+    - cron: '0 19 1,15 * *'   # 台北時間每月 1、15 號 03:00（UTC 前一天 19:00），
+    # 排在 strategy_search.yml(20:00)/optimize.yml(22:00)/daily_recommendations.yml(23:00)
+    # 之前，避免同一天四個 job 排隊等 backtest-db-state 併發鎖。
+  workflow_dispatch:
+    inputs:
+      codes:
+        type: string
+        description: '逗號分隔的股票代碼（留空 = 完整 watchlist）'
+        default: ''
+
+concurrency:
+  # 共用 optimize.yml/daily_recommendations.yml 的併發群組：三者都透過同一條
+  # optimize-state- cache 血統讀寫 src/data/backtest.db，見 optimize.yml 開頭
+  # 的併發群組註解。
+  group: backtest-db-state
+  cancel-in-progress: false
+
+jobs:
+  run-backtest:
+    runs-on: ubuntu-latest
+    # FINMIND_TOKEN 建在 Environment「Cloudflare」底下（沿用 snapshot.yml 的
+    # 既有 secret）；沒有這行 secrets.* 會全部解析成空字串。
+    environment: Cloudflare
+    env:
+      FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: check secrets
+        run: |
+          if [ -z "$FINMIND_TOKEN" ]; then
+            echo "::error::缺少或空白的 secret: FINMIND_TOKEN（Settings → Environments → Cloudflare）"
+            exit 1
+          fi
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-actions.txt
+      - run: pip install -r requirements-actions.txt
+      # backtest.db 跟 optimize.yml/daily_recommendations.yml 共用同一個
+      # optimize-state- 血統：這個 job 只更新 signal_stats/replay/simulate 相關
+      # 表與 meta.last_run_at/last_run_id，不動 active_ranking_weights，
+      # SQLite 檔案層級共用沒有衝突（同一個 key 前綴，不同的表/欄位）。
+      # save: 'true' -- 這個 job 會寫回，見 .github/actions/backtest-db-cache/action.yml。
+      - uses: ./.github/actions/backtest-db-cache
+        with:
+          save: 'true'
+      - name: run_backtest
+        run: |
+          args="--refresh-data"
+          if [ -n "${{ inputs.codes }}" ]; then
+            args="$args --codes ${{ inputs.codes }}"
+          fi
+          python src/run_backtest.py $args
