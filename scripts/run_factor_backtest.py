@@ -37,6 +37,12 @@ finlab_factors.py's value_series()/gross_margin_trend_series()/
 operating_margin_trend_series()) for scripts/report_factor_ic.py to
 evaluate via factor_eval.evaluate_candidate_factor() -- these are NOT part
 of RANKING_WEIGHTS/composite_scores(), evaluation only.
+
+docs/institutional_and_accrual_factor_plan.md S2.2 adds one more Stage-2
+request per surviving code (get_institutional()) -- universe_data now also
+carries "institutional_flow_series" (see finlab_factors.py's
+institutional_flow_series()), same evaluation-only status as the Phase 6b
+candidates above.
 """
 import argparse
 import collections
@@ -287,6 +293,14 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
                 per_pbr_rows = ds.get_per_pbr(code, days=days, cache=False)
                 cached = {**cached, "per_pbr_series": ff.value_series(per_pbr_rows or [])}
                 cache_dirty = True
+            # institutional_flow_series is another standalone 1-request
+            # backfill (S2.2, docs/institutional_and_accrual_factor_plan.md)
+            # -- same cheap-to-add-later pattern as per_pbr_series above.
+            if "institutional_flow_series" not in cached:
+                limiter.before_request()
+                inst_rows = ds.get_institutional(code, days=days, cache=False)
+                cached = {**cached, "institutional_flow_series": ff.institutional_flow_series(inst_rows or [], bars)}
+                cache_dirty = True
             # A cache entry whose revenue_series/roe_series were computed at
             # a narrower fundamentals window (or from before this field
             # existed at all) gets re-fetched at the current
@@ -333,6 +347,7 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
                 # docstring), so this .get() default is enough.
                 "gross_margin_trend_series": cached.get("gross_margin_trend_series", []),
                 "operating_margin_trend_series": cached.get("operating_margin_trend_series", []),
+                "institutional_flow_series": cached.get("institutional_flow_series", []),
             }
             continue
 
@@ -360,6 +375,8 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
         financials_rows = ds.get_financials(code, days=fundamentals_days, cache=False)
         limiter.before_request()
         per_pbr_rows = ds.get_per_pbr(code, days=days, cache=False)
+        limiter.before_request()
+        inst_rows = ds.get_institutional(code, days=days, cache=False)
 
         revenue_series = ff.revenue_yoy_series(revenue_rows or [])
         roe_series_ = ff.roe_series(financials_rows or [])
@@ -374,11 +391,13 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
         gross_margin_trend = ff.gross_margin_trend_series(financials_rows or [])
         operating_margin_trend = ff.operating_margin_trend_series(financials_rows or [])
         value_series_ = ff.value_series(per_pbr_rows or [])
+        institutional_flow = ff.institutional_flow_series(inst_rows or [], bars)
 
         save_code_cache(code, {
             "bars": bars, "revenue_series": revenue_series, "roe_series": roe_series_,
             "per_pbr_series": value_series_, "gross_margin_trend_series": gross_margin_trend,
-            "operating_margin_trend_series": operating_margin_trend, "days": days,
+            "operating_margin_trend_series": operating_margin_trend,
+            "institutional_flow_series": institutional_flow, "days": days,
             "fundamentals_days": fundamentals_days,
         })
         universe_data[code] = {
@@ -386,6 +405,7 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
             "revenue_series": revenue_series, "roe_series": roe_series_,
             "value_series": value_series_, "gross_margin_trend_series": gross_margin_trend,
             "operating_margin_trend_series": operating_margin_trend,
+            "institutional_flow_series": institutional_flow,
         }
     return universe_data
 

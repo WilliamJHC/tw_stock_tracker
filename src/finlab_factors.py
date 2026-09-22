@@ -242,6 +242,49 @@ def value_series(per_pbr_rows):
             for r in per_pbr_rows if r.get("pbr")]
 
 
+INSTITUTIONAL_FLOW_WINDOW = 5
+
+
+def institutional_flow_series(inst_rows, bars, window=INSTITUTIONAL_FLOW_WINDOW):
+    """data_sources.get_institutional()'s [{date, foreign, trust, dealer}]
+    (ascending, net shares) + this code's own bars -> [{usable_date,
+    inst_net_5d}]. inst_net_5d = trailing `window`-day net institutional
+    buy/sell (foreign+trust+dealer summed) / trailing `window`-day average
+    volume (shares) -- normalizing by volume so large- and small-cap codes'
+    raw buy/sell magnitudes don't dominate the percentile rank, same idea as
+    liquidity_ok()'s turnover window.
+
+    usable_date = the next trading day AFTER the window's last flow date,
+    not that date itself: TaiwanStockInstitutionalInvestorsBuySell is a
+    same-day-close disclosure with an unconfirmed exact publish time (see
+    docs/institutional_and_accrual_factor_plan.md §2.2's flagged open risk),
+    so treating `date` as already-usable the way value_series() does for
+    FinMind's intraday-updated PER series would risk look-ahead here.
+
+    Skips a window where any date is missing from `bars` (a trading
+    suspension on the institutional side without a matching bar, or the
+    window's last date being the most recent bar with no next trading day
+    yet) or has zero volume. Candidate factor, same evaluate-before-adopt
+    status as value_series()/gross_margin_trend_series() above."""
+    if not inst_rows or len(inst_rows) < window:
+        return []
+    bar_dates = [b["date"] for b in bars]
+    vol_by_date = {b["date"]: b["v"] for b in bars}
+    out = []
+    for i in range(window - 1, len(inst_rows)):
+        chunk = inst_rows[i - window + 1:i + 1]
+        vols = [vol_by_date.get(r["date"]) or 0 for r in chunk]
+        if any(v <= 0 for v in vols):
+            continue
+        net_sum = sum((r.get("foreign") or 0) + (r.get("trust") or 0) + (r.get("dealer") or 0) for r in chunk)
+        avg_vol = sum(vols) / window
+        idx = _bar_index_on_or_before(bar_dates, chunk[-1]["date"])
+        if idx is None or idx + 1 >= len(bar_dates):
+            continue
+        out.append({"usable_date": bar_dates[idx + 1], "inst_net_5d": net_sum / avg_vol})
+    return out
+
+
 def _as_of(series, date, key):
     """Latest `series` entry with usable_date <= date, or None. series must
     be sorted ascending by usable_date (both revenue_yoy_series() and
