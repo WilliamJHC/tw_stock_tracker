@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Weekly incremental refresh of cache/factor_run/*.json's daily bars
-(docs/dev_plan_recommendations.md Phase 0). Fills the gap
+(docs/archive/dev_plan_recommendations.md Phase 0). Fills the gap
 .github/workflows/optimize.yml's header comment calls out: that workflow
 re-evaluates whatever cache/factor_run/*.json already holds but never
 refreshes it; scripts/run_factor_backtest.py only supports a full
@@ -17,7 +17,7 @@ recomputes from bars[0]'s date every call (it is NOT incremental), so
 this is one extra Yahoo request per code, same shape as a first-time
 augment.
 
-Cost note (2026-08-24 decision -- see docs/dev_plan_recommendations.md
+Cost note (2026-08-24 decision -- see docs/archive/dev_plan_recommendations.md
 Phase 0): augment_bars_with_adj_factor() shares the SAME RateLimiter
 instance as the get_daily() call (mirrors fetch_universe_data()'s own
 call pattern in run_factor_backtest.py), so each LIVE code (one with

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Daily top-N all-market recommendation ranking (docs/dev_plan_recommendations.md
+"""Daily top-N all-market recommendation ranking (docs/archive/dev_plan_recommendations.md
 Phase 1). Recomputes finlab_factors.composite_scores() over whatever
 cache/factor_run/*.json currently holds (refreshed weekly by
 scripts/update_universe_bars.py, Phase 0) and stores the result under

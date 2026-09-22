@@ -96,7 +96,7 @@ def run_full(out_dir):
         "config": build_config(),
         "watchlist": watchlist,
         "stocks": stocks,
-        # docs/dev_plan_recommendations.md Phase 2: same shape as app.py's
+        # docs/archive/dev_plan_recommendations.md Phase 2: same shape as app.py's
         # /api/recommendations ({"recommendations": [...], "as_of": ...}) so
         # static and live mode read identically -- see
         # pl.build_recommendations()'s docstring. Pass `all_stocks` (already

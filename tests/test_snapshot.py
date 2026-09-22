@@ -73,7 +73,7 @@ def test_merge_light_does_not_mutate_base():
 
 
 # ---------------------------- merge_light: recommendation quotes (Phase 2) --
-# docs/dev_plan_recommendations.md Phase 2: "run_light() 也要對這 5 檔（若存在）
+# docs/archive/dev_plan_recommendations.md Phase 2: "run_light() 也要對這 5 檔（若存在）
 # 刷新報價，不能只刷追蹤清單" -- recommendation cards get the same live-quote
 # refresh treatment as watchlist stocks in light mode.
 

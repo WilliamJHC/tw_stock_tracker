@@ -278,7 +278,7 @@ def get_recommended_codes():
 
 
 def build_recommendations(prefetched_stocks=None, tracked_codes=None):
-    """All-market top-N recommendation cards (docs/dev_plan_recommendations.md
+    """All-market top-N recommendation cards (docs/archive/dev_plan_recommendations.md
     Phase 1/2): reads meta.daily_recommendations (written by
     scripts/run_daily_recommendations.py) and enriches each code with a live
     quote + target_price (ADR 0001) via build_watchlist_payloads() -- same

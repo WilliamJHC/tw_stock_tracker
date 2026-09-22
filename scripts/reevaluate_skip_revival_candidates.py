@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """One-off: force a real re-evaluation of the 193 "skip revival candidate"
-codes identified in docs/dev_plan_data_integrity.md's Priority 5 follow-up
+codes identified in docs/archive/dev_plan_data_integrity.md's Priority 5 follow-up
 item #1 -- codes currently `{"skip": true}` in cache/factor_run/ whose
 cache/factor_run_long/ history verified clean (merge_factor_run_long_history.
 classify_codes()'s "skip" bucket).

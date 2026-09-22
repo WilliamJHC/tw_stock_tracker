@@ -9,7 +9,7 @@ against the first date verify_factor_run_long_adjfactors.py recorded a
 mismatch on.
 
 Does not modify any cache. Prints a per-code report; nothing is persisted
-except this script itself (findings go in docs/dev_plan_data_integrity.md
+except this script itself (findings go in docs/archive/dev_plan_data_integrity.md
 by hand after reading the output).
 
 Usage:

@@ -13,3 +13,5 @@
 | [PLAN_2026-07-20_intraday_day_trading_draft.md](PLAN_2026-07-20_intraday_day_trading_draft.md) | 盤中 day trading 資料源擴充的前置研究草稿（含 IBKR／Binance 免費選項比較，來源附官方文件 URL） |
 | [PLAN_2026-07-20_intraday_day_trading.md](PLAN_2026-07-20_intraday_day_trading.md) | 盤中 Day Trading ＋ 盤後技術分析開發計畫；其產物即 [../dev_plan_intraday.md](../dev_plan_intraday.md) |
 | [PLAN_2026-07-23_docs_optimization.md](PLAN_2026-07-23_docs_optimization.md) | 檢討 stock_tracker 所有文件並提出的優化計畫 |
+| [dev_plan_recommendations.md](dev_plan_recommendations.md) | 推薦股票／追蹤清單 UI 改版（Phase 0-4，2026-08-24 定案，全數完成並驗證，含 ADR 0003） |
+| [dev_plan_data_integrity.md](dev_plan_data_integrity.md) | 資料正確性與管線可靠度修復（優先序 1-5，2026-09-09 開工，全數完成並驗證） |

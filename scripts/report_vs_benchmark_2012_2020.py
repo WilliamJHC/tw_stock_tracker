@@ -7,7 +7,7 @@ benchmark cache (cache/benchmark_0050.json) only went back to 2021-07-01
 and cache/factor_run/*.json's fundamentals used to only go back to 2021.
 
 Both gaps are now closed: cache/factor_run/*.json was long-history-merged
-back to ~2012-05 for 1708 codes (see docs/dev_plan_data_integrity.md
+back to ~2012-05 for 1708 codes (see docs/archive/dev_plan_data_integrity.md
 priority 5), and this script fetches its OWN longer 0050 cache (separate
 file, does not touch cache/benchmark_0050.json which
 scripts/report_vs_benchmark.py owns and still needs at its own
