@@ -73,9 +73,41 @@ window                                                         h=1              
 
 **結論修正**：§3.1 原本的「pooled h=60 顯著正值」結論**成立但範圍有限**——它主要反映的是尚未分類的樣本期間（多半是早期歷史），而非「在每種已知盤勢下都成立」的訊號。這不否定 120d-skip-21 優於 60d／20d 的相對排序（三桶橫向比較，120d-skip-21 多數情況下不比另外兩者差，bear 桶短 horizon 明顯較好），但**不足以支撐「motion window 換成 120d-skip-21 就能解決三盤勢動能訊號皆負」這個更強的宣稱**。要拿到更乾淨的答案，需要等 `cache/factor_run` 累積更多空頭月份樣本（`docs/factor_timeframe_optimization_directions.md` §3.4 已指出這是「等時間、不是等工程」），現在的 n=6 不足以下定論。
 
+## §2.1 追加：value/pbr 候選因子的正式 walk-forward + DSR/PBO 檢驗
+
+跑法：新增 `scripts/report_value_walkforward.py`。不重用 `portfolio_backtest.simulate()`（其 `extra_factors` 掛勾是 `fn(bars, idx)`，適合 ma_cross/vol_price_div 這種純 K 棒因子，但 value/pbr 要按日期查 `value_series`，硬塞會變成改動 production pipeline 去測一個還沒決定要不要採用的候選——不在本次範圍），改為沿用 §2.1 pooled 測試同一套 rank-IC 方法，但改成套 `src/optimize.py` 既有的 `purged_calendar_walk_forward_splits()`（purge_days=60，anchored）切出 out-of-sample 折，每折算 `composite_scores` 對 h=60 forward return 的 mean rank-IC，再丟進 `metrics.pbo()`/`deflated_sharpe_ratio()`——跟 `sweep_ranking_weights_walk_forward()`/`sweep_param_walk_forward()` 用來檢驗 RANKING_WEIGHTS 候選、strategy-logic-search 候選的同一套統計門檻（`PBO_MAX=0.5`、`DSR_MIN_SIGNIFICANT=0.95`）。
+
+比較的三組權重：現行 `RANKING_WEIGHTS`（無 value）／加入 value 15%（等比例稀釋 revenue/roe/momentum）／加入 value 30%。
+
+**重要限制先講**：`value_series`（`get_per_pbr()`）在快取裡最早只回溯到 **2021-10-04**（vs. revenue/roe/momentum 從 2012 年就有資料），所以 `--folds 4`（沿用前面§3.1 用的粗折）時，2015~2020 年那兩折的 value 因子樣本數是 0，只剩 2 折可用；改用 `--folds 10` 把折切細，2021 年以前的 6 折仍是 0，但 2021 之後能切出 4 折可用。以下用 `--folds 10` 的結果（可用折數較多，統計power較好）：
+
+```
+fold 6: test=2021-06-07..2022-09-20 (11 檔)   baseline ic=-0.0140   value15%=+0.0289   value30%=+0.0893
+fold 7: test=2022-09-21..2024-01-11 (16 檔)   baseline ic=+0.0408   value15%=+0.0523   value30%=+0.0648
+fold 8: test=2024-01-12..2025-05-15 (16 檔)   baseline ic=+0.0413   value15%=+0.0576   value30%=+0.0726
+fold 9: test=2025-05-16..2026-09-14 (13 檔)   baseline ic=+0.0623   value15%=+0.0899   value30%=+0.1165
+
+usable_folds=4
+OOS mean IC: baseline=0.0326／value15%=0.0572／value30%=0.0858
+per-fold winner: value30% 贏 4/4 折（100%）
+PBO=1.00（over 4 blocks）
+DSR（winner=value30%, n_trials=30, n_obs=4）=0.82
+```
+
+`--folds 4`（粗折，only 2 usable）：OOS mean IC baseline=0.032／value15%=0.056／value30%=0.083，value30% 2/2 折全勝，PBO=0.0，DSR=0.71。
+
+**結論：兩種折法都未通過 `src/optimize.py` 既有的 overfitting 門檻**：
+
+- `--folds 10`：PBO=1.00 > 0.5（REJECT），DSR=0.82 < 0.95（REJECT）——雖然 value30% 候選在每一折的 raw mean-IC 都贏，但 CSCV（PBO）用 in-sample Sharpe 選出的「贏家」在 out-of-sample half 排名不穩定，這正是折數太少（只有 4 折，每折只有 1 個資料點餵進 Sharpe 計算）時 CSCV 本身就預期會出現的雜訊，不是候選真的變糟。
+- `--folds 4`：PBO=0.0（可用折數只有 2，此時 C(4,2)=6 組合的統計力更弱，PBO 幾乎沒有鑑別力），DSR=0.71 仍未達 0.95 門檻。
+- 兩種折法一致的地方：**DSR 都不夠**——不管怎麼切，只有 2~4 個可用折，`deflated_sharpe_ratio()` 對折數少會給很重的懲罰（分母是 `n_obs-1`），這不是「候選因子沒訊號」，而是「樣本折數不夠多，沒辦法用這套統計工具證明它不是運氣」。
+- 跟 §2.1 pooled 版本（h=60 t=+3.88 顯著）不矛盾，但更保守：pooled test 用了全部 56~59 個 rebalance 日一次性算一個 IC 序列的 t 檢定；這裡改成分折驗證「排除掉最容易overfit的 in-sample 挑選過程」後還站不站得住——OOS 上 value30% 確實每折都贏（4/4），方向一致，但折數太少（受限於 value_series 只有 ~5 年歷史）讓 DSR/PBO 這兩道「防止自欺」的門檻沒辦法給出「不是運氣」的正式背書。
+
+**治理判斷**：**現階段不建議正式提案把 value/pbr 排進 `RANKING_WEIGHTS`**——不是因為訊號方向錯（OOS 每折都贏，跟 pooled 結論同向），而是樣本折數不足以讓 DSR/PBO 這兩道既有門檻通過，貿然採用等於繞過了這個專案自己訂的 overfitting 防線。比較合理的下一步是**等 `value_series` 歷史累積更長**（目前約 5 年，再等 1~2 年可以切出 6~8 個可用折）再重跑同一支 `report_value_walkforward.py`，而不是現在就用 pooled IC 一個數字去核准。
+
 ## 下一步（未在本次執行範圍內，留給後續）
 
 1. §2.2/§2.3（法人買賣超、應計盈餘品質）：`docs/factor_timeframe_optimization_directions.md` 排序的下一批，需要新資料串接／欄位可行性查證，不是本次零成本範圍。
 2. ~~120d-skip-21 動能窗口的三盤勢分桶重跑~~ 已完成，見上一節——結論比預期保守，不建議僅憑本報告就正式提案更換 `MOMENTUM_DAYS`。
-3. value/pbr 因子若要正式提案進 `RANKING_WEIGHTS`，需要另外走 `run_strategy_search.py` 的完整 walk-forward + DSR/PBO 流程，本報告的 rank-IC 只是入門門檻，不是最終核准依據。
+3. ~~value/pbr 因子的正式 walk-forward + DSR/PBO 檢驗~~ 已完成，見上一節——OOS 方向一致但可用折數太少（value_series 僅約 5 年歷史），DSR/PBO 門檻未通過，建議等資料累積更長再重跑，暫不提案正式採用。
 4. 若要對「未分類樣本」（占 173 個 rebalance 日中的多數）做進一步歸因，可以另開一份報告單獨看這批日期落在哪個時間區間、是否集中在 2012-2015 年 TAIEX 歷史不足分類的早期樣本——不在本次範圍內。
