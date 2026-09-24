@@ -110,7 +110,7 @@ Sloan 原始的 balance-sheet 法：`accruals = (ΔCurrentAssets − ΔCash) −
 
 **中期（需要新整合，約一週工程量級）**
 5. §3.2：多因子排名 top-N ＋ `breakout_strategy.py` 進場濾網的分層回測。尚未執行。
-6. §3.3：rebalance 頻率（週/雙週/月）對照實驗。尚未執行。
+6. ~~§3.3：rebalance 頻率（週/雙週/月）對照實驗。~~ 已完成，見 `docs/rebalance_frequency_report.md`——月頻（現況）4 折平均報酬最高，但 DSR 差 0.0041 沒過門檻，維持月頻，不提案變更。
 
 **長期／先做可行性調查**
 7. ~~§2.4：董監質押比率治理風險因子——先查資料來源可行性，未必值得投入。~~ 可行性查證已完成，見 `docs/pledge_ratio_feasibility.md`——FinMind 沒有這個 dataset，證交所開放資料只有當月快照、無歷史回溯，能回測的歷史資料只能靠付費源（TEJ/CMoney），現階段不建議投入工程時間。

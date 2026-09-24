@@ -364,3 +364,39 @@ def test_compute_metrics_drawdown_hand_computed():
 
 def test_compute_metrics_too_short_returns_empty():
     assert pb._compute_metrics([{"date": "2023-01-01", "equity": 1_000_000}], 1_000_000) == {}
+
+
+# ---------------------------------------------------- _rebalance_dates freq --
+
+def test_rebalance_dates_monthly_is_unchanged_default():
+    calendar = ["2023-01-02", "2023-01-03", "2023-02-01", "2023-02-02", "2023-03-01"]
+    assert pb._rebalance_dates(calendar) == ["2023-01-02", "2023-02-01", "2023-03-01"]
+    assert pb._rebalance_dates(calendar, freq="monthly") == pb._rebalance_dates(calendar)
+
+
+def test_rebalance_dates_weekly_groups_by_iso_week():
+    # 2023-01-02 is a Monday (ISO week 1); 2023-01-09 is the next Monday (week 2).
+    calendar = ["2023-01-02", "2023-01-03", "2023-01-06", "2023-01-09", "2023-01-10"]
+    assert pb._rebalance_dates(calendar, freq="weekly") == ["2023-01-02", "2023-01-09"]
+
+
+def test_rebalance_dates_biweekly_pairs_consecutive_iso_weeks():
+    # 2023-01-09/16/23 are ISO weeks 2/3/4 -> week//2 groups (2,3) into pair 1
+    # and 4 alone into pair 2 (grouping is by absolute week parity, not by
+    # position within this calendar -- see _rebalance_dates() docstring).
+    calendar = ["2023-01-09", "2023-01-16", "2023-01-23"]
+    assert pb._rebalance_dates(calendar, freq="biweekly") == ["2023-01-09", "2023-01-23"]
+
+
+def test_rebalance_dates_unknown_freq_raises():
+    try:
+        pb._rebalance_dates(["2023-01-02"], freq="daily")
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
+def test_simulate_accepts_rebalance_freq_param_without_error():
+    universe = {"A": _entry(100, 0.1)}
+    result = pb.simulate(universe, params={"rebalance_freq": "weekly", "top_n": 1})
+    assert result["equity_curve"]

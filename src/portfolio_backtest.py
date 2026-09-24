@@ -64,6 +64,7 @@ PORTFOLIO_PARAMS = {
     "slippage_pct": 0.1,  # one-way, see module docstring
     "ranking_weights": None,  # optional RANKING_WEIGHTS override, see finlab_factors.composite_scores()
     "extra_factors": None,  # optional {name: fn(bars, idx)} override, see finlab_factors.composite_scores()
+    "rebalance_freq": "monthly",  # "monthly"/"weekly"/"biweekly", see _rebalance_dates() -- docs/factor_timeframe_optimization_directions.md S3.3 candidate, unevaluated, default preserves the original monthly-only behavior
     # % of current portfolio value actually deployed at each rebalance; the
     # rest sits idle as `cash` until the next rebalance re-evaluates it. 100
     # (invest everything, the pre-existing behavior) everywhere by default --
@@ -100,13 +101,33 @@ def _trading_calendar(universe_data):
     return sorted(dates)
 
 
-def _rebalance_dates(calendar):
-    """First trading-calendar date of each calendar month."""
-    out, seen_months = [], set()
+def _rebalance_dates(calendar, freq="monthly"):
+    """First trading-calendar date of each period. freq="monthly" (default,
+    original behavior): calendar month (y-m). freq="weekly": ISO calendar
+    week (year, week). freq="biweekly": every other ISO calendar week,
+    grouped by (year, week // 2) -- a deterministic function of the
+    calendar, not a rolling N-trading-day counter, so it lines up with the
+    same "period boundary" idea monthly already uses rather than being
+    sensitive to holidays shifting a fixed-count window. See
+    docs/factor_timeframe_optimization_directions.md S3.3 -- this is an
+    unevaluated candidate dimension, not a default change; simulate()'s
+    PORTFOLIO_PARAMS["rebalance_freq"] stays "monthly" until a walk-forward
+    report justifies otherwise."""
+    if freq == "monthly":
+        key_fn = lambda d: d[:7]
+    elif freq == "weekly":
+        key_fn = lambda d: dt.date.fromisoformat(d).isocalendar()[:2]
+    elif freq == "biweekly":
+        def key_fn(d):
+            iso_year, iso_week, _ = dt.date.fromisoformat(d).isocalendar()
+            return (iso_year, iso_week // 2)
+    else:
+        raise ValueError(f"_rebalance_dates: unknown freq {freq!r}")
+    out, seen = [], set()
     for date in calendar:
-        ym = date[:7]
-        if ym not in seen_months:
-            seen_months.add(ym)
+        key = key_fn(date)
+        if key not in seen:
+            seen.add(key)
             out.append(date)
     return out
 
@@ -205,7 +226,7 @@ def simulate(universe_data, params=None, ranks_cache=None, regime_by_date=None, 
     calendar = _trading_calendar(universe_data)
     if not calendar:
         return {"equity_curve": [], "trades": [], "summary": {}}
-    rebalance_dates = set(_rebalance_dates(calendar))
+    rebalance_dates = set(_rebalance_dates(calendar, freq=p.get("rebalance_freq", "monthly")))
 
     prices = {
         code: {b["date"]: (b["c_adj"] if b.get("c_adj") is not None else b["c"]) for b in d["bars"]}
