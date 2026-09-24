@@ -105,9 +105,49 @@ DSR（winner=value30%, n_trials=30, n_obs=4）=0.82
 
 **治理判斷**：**現階段不建議正式提案把 value/pbr 排進 `RANKING_WEIGHTS`**——不是因為訊號方向錯（OOS 每折都贏，跟 pooled 結論同向），而是樣本折數不足以讓 DSR/PBO 這兩道既有門檻通過，貿然採用等於繞過了這個專案自己訂的 overfitting 防線。比較合理的下一步是**等 `value_series` 歷史累積更長**（目前約 5 年，再等 1~2 年可以切出 6~8 個可用折）再重跑同一支 `report_value_walkforward.py`，而不是現在就用 pooled IC 一個數字去核准。
 
+## §2.3：應計盈餘品質（accrual_quality）候選因子
+
+跑法：`docs/institutional_and_accrual_factor_plan.md` §2.3 串接完成（`data_sources.get_financials()` 擴充 `total_assets`/`operating_cash_flow`，`finlab_factors.accrual_quality_series()`，全市場 1821 檔重抓，`accrual_quality_series` 非空 983 檔），跑 `python scripts/report_factor_ic.py`：
+
+```
+accrual_quality accrual_ratio (候選)   -0.029  t= -1.72  icir=-0.239  n=52   -0.036  t= -2.92  icir=-0.405  n=52   -0.034  t= -3.83  icir=-0.536  n=51   -0.043  t= -4.78  icir=-0.683  n=49
+```
+
+（h=1/h=5/h=20/h=60 依序對應上面四組數字，n 是可用 rebalance 日數——`accrual_quality_series` 覆蓋期最早只到 2022-05-30，比 value/pbr 的 2021-10-04 還晚，所以 n 比其他候選略小。）
+
+**pooled 結果是這一輪所有候選裡訊號最強的**：h=5/h=20/h=60 都顯著（|t|>2），h=60 的 t=-4.78、icir=-0.683 甚至強於 value/pbr 的 t=+3.88。**方向是負**——`accrual_ratio`（本季稅後淨利減營運現金流、除以總資產）越高，未來報酬越差，跟 Sloan (1996) accrual anomaly 的經典方向一致（應計比重越高＝財報數字越靠會計估計撐出來、現金流品質越差）。`accrual_quality_series()` 的實作刻意不先翻轉符號（見函式 docstring），這裡實測出負號，之後若要排進 `composite_scores()`，排名分數要用 `-accrual_ratio`（值越低越好，同 `value_series()` 對 `-pbr` 的既有處理方式）。
+
+### §2.3 追加：accrual 候選的正式 walk-forward + DSR/PBO 檢驗
+
+跑法：新增 `scripts/report_accrual_walkforward.py`（結構同 `report_value_walkforward.py`，`--folds 10`/`--folds 4` 都跑）：
+
+```
+--folds 10（usable_folds=4）
+  OOS mean IC: baseline=0.0405／accrual15%=0.0506／accrual30%=0.0497
+  per-fold winner: accrual30% 贏 3/4 折（75%）
+  PBO=0.50（等於門檻，未超過，不算 REJECT 那一項）
+  DSR（winner=accrual30%, n_trials=30, n_obs=4）=0.9477
+
+--folds 4（usable_folds=2）
+  OOS mean IC: baseline=0.0478／accrual15%=0.0581／accrual30%=0.0590
+  per-fold winner：accrual30%/accrual15% 各贏 1/2 折（50%）
+  PBO=0.0
+  DSR（winner=accrual30%, n_trials=12, n_obs=2）=0.8151
+```
+
+**結論：兩種折法都未通過 DSR 門檻（0.95），`--folds 10` 只差一點點（0.9477 vs 0.95）**：
+
+- `--folds 10`：PBO=0.50 剛好卡在門檻上（`PBO_MAX=0.5`，判定式是 `>` 不是 `≥`，所以這項沒有觸發 REJECT），但 DSR=0.9477 差 0.0023 沒過——是這幾輪候選因子檢驗裡最接近通過的一次。
+- `--folds 4`：可用折數只剩 2，DSR 掉到 0.82，跟 value/pbr 那組（可用折數同樣受限於候選因子歷史較短）呈現同樣的模式。
+- 跟 §2.1 的 value/pbr 遇到同一個結構性限制：`accrual_quality_series` 依賴的 `TaiwanStockCashFlowsStatement` 覆蓋期只有約 4 年（2022-05-30 起），折數切不細，`deflated_sharpe_ratio()` 對折數少的懲罰很重——這不是「候選因子沒訊號」（pooled IC 是這輪最強的、OOS 每折方向也一致偏正），而是「樣本折數不夠，沒辦法用這套統計工具正式排除運氣」。
+
+**治理判斷**：**現階段不建議正式提案把 accrual_quality 排進 `RANKING_WEIGHTS`**——理由與 value/pbr 相同（訊號方向站得住腳，但 DSR 差一點沒過），但這是四個已測候選因子裡**最接近通過門檻**的一個，值得標記為「資料累積後優先重跑」的第一候選。合理的下一步是等 `TaiwanStockCashFlowsStatement` 歷史再累積（多幾季就可能多切出 1-2 個可用折，讓 DSR 越過 0.95），到時候直接重跑 `report_accrual_walkforward.py`，不需要重新設計。
+
 ## 下一步（未在本次執行範圍內，留給後續）
 
-1. §2.2/§2.3（法人買賣超、應計盈餘品質）：`docs/factor_timeframe_optimization_directions.md` 排序的下一批，需要新資料串接／欄位可行性查證，不是本次零成本範圍。
-2. ~~120d-skip-21 動能窗口的三盤勢分桶重跑~~ 已完成，見上一節——結論比預期保守，不建議僅憑本報告就正式提案更換 `MOMENTUM_DAYS`。
-3. ~~value/pbr 因子的正式 walk-forward + DSR/PBO 檢驗~~ 已完成，見上一節——OOS 方向一致但可用折數太少（value_series 僅約 5 年歷史），DSR/PBO 門檻未通過，建議等資料累積更長再重跑，暫不提案正式採用。
-4. 若要對「未分類樣本」（占 173 個 rebalance 日中的多數）做進一步歸因，可以另開一份報告單獨看這批日期落在哪個時間區間、是否集中在 2012-2015 年 TAIEX 歷史不足分類的早期樣本——不在本次範圍內。
+1. ~~§2.2（法人買賣超）~~ 已完成，見 `docs/institutional_and_accrual_factor_plan.md`——`inst_net_5d` 各 horizon 都不顯著，不採用。
+2. ~~§2.3（應計盈餘品質）~~ 已完成，見上一節——pooled IC 顯著且是這輪最強，但正式 walk-forward 的 DSR 差一點沒過（0.9477 vs 0.95 門檻），暫不提案採用，標記為資料累積後優先重跑對象。
+3. ~~120d-skip-21 動能窗口的三盤勢分桶重跑~~ 已完成，見上一節——結論比預期保守，不建議僅憑本報告就正式提案更換 `MOMENTUM_DAYS`。
+4. ~~value/pbr 因子的正式 walk-forward + DSR/PBO 檢驗~~ 已完成，見上一節——OOS 方向一致但可用折數太少（value_series 僅約 5 年歷史），DSR/PBO 門檻未通過，建議等資料累積更長再重跑，暫不提案正式採用。
+5. 若要對「未分類樣本」（占 173 個 rebalance 日中的多數）做進一步歸因，可以另開一份報告單獨看這批日期落在哪個時間區間、是否集中在 2012-2015 年 TAIEX 歷史不足分類的早期樣本——不在本次範圍內。
+6. `docs/factor_timeframe_optimization_directions.md` §2.4（董監質押比率）：資料可行性尚未查證，見該文件與本次新增的 `docs/pledge_ratio_feasibility.md`。

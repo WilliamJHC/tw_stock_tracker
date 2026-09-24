@@ -61,22 +61,22 @@
 3. `src/finlab_factors.py` 新增 `accrual_quality_series(...)`：同 `gross_margin_trend_series()` 的既有 shape 慣例，輸出 `[{"usable_date", "accrual_ratio": float}, ...]`。
 4. `scripts/run_factor_backtest.py`／`scripts/report_factor_ic.py` 同 §2.2 步驟 3-5 的模式加掛。
 
-### 已知風險/未定事項
+### 已知風險/未定事項（2026-09-23 開工後更新）
 
-- 三個財報 dataset 分開 request（每檔股票多 3 個 request，比 §2.2 多的 request 數更高，1821 檔全市場重抓要注意 FinMind rate limit，600 req/hr 有 token／無 token 更低，估算跑一輪全市場需要的時間，開工時要先算清楚不要中途撞到限流）。
-- `TotalAssets` 欄位字串未確認（見上）。
-- accrual 公式本身有多種業界變體（簡化 vs. working-capital-only vs. 完整 Sloan），這裡先選最簡單的版本評估方向對不對，不是最終定案。
+- ~~三個財報 dataset 分開 request~~：實作結果比預期省——`total_assets`（`TaiwanStockBalanceSheet` 的 `TotalAssets` type）搭 `equity_rows` 既有 request 免費拿到，只有 `operating_cash_flow`（`TaiwanStockCashFlowsStatement`）是真正新增的第 3 個 request，`get_financials()` 從 2 個 request 變 3 個（不是原本估的可能要 4 個）。全市場 1821 檔重抓已完成。
+- ~~`TotalAssets` 欄位字串未確認~~：已用 2330 實測確認型別字串是 `TotalAssets`，且與 `NetCashInflowFromOperatingActivities`（`TaiwanStockCashFlowsStatement`）的 `date` 對得上同一個財報期。全市場 983/1821 檔算出非空 `accrual_quality_series`（其餘因缺 `operating_cash_flow`/`total_assets` 被跳過，屬預期內的資料覆蓋率限制，非 bug）。
+- accrual 公式沿用簡化版（分母用當季 `TotalAssets`，非期初期末均值）——結果見 `docs/factor_ic_candidate_and_momentum_window_report.md` §2.3，暫不需要加精度：pooled IC 已經顯著，卡關的是 walk-forward 折數不夠，不是公式精度問題。
 
 ## 共同事項
 
 - 兩個因子都走跟 §2.1 三個候選因子（gross_margin_trend/operating_margin_trend/value）一樣的路：**先用 `evaluate_candidate_factor()` 做 rank-IC 顯著性檢驗，顯著才考慮進一步走 §2.1 追加那種正式 walk-forward + DSR/PBO 檢驗，不顯著就記錄下來、不進候選**。全程不改動 `RANKING_WEIGHTS`/`composite_scores()` 預設行為。
 - 兩個因子都需要先補抓全市場快取（`cache/factor_run/`），跟當初 Phase 6b 三個候選因子的做法一樣，抓取時間跟 API 用量是主要成本，不是程式碼複雜度。
 
-## 建議順序（2026-09-22 更新）
+## 建議順序（2026-09-24 更新）
 
 1. ~~§2.2（法人買賣超）：資料形狀已經確認乾淨、複雜度低，建議先做。~~ 已做完，結果不顯著（見上方「結果」），不進候選。
-2. §2.3（應計盈餘品質）：尚未開始。§2.2 沒有找到顯著因子，不影響 §2.3 的獨立判斷——是否接著做取決於使用者是否還想投入（需要先補一輪 `TotalAssets` 欄位探索 + 三個 dataset 對齊確認，複雜度比 §2.2 高，全市場重抓也要多 3 倍 request 數）。
+2. ~~§2.3（應計盈餘品質）~~ 已做完，見 `docs/factor_ic_candidate_and_momentum_window_report.md` §2.3——pooled rank-IC 是四個已測候選因子裡最強的（h=60 t=-4.78），方向為負（高應計比＝未來報酬更差，符合 Sloan accrual anomaly），但正式 walk-forward + DSR/PBO 檢驗（`scripts/report_accrual_walkforward.py`）的 DSR 差一點沒過門檻（0.9477 vs 0.95）。**現階段不採用**，但標記為四個候選裡最接近通過、資料累積後優先重跑的對象。
 
 ---
 
-§2.2 已做完並記錄結論（不顯著，不採用）。是否接著做 §2.3，或改做別的方向，等你看過結果再決定。
+§2.2、§2.3 都已做完並記錄結論（皆不採用，§2.3 保留「資料累積後重跑」的路）。`docs/factor_timeframe_optimization_directions.md` §2.4（董監質押比率）另有獨立的可行性查證，見 `docs/pledge_ratio_feasibility.md`。
