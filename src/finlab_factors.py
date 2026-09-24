@@ -227,6 +227,47 @@ def operating_margin_trend_series(financials_rows):
     return _margin_trend_series(financials_rows, "operating_income")
 
 
+def accrual_quality_series(financials_rows):
+    """get_financials()'s extended [{date, net_income, total_assets,
+    operating_cash_flow, ...}] (ascending, quarterly) -> [{usable_date,
+    accrual_ratio}]. accrual_ratio = (net_income - operating_cash_flow) /
+    total_assets -- simplified Sloan (1996) accrual: a company whose
+    reported earnings run well above its actual operating cash flow has a
+    larger non-cash ("accrual") component, which the accrual-anomaly
+    literature finds predicts WORSE future returns (accruals partly reverse/
+    earnings quality is lower), so this factor's raw sign is "higher
+    accrual_ratio = worse", the opposite of every other factor in this
+    module's "bigger number ranks higher" convention -- deliberately NOT
+    flipped here (unlike value_series()'s -pbr) because this is still an
+    unevaluated candidate (docs/institutional_and_accrual_factor_plan.md
+    §2.3): the sign should be decided from the measured IC's sign, not
+    guessed in advance the way value_series() could be (value/PBS's sign is
+    settled finance theory; the accrual anomaly's sign in THIS market/
+    universe is exactly what evaluate_candidate_factor() is for).
+
+    Denominator uses the SAME quarter's total_assets (simplified, not the
+    average of period-start/period-end total_assets some accrual papers
+    use -- see plan doc's §2.3 "因子定義" on this being an intentional
+    simplification to evaluate first, refine only if IC is significant).
+    usable_date = quarter-end + FINANCIALS_LAG_DAYS, same disclosure-lag
+    convention as roe_series()/_margin_trend_series() -- all three ride the
+    same get_financials() quarterly rows. Skips a quarter missing
+    total_assets, operating_cash_flow (both None on FinMind's response
+    before docs/institutional_and_accrual_factor_plan.md §2.3, or on a row
+    where that specific type happened to be absent -- see get_financials()'s
+    docstring) or with non-positive total_assets."""
+    out = []
+    for r in financials_rows or []:
+        total_assets, ocf = r.get("total_assets"), r.get("operating_cash_flow")
+        if not total_assets or total_assets <= 0 or ocf is None:
+            continue
+        out.append({
+            "usable_date": _shift_date(r["date"], FINANCIALS_LAG_DAYS),
+            "accrual_ratio": (r["net_income"] - ocf) / total_assets,
+        })
+    return out
+
+
 def value_series(per_pbr_rows):
     """data_sources.get_per_pbr()'s [{date, per, pbr}] (ascending) ->
     [{usable_date, value_score}]. value_score = -pbr so this factor's sign

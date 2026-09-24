@@ -913,8 +913,9 @@ def get_monthly_revenue(code, days=760, cache=True):
 
 
 def get_financials(code, days=900, cache=True):
-    """Quarterly net income, total equity, revenue, gross profit and
-    operating income. Returns [{date, net_income, equity, revenue,
+    """Quarterly net income, total equity, total assets, operating cash
+    flow, revenue, gross profit and operating income. Returns [{date,
+    net_income, equity, total_assets, operating_cash_flow, revenue,
     gross_profit, operating_income}] ascending, date = quarter-end, or None.
     net_income (FinMind type IncomeAfterTaxes) is the single quarter's
     figure, not year-to-date cumulative -- spot-checked against 2330's
@@ -924,12 +925,23 @@ def get_financials(code, days=900, cache=True):
     OperatingIncome, confirmed present on 2330's TaiwanStockFinancialStatements
     response) ride along on the SAME income_rows request that net_income
     already reads -- zero extra requests (docs/https-finlab-finance-blog-
-    python-get-tai-memoized-lighthouse.md Phase 6b). They're None for a date
-    where that specific type is missing from the response, independent of
-    the net_income/equity intersection below -- finlab_factors.py's margin-
-    trend functions check for None themselves rather than this function
+    python-get-tai-memoized-lighthouse.md Phase 6b). total_assets (FinMind
+    type TotalAssets) rides along on the SAME equity_rows/TaiwanStockBalanceSheet
+    request that equity already reads -- also zero extra requests. They're
+    None for a date where that specific type is missing from the response,
+    independent of the net_income/equity intersection below -- finlab_factors.py's
+    margin-trend functions check for None themselves rather than this function
     silently dropping an otherwise-usable ROE row over a missing margin
     figure.
+
+    operating_cash_flow (FinMind type NetCashInflowFromOperatingActivities,
+    dataset TaiwanStockCashFlowsStatement) is ONE extra request per call --
+    added for docs/institutional_and_accrual_factor_plan.md §2.3's accrual
+    quality candidate factor. Confirmed via a live 2330 check that this
+    dataset's `date` values line up exactly with income_rows/equity_rows'
+    quarter-end dates (all three use the same quarter-end date to represent
+    that quarter's filing), so it's joined the same way as the other fields
+    rather than needing separate date reconciliation.
 
     cache=False skips the on-disk cache (see get_daily()'s docstring)."""
     cached = _cache_get(f"financials_{code}") if cache else None
@@ -940,6 +952,7 @@ def get_financials(code, days=900, cache=True):
         start = (dt.date.today() - dt.timedelta(days=days)).isoformat()
         income_rows = _finmind("TaiwanStockFinancialStatements", code, start)
         equity_rows = _finmind("TaiwanStockBalanceSheet", code, start)
+        cashflow_rows = _finmind("TaiwanStockCashFlowsStatement", code, start)
         income_by_date = {
             r["date"]: float(r["value"]) for r in income_rows
             if r.get("type") == "IncomeAfterTaxes" and r.get("value") is not None
@@ -947,6 +960,14 @@ def get_financials(code, days=900, cache=True):
         equity_by_date = {
             r["date"]: float(r["value"]) for r in equity_rows
             if r.get("type") == "Equity" and r.get("value") is not None
+        }
+        total_assets_by_date = {
+            r["date"]: float(r["value"]) for r in equity_rows
+            if r.get("type") == "TotalAssets" and r.get("value") is not None
+        }
+        operating_cash_flow_by_date = {
+            r["date"]: float(r["value"]) for r in cashflow_rows
+            if r.get("type") == "NetCashInflowFromOperatingActivities" and r.get("value") is not None
         }
         revenue_by_date = {
             r["date"]: float(r["value"]) for r in income_rows
@@ -964,6 +985,8 @@ def get_financials(code, days=900, cache=True):
         out = [
             {
                 "date": d, "net_income": income_by_date[d], "equity": equity_by_date[d],
+                "total_assets": total_assets_by_date.get(d),
+                "operating_cash_flow": operating_cash_flow_by_date.get(d),
                 "revenue": revenue_by_date.get(d), "gross_profit": gross_profit_by_date.get(d),
                 "operating_income": operating_income_by_date.get(d),
             }

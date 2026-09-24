@@ -56,9 +56,10 @@ def load_cached_universe():
             "value_series": data.get("per_pbr_series", []),
             "gross_margin_trend_series": data.get("gross_margin_trend_series", []),
             "operating_margin_trend_series": data.get("operating_margin_trend_series", []),
-            # S2.2 candidate (docs/institutional_and_accrual_factor_plan.md)
+            # S2.2/S2.3 candidates (docs/institutional_and_accrual_factor_plan.md)
             # -- same absent-on-old-cache-entry tolerance as the Phase 6b keys.
             "institutional_flow_series": data.get("institutional_flow_series", []),
+            "accrual_quality_series": data.get("accrual_quality_series", []),
         }
     return universe_data
 
@@ -100,6 +101,7 @@ def main():
         "operating_margin_trend (候選)": ("operating_margin_trend_series", "trend_pct"),
         "value/pbr (候選)": ("value_series", "value_score"),
         "institutional_flow inst_net_5d (候選)": ("institutional_flow_series", "inst_net_5d"),
+        "accrual_quality accrual_ratio (候選)": ("accrual_quality_series", "accrual_ratio"),
     }
     print("\n候選因子（Phase 6b，先評估、不保證採用）：")
     for label, (series_key, value_key) in candidates.items():

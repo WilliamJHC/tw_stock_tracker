@@ -182,6 +182,31 @@ def test_margin_trend_series_skips_quarter_missing_numerator():
     assert ff.gross_margin_trend_series(rows) == []
 
 
+# ------------------------------------------------- accrual_quality_series --
+
+def test_accrual_quality_series_hand_computed():
+    rows = [
+        {"date": "2023-12-31", "net_income": 120.0, "total_assets": 1000.0, "operating_cash_flow": 100.0},
+    ]
+    out = ff.accrual_quality_series(rows)
+    # (120 - 100) / 1000 = 0.02
+    assert out == [{"usable_date": "2024-02-29", "accrual_ratio": 0.02}]
+
+
+def test_accrual_quality_series_skips_missing_operating_cash_flow():
+    rows = [{"date": "2023-12-31", "net_income": 120.0, "total_assets": 1000.0, "operating_cash_flow": None}]
+    assert ff.accrual_quality_series(rows) == []
+
+
+def test_accrual_quality_series_skips_non_positive_total_assets():
+    rows = [{"date": "2023-12-31", "net_income": 120.0, "total_assets": 0, "operating_cash_flow": 100.0}]
+    assert ff.accrual_quality_series(rows) == []
+
+
+def test_accrual_quality_series_empty_input_returns_empty():
+    assert ff.accrual_quality_series([]) == []
+
+
 # -------------------------------------------------------------- value_series --
 
 def test_value_series_flips_pbr_sign():
