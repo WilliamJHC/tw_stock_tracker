@@ -316,8 +316,14 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
             # fundamentals_days is stale, so an already-current cache entry
             # would otherwise never get this key populated. Refetch
             # get_financials() (3 requests) here on any cache entry missing
-            # the key, independent of the lead-in staleness check.
-            if "accrual_quality_series" not in cached:
+            # the key -- but ONLY when the lead-in block below (fundamentals_
+            # days already current) won't ALSO refetch+recompute it: a cache
+            # entry that's both missing this key AND has a stale
+            # fundamentals_days would otherwise trigger get_financials()
+            # twice (3 requests each) in the same pass, with the second call
+            # unconditionally overwriting what the first just computed --
+            # 2026-09-25 code review finding, see git log for this line.
+            if "accrual_quality_series" not in cached and cached.get("fundamentals_days", 0) >= fundamentals_days:
                 limiter.before_request()
                 limiter.before_request()
                 limiter.before_request()  # get_financials() issues 3 requests internally (income/balance/cashflow)

@@ -17,21 +17,23 @@
 
 用跟 §3.3 同樣的 purged walk-forward + DSR/PBO 檢驗（`--folds 4`，anchored，purge_days=60），比較兩個候選：baseline（現況）vs gated（等確認）。
 
+**2026-09-25 更正**：`/code-review` 抓到一個同日洗價交易的 bug——如果某檔股票在 D-1 日訊號確認、排進「D 日用當天價格成交」的佇列，而 D 日恰好又是月頻 rebalance 日、這檔股票的複合分數剛好掉出 top-N，原本的邏輯會先在 D 日買進（執行昨天確認的訂單）、緊接著又被當天的 rebalance 賣出邏輯賣掉——等於白繳一趟買賣手續費/滑價，部位淨額卻是零。已修正：rebalance 日當天，先確認新的 target_codes，取消任何即將被剔除股票的排隊訂單，再執行成交。下面的數字是修正後重跑的結果；修正前的版本 4 折平均報酬是 24.44%（vs 修正後 24.48%）、DSR=0.3906（vs 0.3880）——影響很小（全歷史範圍只有 3 筆洗價交易被消除），**結論方向完全不變**。
+
 ## 結果
 
 ```
-fold 0: test=2015-03-06..2018-01-09   baseline=71.61   gated=21.87
+fold 0: test=2015-03-06..2018-01-09   baseline=71.61   gated=21.91
 fold 1: test=2018-01-10..2020-11-26   baseline=17.76   gated=27.57
-fold 2: test=2020-11-27..2023-10-19   baseline=76.80   gated=12.77
-fold 3: test=2023-10-20..2026-09-14   baseline=264.78  gated=35.57
+fold 2: test=2020-11-27..2023-10-19   baseline=76.80   gated=12.81
+fold 3: test=2023-10-20..2026-09-14   baseline=264.78  gated=35.62
 
-OOS mean return%（4 折平均）：baseline=107.74   gated=24.44
+OOS mean return%（4 折平均）：baseline=107.74   gated=24.48
 per-fold winner counts: {baseline: 3, gated: 1}（75% plateau）
 PBO=0.33（門檻 0.5，通過）
 DSR（winner=baseline，n_trials=8, n_obs=4）=0.39（門檻 0.95，差很多，不是邊緣案例）
 ```
 
-全歷史（2012-05-02~2026-09-14，非 walk-forward，僅供參考量級）：baseline 總報酬 1210.6%（CAGR 19.6%，MDD -52.8%，Sharpe 0.87）vs gated 總報酬 137.3%（CAGR 6.2%，MDD -13.2%，Sharpe 0.88）——gated 版本 431 筆買入交易裡只有 246 筆是真的等到訊號確認才買，其餘 185 筆是既有持股續留 top-N 時的再平衡（不受閘門影響）。
+全歷史（2012-05-02~2026-09-14，非 walk-forward，僅供參考量級）：baseline 總報酬 1210.6%（CAGR 19.6%，MDD -52.8%，Sharpe 0.87）vs gated 總報酬 137.6%（CAGR 6.2%，MDD -13.2%，Sharpe 0.88）——gated 版本 428 筆買入交易裡只有 243 筆是真的等到訊號確認才買，其餘 185 筆是既有持股續留 top-N 時的再平衡（不受閘門影響）。
 
 ## 判斷
 

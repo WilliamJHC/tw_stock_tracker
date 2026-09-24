@@ -142,8 +142,41 @@ def simulate_with_entry_gate(universe_data, breakout_data, params=None, ranks_ca
     equity_curve, trades = [], []
 
     for date in calendar:
-        # 0. fill anything confirmed on the previous trading day, at TODAY's
-        # price -- the D/D+1 timing module docstring point 2 describes.
+        if date in rebalance_dates:
+            ranks = None
+            if ranks_cache is not None:
+                ranks = ranks_cache.get(date)
+                if ranks is None:
+                    ranks = ff.factor_ranks(universe_data, date, extra_factors=p.get("extra_factors"))
+                    ranks_cache[date] = ranks
+            scores = ff.composite_scores(
+                universe_data, date, weights=p["ranking_weights"], ranks=ranks, extra_factors=p.get("extra_factors")
+            )
+            target_codes = set(ff.top_n(scores, p["top_n"]))
+
+            # A code confirmed on the PREVIOUS trading day (queued in
+            # to_buy_next, about to fill below at step 0) whose score
+            # happens to drop out of target_codes on THIS SAME rebalance
+            # date would otherwise get bought at step 0 and then
+            # immediately sold by the de-selection loop right below --
+            # a same-day wash trade charging both legs' fees/slippage for
+            # a position that nets to zero. Cancel the queued fill instead
+            # of letting it execute: this rebalance's own selection is the
+            # more current signal, so a fill that would be reversed within
+            # the same date never happened at all (2026-09-25 code review
+            # finding, see git log for this line).
+            for code in [c for c in to_buy_next if c not in target_codes]:
+                del to_buy_next[code]
+
+            # drop pending codes that fell out of selection -- never bought this cycle
+            for code in [c for c in pending if c not in target_codes]:
+                del pending[code]
+        else:
+            target_codes = None
+
+        # 0. fill anything confirmed on the previous trading day (and not
+        # cancelled just above), at TODAY's price -- the D/D+1 timing
+        # module docstring point 2 describes.
         for code in list(to_buy_next):
             px = prices.get(code, {}).get(date)
             if not px:
@@ -162,21 +195,6 @@ def simulate_with_entry_gate(universe_data, breakout_data, params=None, ranks_ca
                                 "shares": buy_shares, "gated": True})
 
         if date in rebalance_dates:
-            ranks = None
-            if ranks_cache is not None:
-                ranks = ranks_cache.get(date)
-                if ranks is None:
-                    ranks = ff.factor_ranks(universe_data, date, extra_factors=p.get("extra_factors"))
-                    ranks_cache[date] = ranks
-            scores = ff.composite_scores(
-                universe_data, date, weights=p["ranking_weights"], ranks=ranks, extra_factors=p.get("extra_factors")
-            )
-            target_codes = set(ff.top_n(scores, p["top_n"]))
-
-            # drop pending codes that fell out of selection -- never bought this cycle
-            for code in [c for c in pending if c not in target_codes]:
-                del pending[code]
-
             for code in [c for c in holdings if c not in target_codes]:
                 px = prices[code].get(date)
                 if not px:
