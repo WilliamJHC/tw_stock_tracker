@@ -150,4 +150,4 @@ accrual_quality accrual_ratio (候選)   -0.029  t= -1.72  icir=-0.239  n=52   -
 3. ~~120d-skip-21 動能窗口的三盤勢分桶重跑~~ 已完成，見上一節——結論比預期保守，不建議僅憑本報告就正式提案更換 `MOMENTUM_DAYS`。
 4. ~~value/pbr 因子的正式 walk-forward + DSR/PBO 檢驗~~ 已完成，見上一節——OOS 方向一致但可用折數太少（value_series 僅約 5 年歷史），DSR/PBO 門檻未通過，建議等資料累積更長再重跑，暫不提案正式採用。
 5. 若要對「未分類樣本」（占 173 個 rebalance 日中的多數）做進一步歸因，可以另開一份報告單獨看這批日期落在哪個時間區間、是否集中在 2012-2015 年 TAIEX 歷史不足分類的早期樣本——不在本次範圍內。
-6. `docs/factor_timeframe_optimization_directions.md` §2.4（董監質押比率）：資料可行性尚未查證，見該文件與本次新增的 `docs/pledge_ratio_feasibility.md`。
+6. ~~`docs/factor_timeframe_optimization_directions.md` §2.4（董監質押比率）資料可行性查證~~ 已完成，見 `docs/pledge_ratio_feasibility.md`——FinMind 沒有這個 dataset，證交所開放資料 CSV 只有當月快照、無歷史回溯，可回測的歷史資料只能靠付費源（TEJ／CMoney），現階段不建議投入工程時間，是否要付費訂閱留給使用者決定。

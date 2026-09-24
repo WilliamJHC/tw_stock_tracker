@@ -101,20 +101,20 @@ Sloan 原始的 balance-sheet 法：`accruals = (ΔCurrentAssets − ΔCash) −
 這個專案已經有完整的三層驗證紀律：**IC/ICIR 顯著性檢定 → purged walk-forward + DSR/PBO/高原寬度門檻 → 依風險分兩軌治理**（ADR 0002 既有已驗證因子權重調整走自動套用+rollback；ADR 0003 全新邏輯走人工審核）。本文件所有建議都必須走這條路，不建議為了求快繞過。建議順序：
 
 **立即（零成本，數小時）**
-1. §2.1：把 `gross_margin_trend`/`operating_margin_trend`/`value(PBR)` 三個已寫好的候選跑一次 `evaluate_candidate_factor` 報告。
-2. §3.1：動能 formation window（20/60/120-skip-21 日）對照實驗，用 `evaluate_factors()` 現成框架。
+1. ~~§2.1：把 `gross_margin_trend`/`operating_margin_trend`/`value(PBR)` 三個已寫好的候選跑一次 `evaluate_candidate_factor` 報告。~~ 已完成，見 `docs/factor_ic_candidate_and_momentum_window_report.md`——value/pbr pooled 顯著但正式 walk-forward 的 DSR 未過門檻，不採用。
+2. ~~§3.1：動能 formation window（20/60/120-skip-21 日）對照實驗，用 `evaluate_factors()` 現成框架。~~ 已完成，見同一份報告——120d-skip-21 三盤勢分桶後結論保守，不建議換 `MOMENTUM_DAYS`。
 
 **短期（資料已在手或只差既有 dataset 的欄位，數天工程量級）**
-3. §2.2：法人買賣超持續性因子，`evaluate_candidate_factor` 驗證。
-4. §2.3：應計盈餘品質因子——先花半天查 FinMind `TaiwanStockBalanceSheet` 的 type 覆蓋率，可行再動工。
+3. ~~§2.2：法人買賣超持續性因子，`evaluate_candidate_factor` 驗證。~~ 已完成，見 `docs/institutional_and_accrual_factor_plan.md`——`inst_net_5d` 各 horizon 皆不顯著，不採用。
+4. ~~§2.3：應計盈餘品質因子——先花半天查 FinMind `TaiwanStockBalanceSheet` 的 type 覆蓋率，可行再動工。~~ 已完成，見 `docs/factor_ic_candidate_and_momentum_window_report.md` §2.3——pooled IC 是目前所有候選裡最強的一個，但正式 walk-forward 的 DSR 差 0.0023 沒過門檻，暫不採用，標記為資料累積後優先重跑對象。
 
 **中期（需要新整合，約一週工程量級）**
-5. §3.2：多因子排名 top-N ＋ `breakout_strategy.py` 進場濾網的分層回測。
-6. §3.3：rebalance 頻率（週/雙週/月）對照實驗。
+5. §3.2：多因子排名 top-N ＋ `breakout_strategy.py` 進場濾網的分層回測。尚未執行。
+6. §3.3：rebalance 頻率（週/雙週/月）對照實驗。尚未執行。
 
 **長期／先做可行性調查**
-7. §2.4：董監質押比率治理風險因子——先查資料來源可行性，未必值得投入。
-8. §2.5：低波動因子、sector-neutral 排名——放進候選池，暫不排工程排期。
+7. ~~§2.4：董監質押比率治理風險因子——先查資料來源可行性，未必值得投入。~~ 可行性查證已完成，見 `docs/pledge_ratio_feasibility.md`——FinMind 沒有這個 dataset，證交所開放資料只有當月快照、無歷史回溯，能回測的歷史資料只能靠付費源（TEJ/CMoney），現階段不建議投入工程時間。
+8. §2.5：低波動因子、sector-neutral 排名——放進候選池，暫不排工程排期。尚未執行（文件本身建議暫不做）。
 
 每一項通過 IC 顯著性檢定後，視風險等級走 ADR 0002 或 ADR 0003 的既有審核路徑，套用門檻（DSR ≥ 0.95、PBO ≤ 0.5、高原寬度 ≥ 搜尋範圍 20%）維持不變，不為了讓新因子過關而放寬。
 
