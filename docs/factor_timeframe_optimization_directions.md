@@ -109,7 +109,7 @@ Sloan 原始的 balance-sheet 法：`accruals = (ΔCurrentAssets − ΔCash) −
 4. ~~§2.3：應計盈餘品質因子——先花半天查 FinMind `TaiwanStockBalanceSheet` 的 type 覆蓋率，可行再動工。~~ 已完成，見 `docs/factor_ic_candidate_and_momentum_window_report.md` §2.3——pooled IC 是目前所有候選裡最強的一個，但正式 walk-forward 的 DSR 差 0.0023 沒過門檻，暫不採用，標記為資料累積後優先重跑對象。
 
 **中期（需要新整合，約一週工程量級）**
-5. §3.2：多因子排名 top-N ＋ `breakout_strategy.py` 進場濾網的分層回測。尚未執行。
+5. ~~§3.2：多因子排名 top-N ＋ `breakout_strategy.py` 進場濾網的分層回測。~~ 已完成，見 `docs/breakout_entry_layer_report.md`——明確不建議採用，DSR=0.39 遠低於門檻（非邊緣案例），等訊號確認導致大量候選永遠不成交、資金閒置，OOS 平均報酬只有現況的約 1/4。
 6. ~~§3.3：rebalance 頻率（週/雙週/月）對照實驗。~~ 已完成，見 `docs/rebalance_frequency_report.md`——月頻（現況）4 折平均報酬最高，但 DSR 差 0.0041 沒過門檻，維持月頻，不提案變更。
 
 **長期／先做可行性調查**
