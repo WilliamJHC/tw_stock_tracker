@@ -79,7 +79,20 @@ from report_factor_ic import load_cached_universe  # noqa: E402
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BREAKOUT_LAYER_DIR = os.path.join(BASE_DIR, "cache", "breakout_layer")
 
-CANDIDATES = ["baseline (現況，選到就買)", "gated (等 breakout 訊號確認)"]
+CANDIDATES = {
+    "baseline (現況，選到就買)": None,
+    "gated (無限期等訊號)": {},
+    "gated (最長等10個交易日)": {"max_wait_days": 10},
+    "gated (最長等20個交易日)": {"max_wait_days": 20},
+    "gated (最長等40個交易日)": {"max_wait_days": 40},
+}
+"""candidate name -> gate params (None = baseline, no gate at all) --
+2026-09-25 追加 docs/breakout_entry_layer_report.md 提出的下一步構想：無限期
+等待訊號會讓大量候選永遠不成交（428 筆買入只有 243 筆真的等到確認），改成
+「等到 max_wait_days 個交易日還沒確認就照現況價格買」，用幾個窗口長度測試
+這個機制能不能在「保留一點濾網」和「不要放掉太多選股訊號的效益」之間找到
+平衡。窗口以交易日（非日曆日）計，10/20/40 約略對應半個月/一個月/兩個月，
+呼應月頻 rebalance 的週期。"""
 
 
 def load_breakout_data():
@@ -113,9 +126,17 @@ def load_breakout_data():
     return out
 
 
-def simulate_with_entry_gate(universe_data, breakout_data, params=None, ranks_cache=None):
+def simulate_with_entry_gate(universe_data, breakout_data, params=None, ranks_cache=None, max_wait_days=None):
     """See module docstring. Same return contract as
-    portfolio_backtest.simulate(): {"equity_curve", "trades", "summary"}."""
+    portfolio_backtest.simulate(): {"equity_curve", "trades", "summary"}.
+
+    max_wait_days: None = wait indefinitely (original behaviour). Otherwise
+    a code that has been in `pending` for >= max_wait_days TRADING days
+    (counted from when it first became pending, not reset by later
+    rebalances that keep re-selecting it while still waiting) is bought at
+    the next trading day's price regardless of whether entry_signal() ever
+    confirmed -- "逾期就照現況買" per docs/breakout_entry_layer_report.md's
+    下一步 note."""
     p = dict(pb.PORTFOLIO_PARAMS)
     if params:
         p.update(params)
@@ -141,7 +162,7 @@ def simulate_with_entry_gate(universe_data, breakout_data, params=None, ranks_ca
     to_buy_next = {}    # code -> target_value -- confirmed yesterday, fill at TODAY's price
     equity_curve, trades = [], []
 
-    for date in calendar:
+    for idx, date in enumerate(calendar):
         if date in rebalance_dates:
             ranks = None
             if ranks_cache is not None:
@@ -237,24 +258,33 @@ def simulate_with_entry_gate(universe_data, breakout_data, params=None, ranks_ca
                             trades.append({"date": date, "code": code, "side": "sell", "price": sell_fill, "shares": sell_shares})
                     elif code not in pending and code not in to_buy_next:
                         # genuinely new -- gate instead of buying now
-                        pending[code] = {"target_value": target_value_each}
+                        pending[code] = {"target_value": target_value_each, "start_idx": idx}
                     elif code in pending:
-                        # still waiting from an earlier cycle -- refresh sizing
+                        # still waiting from an earlier cycle -- refresh sizing,
+                        # keep original start_idx (max_wait_days counts from
+                        # when it FIRST became pending, not reset by re-selection)
                         pending[code]["target_value"] = target_value_each
 
         # check today's breakout signal for every still-pending code; a
         # confirmation queues a fill for THE NEXT trading day (see module
-        # docstring point 2), never today.
+        # docstring point 2), never today. A code that has waited
+        # >= max_wait_days trading days is force-bought instead (queued the
+        # same way, via to_buy_next) regardless of signal data/confirmation
+        # -- "逾期就照現況買".
         for code in list(pending):
+            if max_wait_days is not None and idx - pending[code]["start_idx"] >= max_wait_days:
+                to_buy_next[code] = pending[code]["target_value"]
+                del pending[code]
+                continue
             bd = breakout_data.get(code)
             if not bd:
-                continue  # no signal data for this code -- stays pending forever, never bought (see docstring)
+                continue  # no signal data for this code -- stays pending until max_wait_days (or forever if unbounded)
             bdates = bd["bar_dates"]
-            idx = ff._bar_index_on_or_before(bdates, date)
-            if idx is None or bdates[idx] != date or idx < bs.WARMUP:
+            bar_idx = ff._bar_index_on_or_before(bdates, date)
+            if bar_idx is None or bdates[bar_idx] != date or bar_idx < bs.WARMUP:
                 continue  # no print today for this code's signal bars, or not enough warmup yet
-            tech = bs.technical_signal(bd["ctx"], bd["highs"], bd["lows"], idx)
-            cutoff = bdates[idx - 1] if idx > 0 else None
+            tech = bs.technical_signal(bd["ctx"], bd["highs"], bd["lows"], bar_idx)
+            cutoff = bdates[bar_idx - 1] if bar_idx > 0 else None
             inst_window = [r for r in bd["inst_rows"] if cutoff and r["date"] <= cutoff][-chip_days:] if cutoff else []
             chip = bs.chip_signal(inst_window, None)  # margin skipped, see docstring point 1
             if bs.entry_signal(tech, chip):
@@ -270,18 +300,24 @@ def simulate_with_entry_gate(universe_data, breakout_data, params=None, ranks_ca
     }
 
 
-def sweep_entry_gate_walk_forward(universe_data, breakout_data, n_folds=4, purge_days=60, mode="anchored", sim_params=None):
+def sweep_entry_gate_walk_forward(universe_data, breakout_data, n_folds=4, purge_days=60, mode="anchored",
+                                   sim_params=None, candidates=None):
     """Same fold/scoring/PBO-DSR shape as report_rebalance_freq_walkforward.
     sweep_rebalance_freq_walk_forward() -- see that script for why this
     isn't a generalization of optimize.sweep_ranking_weights_walk_forward()
     either (same "don't widen production infrastructure for an unproven
-    candidate" reasoning)."""
+    candidate" reasoning).
+
+    candidates: {name: gate_params|None} -- None means baseline
+    (pb.simulate(), no gate); a dict means simulate_with_entry_gate() with
+    that dict's "max_wait_days" (default CANDIDATES if omitted)."""
+    candidates = candidates if candidates is not None else CANDIDATES
     calendar = pb._trading_calendar(universe_data)
     folds = opt.purged_calendar_walk_forward_splits(calendar, n_folds=n_folds, purge_days=purge_days, mode=mode)
     if not folds:
         return None
 
-    names = CANDIDATES
+    names = list(candidates.keys())
     scores_by_name = {name: [] for name in names}
     fold_argmax = []
     trials = []
@@ -301,10 +337,12 @@ def sweep_entry_gate_walk_forward(universe_data, breakout_data, n_folds=4, purge
         fold_best_name, fold_best_score = None, float("-inf")
         for name in names:
             p = dict(sim_params or {})
-            if name == names[0]:
+            gate_params = candidates[name]
+            if gate_params is None:
                 result = pb.simulate(sliced, params=p, ranks_cache={})
             else:
-                result = simulate_with_entry_gate(sliced, breakout_data, params=p, ranks_cache={})
+                result = simulate_with_entry_gate(sliced, breakout_data, params=p, ranks_cache={},
+                                                   max_wait_days=gate_params.get("max_wait_days"))
             oos_points = [pt for pt in result["equity_curve"] if test_start <= pt["date"] <= test_end]
             score = None
             if len(oos_points) >= 2 and oos_points[0]["equity"]:
