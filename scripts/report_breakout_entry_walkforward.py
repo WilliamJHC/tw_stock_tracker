@@ -333,15 +333,26 @@ def sweep_entry_gate_walk_forward(universe_data, breakout_data, n_folds=4, purge
             sim_start = max(calendar[0], buffered)
         sliced = opt._slice_universe_by_date(universe_data, sim_start, test_end)
 
+        # One ranks_cache shared across this fold's whole candidate loop --
+        # every candidate here uses the exact same monthly rebalance dates
+        # (gate params only change entry TIMING, never which dates get
+        # ranked/selected), so factor_ranks()'s expensive whole-universe
+        # percentile computation is identical across candidates and safe to
+        # reuse (same sharing this sibling script already does:
+        # report_rebalance_freq_walkforward.py's sweep_rebalance_freq_walk_
+        # forward()). 2026-09-26 code review finding: this used to pass a
+        # fresh {} per candidate, recomputing ranks from scratch 5x per fold
+        # for no reason.
+        ranks_cache = {}
         fold_scores = {}
         fold_best_name, fold_best_score = None, float("-inf")
         for name in names:
             p = dict(sim_params or {})
             gate_params = candidates[name]
             if gate_params is None:
-                result = pb.simulate(sliced, params=p, ranks_cache={})
+                result = pb.simulate(sliced, params=p, ranks_cache=ranks_cache)
             else:
-                result = simulate_with_entry_gate(sliced, breakout_data, params=p, ranks_cache={},
+                result = simulate_with_entry_gate(sliced, breakout_data, params=p, ranks_cache=ranks_cache,
                                                    max_wait_days=gate_params.get("max_wait_days"))
             oos_points = [pt for pt in result["equity_curve"] if test_start <= pt["date"] <= test_end]
             score = None

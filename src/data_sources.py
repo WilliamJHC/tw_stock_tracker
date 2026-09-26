@@ -941,7 +941,12 @@ def get_financials(code, days=900, cache=True):
     dataset's `date` values line up exactly with income_rows/equity_rows'
     quarter-end dates (all three use the same quarter-end date to represent
     that quarter's filing), so it's joined the same way as the other fields
-    rather than needing separate date reconciliation.
+    rather than needing separate date reconciliation. This 3rd request is
+    fetched in its own try/except: a CashFlowsStatement-only failure just
+    leaves operating_cash_flow as None for every date (degrading like the
+    margin fields above), it does NOT null out net_income/equity/revenue/
+    gross_profit/operating_income the way a income_rows/equity_rows failure
+    still does.
 
     cache=False skips the on-disk cache (see get_daily()'s docstring)."""
     cached = _cache_get(f"financials_{code}") if cache else None
@@ -952,7 +957,18 @@ def get_financials(code, days=900, cache=True):
         start = (dt.date.today() - dt.timedelta(days=days)).isoformat()
         income_rows = _finmind("TaiwanStockFinancialStatements", code, start)
         equity_rows = _finmind("TaiwanStockBalanceSheet", code, start)
-        cashflow_rows = _finmind("TaiwanStockCashFlowsStatement", code, start)
+        try:
+            # A CashFlowsStatement-specific failure (quota/permission on
+            # just this dataset, or a transient error that outlasts
+            # _finmind()'s own retry budget) must not null out the
+            # income/equity data above -- operating_cash_flow degrades to
+            # None per-date same as the margin fields already do (see this
+            # function's docstring), instead of poisoning roe_series() etc.
+            # (2026-09-26 code review finding: this used to share the outer
+            # try/except, so a cashflow-only failure discarded everything.)
+            cashflow_rows = _finmind("TaiwanStockCashFlowsStatement", code, start)
+        except (SourceError, requests.RequestException):
+            cashflow_rows = []
         income_by_date = {
             r["date"]: float(r["value"]) for r in income_rows
             if r.get("type") == "IncomeAfterTaxes" and r.get("value") is not None

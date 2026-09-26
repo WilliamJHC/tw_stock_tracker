@@ -305,7 +305,7 @@ def test_get_financials_joins_income_and_equity_by_date():
     ]
 
 
-def test_get_financials_margin_fields_ride_along_zero_extra_requests():
+def test_get_financials_total_assets_rides_along_cashflow_is_one_extra_request():
     income_rows = [
         {"date": "2023-03-31", "type": "IncomeAfterTaxes", "value": 100.0},
         {"date": "2023-03-31", "type": "Revenue", "value": 500.0},
@@ -328,6 +328,27 @@ def test_get_financials_margin_fields_ride_along_zero_extra_requests():
     assert result == [{
         "date": "2023-03-31", "net_income": 100.0, "equity": 1000.0, "total_assets": 5000.0,
         "operating_cash_flow": 80.0, "revenue": 500.0, "gross_profit": 200.0, "operating_income": 150.0,
+    }]
+
+
+def test_get_financials_cashflow_failure_degrades_gracefully():
+    """2026-09-26 code review finding: a CashFlowsStatement-only failure
+    used to null out the WHOLE result (income/equity too) because all 3
+    requests shared one try/except. Now it must only drop
+    operating_cash_flow, keeping net_income/equity/revenue intact."""
+    income_rows = [
+        {"date": "2023-03-31", "type": "IncomeAfterTaxes", "value": 100.0},
+        {"date": "2023-03-31", "type": "Revenue", "value": 500.0},
+    ]
+    equity_rows = [{"date": "2023-03-31", "type": "Equity", "value": 1000.0}]
+    with patch("data_sources.requests.get", side_effect=[
+        _fake_response(data=income_rows), _fake_response(data=equity_rows),
+        _fake_response(status=402, body_status=402, msg="quota exceeded"),
+    ]):
+        result = ds.get_financials("2330")
+    assert result == [{
+        "date": "2023-03-31", "net_income": 100.0, "equity": 1000.0, "total_assets": None,
+        "operating_cash_flow": None, "revenue": 500.0, "gross_profit": None, "operating_income": None,
     }]
 
 
