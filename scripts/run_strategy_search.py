@@ -38,7 +38,11 @@ Each run:
      discipline as run_ranking_optimize.py's persist_trials().
 
 Usage:
-    python scripts/run_strategy_search.py [--dry-run]
+    python scripts/run_strategy_search.py [--dry-run] [--pbr]
+
+--pbr swaps the 4 named candidates for baseline vs with_pbr (value_pbr factor)
+and restricts the calendar to the PBR-data era (2021-10 onward) -- see
+build_pbr_candidates(). Default behavior is unchanged without it.
 
 --dry-run runs the full evaluation and prints what WOULD happen, without
 writing meta/optimization_runs or sending a Telegram message.
@@ -86,6 +90,30 @@ def build_candidates(active_weights):
     }
 
 
+def build_pbr_candidates(active_weights):
+    """--pbr mode's two candidates: the live baseline vs the same
+    revenue/roe/momentum trio with value_pbr blended in (weights mirror
+    with_ma_cross above -- a first guess, not searched for).
+
+    Kept out of build_candidates() on purpose: ff.used_extra_factors() feeds
+    the sweep the UNION of every candidate's extra factors, and factor_ranks()
+    drops any code whose extra factor is None -- value_pbr is None for every
+    code before ~2021-10, so putting with_pbr in the default 4-candidate race
+    would silently empty out the pre-2021 history for ma_cross/vol_price_div
+    too."""
+    return {
+        "baseline": dict(active_weights),
+        "with_pbr": {"revenue": 0.3, "roe": 0.2, "momentum": 0.2, "value_pbr": 0.3},
+    }
+
+
+def pbr_history_start(universe_data):
+    """Earliest value_series usable_date across the universe, or None if no
+    code has any PBR history."""
+    starts = [d["value_series"][0]["usable_date"] for d in universe_data.values() if d.get("value_series")]
+    return min(starts) if starts else None
+
+
 def persist_trials(conn, run_id, result):
     """Same shape as scripts/run_ranking_optimize.py's persist_trials() --
     result["trials"]: [{"fold_idx","name","score"}, ...] from
@@ -123,6 +151,8 @@ def _test_window_summary(sim_result, test_start, test_end):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dry-run", action="store_true", help="評估但不寫 meta/optimization_runs，也不發 Telegram")
+    ap.add_argument("--pbr", action="store_true",
+                    help="改跑 baseline vs with_pbr 二選一，且只用 PBR 有資料的區段（見 build_pbr_candidates）")
     args = ap.parse_args()
 
     universe_data = rfi.load_cached_universe()
@@ -130,6 +160,19 @@ def main():
     if not universe_data:
         print("nothing cached -- run scripts/run_factor_backtest.py --universe all first")
         return
+
+    if args.pbr:
+        # Before the first PBR row every code scores None for value_pbr, so
+        # every candidate (baseline included) would hold an empty universe and
+        # tie at 0% -- and ties go to the first-listed candidate ("baseline")
+        # in the per-fold argmax. Cut the calendar to the PBR era so every
+        # fold compares real portfolios.
+        pbr_start = pbr_history_start(universe_data)
+        if pbr_start is None:
+            print("[策略搜尋] 快取內沒有任何 PBR 資料，--pbr 本次略過")
+            return
+        universe_data = opt._slice_universe_by_date(universe_data, pbr_start, "9999-12-31")
+        print(f"--pbr: universe cut to bars from {pbr_start} (first PBR date)")
 
     conn = db.connect()
     db.init_db(conn)
@@ -152,7 +195,7 @@ def main():
     train_universe = opt._slice_universe_by_date(universe_data, train_start, train_end)
 
     active_weights = db.get_meta_json(conn, ACTIVE_META_KEY, default=dict(ff.RANKING_WEIGHTS))
-    candidates = build_candidates(active_weights)
+    candidates = build_pbr_candidates(active_weights) if args.pbr else build_candidates(active_weights)
     print(f"candidates: {list(candidates)}")
 
     # Union of extra factors actually referenced across THIS cycle's 4 named
@@ -180,7 +223,7 @@ def main():
     decision = result["decision"]
     print(f"winner={winner} (point_best={result['point_best']['name']}) decision={decision}")
 
-    run_id = f"strategy_search_{dt.date.today().isoformat()}"
+    run_id = f"strategy_search{'_pbr' if args.pbr else ''}_{dt.date.today().isoformat()}"
     if not args.dry_run:
         persist_trials(conn, run_id, result)
 

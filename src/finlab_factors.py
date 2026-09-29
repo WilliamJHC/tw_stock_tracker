@@ -378,7 +378,26 @@ def volume_price_divergence(bars, idx, window=20):
     return price_trend_pct + volume_change_pct
 
 
-EXTRA_FACTOR_FUNCS = {"ma_cross": ma_cross_signal, "vol_price_div": volume_price_divergence}
+def value_pbr_factor(entry, date):
+    """Latest value_series() score (-PBR) usable as of `date`, or None if the
+    code has no PBR history yet (FinMind's TaiwanStockPER only goes back to
+    ~2021-10, so earlier dates return None and, via factor_ranks()'s "every
+    extra factor must be non-None" filter, drop the code).
+
+    Unlike ma_cross_signal()/volume_price_divergence() this reads a separate
+    per-code series rather than bars, so it takes the whole universe_data
+    entry -- flagged with needs_entry below so factor_ranks() calls it as
+    fn(entry, date) instead of fn(bars, idx). .get() default keeps a cache
+    entry from before Phase 6b (no "value_series" key) scoring as None
+    instead of raising."""
+    return _as_of(entry.get("value_series") or [], date, "value_score")
+
+
+value_pbr_factor.needs_entry = True
+
+EXTRA_FACTOR_FUNCS = {
+    "ma_cross": ma_cross_signal, "vol_price_div": volume_price_divergence, "value_pbr": value_pbr_factor,
+}
 
 REQUIRED_FACTOR_KEYS = frozenset({"revenue", "roe", "momentum"})
 
@@ -438,7 +457,8 @@ def factor_ranks(universe_data, date, extra_factors=None):
     duplicate this filter+rank logic.
 
     extra_factors: optional {name: fn(bars, idx) -> float|None} dict (e.g.
-    EXTRA_FACTOR_FUNCS above) -- lets src/optimize.py's strategy-logic
+    EXTRA_FACTOR_FUNCS above; a fn with .needs_entry = True is instead called
+    as fn(universe_data entry, date), see value_pbr_factor()) -- lets src/optimize.py's strategy-logic
     search compare candidate factors that aren't part of the fixed
     revenue/roe/momentum trio without this function growing a parallel
     code path. None (the default) behaves exactly as before this
@@ -460,7 +480,10 @@ def factor_ranks(universe_data, date, extra_factors=None):
         roe = _as_of(d["roe_series"], date, "roe_pct")
         if mom is None or yoy is None or roe is None:
             continue
-        extras = {name: fn(bars, idx) for name, fn in extra_factors.items()}
+        extras = {
+            name: fn(d, date) if getattr(fn, "needs_entry", False) else fn(bars, idx)
+            for name, fn in extra_factors.items()
+        }
         if any(v is None for v in extras.values()):
             continue
         raw[code] = {"momentum": mom, "yoy": yoy, "roe": roe, **extras}

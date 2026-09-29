@@ -465,6 +465,42 @@ def test_used_extra_factors_returns_only_the_referenced_subset():
     assert ff.used_extra_factors(weights) == {"ma_cross": ff.ma_cross_signal}
 
 
+def test_used_extra_factors_includes_value_pbr_only_when_referenced():
+    assert ff.used_extra_factors([{"revenue": 0.3, "value_pbr": 0.3}]) == {"value_pbr": ff.value_pbr_factor}
+    assert ff.used_extra_factors([{"revenue": 0.4, "roe": 0.3, "momentum": 0.3}]) == {}
+
+
+def test_value_pbr_factor_is_point_in_time():
+    entry = {"value_series": [
+        {"usable_date": "2023-01-02", "value_score": -2.0},
+        {"usable_date": "2023-01-10", "value_score": -1.5},
+    ]}
+    assert ff.value_pbr_factor(entry, "2023-01-01") is None   # before any row
+    assert ff.value_pbr_factor(entry, "2023-01-05") == -2.0   # latest row <= date, not the later one
+    assert ff.value_pbr_factor(entry, "2023-02-01") == -1.5
+
+
+def test_value_pbr_factor_none_when_series_missing_or_empty():
+    assert ff.value_pbr_factor({}, "2023-01-05") is None
+    assert ff.value_pbr_factor({"value_series": []}, "2023-01-05") is None
+
+
+def test_factor_ranks_value_pbr_ranks_cheaper_stock_higher_and_drops_codes_without_pbr():
+    universe = {
+        "CHEAP": _universe_entry(100, 1.0, days=90),
+        "PRICEY": _universe_entry(100, 1.0, days=90),
+        "NOPBR": _universe_entry(100, 1.0, days=90),
+    }
+    date = universe["CHEAP"]["bar_dates"][-1]
+    universe["CHEAP"]["value_series"] = [{"usable_date": "2023-01-01", "value_score": -1.0}]   # PBR 1.0
+    universe["PRICEY"]["value_series"] = [{"usable_date": "2023-01-01", "value_score": -5.0}]  # PBR 5.0
+    # NOPBR has no value_series key at all (pre-Phase-6b cache entry)
+
+    ranks = ff.factor_ranks(universe, date, extra_factors={"value_pbr": ff.value_pbr_factor})
+    assert set(ranks) == {"CHEAP", "PRICEY"}  # NOPBR excluded by the "every extra factor non-None" rule
+    assert ranks["CHEAP"]["value_pbr"] > ranks["PRICEY"]["value_pbr"]
+
+
 def test_composite_scores_reuses_precomputed_ranks_instead_of_recomputing():
     """scripts/run_daily_recommendations.py calls factor_ranks() itself for
     the per-factor breakdown, then passes it into composite_scores() so the

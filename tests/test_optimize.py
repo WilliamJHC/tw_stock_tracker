@@ -403,6 +403,16 @@ def test_slice_universe_by_date_filters_bars_keeps_factor_series():
     assert sliced["A"]["roe_series"] == universe["A"]["roe_series"]
 
 
+def test_slice_universe_by_date_passes_value_series_through_only_when_present():
+    base = {"bars": [{"date": d, "c": 100.0, "v": 1000} for d in _calendar(10)], "bar_dates": _calendar(10),
+            "revenue_series": [], "roe_series": []}
+    pbr = [{"usable_date": "2020-01-01", "value_score": -2.0}]
+    universe = {"WITH": {**base, "value_series": pbr}, "WITHOUT": dict(base)}
+    sliced = opt._slice_universe_by_date(universe, "2020-01-03", "2020-01-05")
+    assert sliced["WITH"]["value_series"] == pbr
+    assert "value_series" not in sliced["WITHOUT"]  # same shape as before for universes lacking it
+
+
 def test_slice_universe_by_date_drops_codes_with_no_bars_in_range():
     universe = {"A": {"bars": [{"date": "2020-01-01", "c": 100.0, "v": 1000}],
                       "bar_dates": ["2020-01-01"], "revenue_series": [], "roe_series": []}}

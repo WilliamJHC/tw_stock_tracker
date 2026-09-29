@@ -460,6 +460,11 @@ def _slice_universe_by_date(universe_data, start_date, end_date):
             "bars": bars, "bar_dates": [b["date"] for b in bars],
             "revenue_series": d["revenue_series"], "roe_series": d["roe_series"],
         }
+        # Candidate-factor series (value_pbr) are usable_date-gated by
+        # _as_of() the same way, so pass them through untouched. Only when
+        # present, so universes without one slice to the same shape as before.
+        if "value_series" in d:
+            sliced[code]["value_series"] = d["value_series"]
     return sliced
 
 
