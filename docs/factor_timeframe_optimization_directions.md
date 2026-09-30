@@ -2,7 +2,7 @@
 
 2026-09-22。這是一份**研究方向清單**，不是決策記錄——沒有任何一項在本文件裡被「採用」，每一項的落地都必須先過專案既有的驗證關卡（見第 4 節）。
 
-> **2026-09-29 進度**：§2.1（Phase 6b 三個候選因子）與 §3.1（動能 formation window）兩個「立即」項目已執行，結果與後續 PBR 的 walk-forward 見 `docs/factor_candidates_momentum_ic_2026-09.md`：毛利率／營益率趨勢排除；PBR 單因子 IC 顯著但 ADR 0003 walk-forward 未過（DSR 0.91 < 0.95），不採用；skip-21 動能在完整樣本增益小、近期子樣本不顯著，尚未進 walk-forward。§2.2 以後尚未開始。以下正文保留 2026-09-22 撰寫時的原貌，未回頭改寫。目的是回答「除了現有 revenue/roe/momentum 三因子、單一月頻 rebalance 之外，還有哪些站得住腳的方向可以研究」，依據是通讀 `CONTEXT.md`、`README.md`、`docs/adr/*`、`docs/regime_strategy_research.md`、`docs/regime_switch_vs_0050.md`、`docs/https-finlab-...-lighthouse.md`，以及 `finlab_factors.py`/`factor_eval.py`/`market_regime.py`/`optimize.py`/`backtest.py`/`portfolio_backtest.py`/`breakout_strategy.py`/`pipeline.py`/`data_sources.py`/`analysis.py` 的實際程式碼後的結果。
+> **2026-09-29 進度**：§2.1（Phase 6b 三個候選因子）與 §3.1（動能 formation window）兩個「立即」項目已執行，結果與後續 PBR 的 walk-forward 見 `docs/factor_candidates_momentum_ic_2026-09.md`：毛利率／營益率趨勢排除；PBR 單因子 IC 顯著但 ADR 0003 walk-forward 未過（DSR 0.91 < 0.95），不採用；skip-21 動能在完整樣本增益小，walk-forward 也未過（DSR 0.76）；§2.2 法人買賣超已做 1/8 抽樣（228 檔）的單因子 IC：h=20 符號不穩、h=60 邊緣（詳見同一份結果文件 §6），尚未進 walk-forward。§2.3 以後尚未開始。以下正文保留 2026-09-22 撰寫時的原貌，未回頭改寫。目的是回答「除了現有 revenue/roe/momentum 三因子、單一月頻 rebalance 之外，還有哪些站得住腳的方向可以研究」，依據是通讀 `CONTEXT.md`、`README.md`、`docs/adr/*`、`docs/regime_strategy_research.md`、`docs/regime_switch_vs_0050.md`、`docs/https-finlab-...-lighthouse.md`，以及 `finlab_factors.py`/`factor_eval.py`/`market_regime.py`/`optimize.py`/`backtest.py`/`portfolio_backtest.py`/`breakout_strategy.py`/`pipeline.py`/`data_sources.py`/`analysis.py` 的實際程式碼後的結果。
 
 ## 核心結論（先講重點）
 
