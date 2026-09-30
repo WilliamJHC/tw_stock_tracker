@@ -76,7 +76,7 @@
 - 單因子 IC 顯著卻在組合層變差，原因**沒有驗證**。可能的解釋（純猜測）：價值股在這段期間逆風、top-20 的集中持股放大差異、0.3 的權重動到了原本有效的營收/ROE 訊號。
 - **這個否定結論的檢定力不高**：只有 4 個 fold、train 區間約 4.3 年（樣本外 fold 合計 2022-08 ~ 2026-01，約 3.4 年）、n_trials=8；換權重（例如 0.1-0.15）可能得到不同結果，但每多試一組就要再付 DSR 的試驗次數懲罰，不應用同一批資料調到過為止。
 
-重現：`python scripts/run_strategy_search.py --pbr --dry-run`（`--dry-run` 不寫 meta、不發 Telegram）。註：本機沒有 `data/backtest.db`，baseline 用程式預設 `RANKING_WEIGHTS`；雲端的 `active_ranking_weights` 若不同，結果可能不同。
+重現：`python scripts/run_strategy_search.py --pbr --dry-run`（`--dry-run` 不寫 meta、不發 Telegram）。註：baseline 用程式預設 `RANKING_WEIGHTS`。本機 `src/data/backtest.db`（2026-09-21 最後寫入）的 meta 從未寫過 `active_ranking_weights`，所以本機一律 fallback 到預設；雲端 GitHub Actions cache 裡那份的實際值在本機取不到，若不同（例如 ADR 0002 的自動優化已換過權重），baseline 就不是這裡用的 0.4/0.3/0.3，結果可能不同——**尚未核實**，核實方式見 ADR 0003 追加段。
 
 ## 建議的下一步（依專案既有治理流程）
 
