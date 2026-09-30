@@ -259,6 +259,37 @@ def test_momentum_pct_falls_back_to_raw_c_when_no_c_adj():
     assert ff.momentum_pct(bars, 60, days=60) == 10.0
 
 
+# ------------------------------------------- institutional net-ratio series --
+
+def test_institutional_net_by_date_sums_foreign_and_trust_and_drops_dealers():
+    rows = [
+        {"date": "2024-01-02", "name": "Foreign_Investor", "buy": 1000, "sell": 400},
+        {"date": "2024-01-02", "name": "Foreign_Dealer_Self", "buy": 50, "sell": 0},
+        {"date": "2024-01-02", "name": "Investment_Trust", "buy": 100, "sell": 300},
+        {"date": "2024-01-02", "name": "Dealer_self", "buy": 9999, "sell": 0},
+        {"date": "2024-01-03", "name": "Investment_Trust", "buy": 10, "sell": 0},
+        {"date": None, "name": "Foreign_Investor", "buy": 1, "sell": 0},
+    ]
+    assert ff.institutional_net_by_date(rows) == {"2024-01-02": 450, "2024-01-03": 10}
+
+
+def test_institutional_net_ratio_series_hand_computed_and_usable_next_bar():
+    bars = _bars([100.0] * 6, volume=1000)   # dates 2023-01-01 .. 2023-01-06
+    net = {"2023-01-01": 100, "2023-01-02": 200, "2023-01-03": 300, "2023-01-04": -100}
+    s = ff.institutional_net_ratio_series(net, bars, window=3)
+    # first full window is bars 0..2 (net 600 / vol 3000), usable on bar 3's date
+    assert s[0] == {"usable_date": "2023-01-04", "net_ratio": 600 / 3000}
+    # window slides: bars 1..3 -> (200+300-100) / 3000
+    assert s[1] == {"usable_date": "2023-01-05", "net_ratio": 400 / 3000}
+    # bars 2..4 -> (300-100+0)/3000, usable on the LAST bar's date; last bar itself yields no row
+    assert s[2] == {"usable_date": "2023-01-06", "net_ratio": 200 / 3000}
+    assert len(s) == 3
+
+
+def test_institutional_net_ratio_series_empty_when_history_shorter_than_window():
+    assert ff.institutional_net_ratio_series({}, _bars([100.0] * 5), window=20) == []
+
+
 # --------------------------------------------------- momentum_skip_pct --
 
 def test_momentum_skip_pct_hand_computed_and_ignores_the_skipped_bars():

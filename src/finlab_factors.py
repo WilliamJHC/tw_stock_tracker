@@ -242,6 +242,49 @@ def value_series(per_pbr_rows):
             for r in per_pbr_rows if r.get("pbr")]
 
 
+def institutional_net_by_date(finmind_rows):
+    """FinMind TaiwanStockInstitutionalInvestorsBuySell rows -> {date:
+    foreign + investment-trust net buy in shares}. Same name matching as
+    data_sources.get_institutional() ("foreign" / "investment_trust"
+    substrings, case-insensitive); dealer rows are left out (self-trade/
+    hedging flow is noise for a "who is accumulating" signal)."""
+    out = {}
+    for r in finmind_rows:
+        d = r.get("date")
+        name = (r.get("name") or "").lower()
+        if not d or not ("foreign" in name or "investment_trust" in name):
+            continue
+        out[d] = out.get(d, 0) + int(r.get("buy") or 0) - int(r.get("sell") or 0)
+    return out
+
+
+def institutional_net_ratio_series(net_by_date, bars, window=20):
+    """[{usable_date, net_ratio}]: net buy (foreign + trust, see
+    institutional_net_by_date()) summed over the trailing `window` bars,
+    divided by those bars' summed volume -- "what share of recent volume did
+    the big institutions net accumulate". A bar date missing from
+    net_by_date counts as 0 net.
+
+    usable_date is the NEXT bar's date, not the bar's own: the day's
+    institutional totals are only published after the close, so treating them
+    as known on the same date would be look-ahead (unlike value_series()'s
+    price-derived PBR, which is genuinely knowable at that close). The last
+    bar therefore yields no row. Skips windows with zero total volume."""
+    nets = [net_by_date.get(b["date"], 0) for b in bars]
+    vols = [b["v"] for b in bars]
+    out = []
+    net_sum = vol_sum = 0
+    for i in range(len(bars) - 1):
+        net_sum += nets[i]
+        vol_sum += vols[i]
+        if i >= window:
+            net_sum -= nets[i - window]
+            vol_sum -= vols[i - window]
+        if i + 1 >= window and vol_sum > 0:
+            out.append({"usable_date": bars[i + 1]["date"], "net_ratio": net_sum / vol_sum})
+    return out
+
+
 def _as_of(series, date, key):
     """Latest `series` entry with usable_date <= date, or None. series must
     be sorted ascending by usable_date (both revenue_yoy_series() and
