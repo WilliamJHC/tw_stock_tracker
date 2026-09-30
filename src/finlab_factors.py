@@ -216,14 +216,19 @@ def gross_margin_trend_series(financials_rows):
     (docs/https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md);
     NOT part of RANKING_WEIGHTS/composite_scores() -- evaluate via
     factor_eval.evaluate_candidate_factor() first, see that function's
-    docstring on why adoption is never automatic."""
+    docstring on why adoption is never automatic.
+
+    Evaluated 2026-09 (docs/factor_candidates_momentum_ic_2026-09.md §1, 1821
+    codes): IC t-stat below significance at h=20 and h=60 -> EXCLUDED; do not
+    re-evaluate without new data."""
     return _margin_trend_series(financials_rows, "gross_profit")
 
 
 def operating_margin_trend_series(financials_rows):
     """YoY change in operating margin (OperatingIncome/Revenue, pct points)
     -- see _margin_trend_series(). Same candidate-factor status as
-    gross_margin_trend_series()."""
+    gross_margin_trend_series(), including the 2026-09 verdict: EXCLUDED (IC
+    not significant, docs/factor_candidates_momentum_ic_2026-09.md §1)."""
     return _margin_trend_series(financials_rows, "operating_income")
 
 
