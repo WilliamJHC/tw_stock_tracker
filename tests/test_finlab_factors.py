@@ -259,6 +259,38 @@ def test_momentum_pct_falls_back_to_raw_c_when_no_c_adj():
     assert ff.momentum_pct(bars, 60, days=60) == 10.0
 
 
+# --------------------------------------------------- momentum_skip_pct --
+
+def test_momentum_skip_pct_hand_computed_and_ignores_the_skipped_bars():
+    # 100 for bars 0..39, 110 at bar 40 (the window's end when idx=61, skip=21),
+    # then a +50% spike in the last 21 bars that the skip variant must NOT see.
+    closes = [100.0] * 40 + [110.0] + [110.0] * 20 + [165.0]
+    bars = _bars(closes)
+    idx = len(bars) - 1  # 61
+    assert ff.momentum_skip_pct(bars, idx, days=40, skip=21) == 10.0  # bars[40] vs bars[0]
+    assert ff.momentum_pct(bars, idx, days=40) > 10.0  # plain momentum does see the recent move
+
+
+def test_momentum_skip_pct_skip_zero_matches_momentum_pct():
+    bars = _bars([100.0 + i for i in range(80)])
+    assert ff.momentum_skip_pct(bars, 79, days=60, skip=0) == ff.momentum_pct(bars, 79, days=60)
+
+
+def test_momentum_skip_pct_none_when_insufficient_history():
+    # idx=79, skip=21 -> window ends at bar 58, so days=58 is the longest that fits
+    bars = _bars([100.0] * 80)
+    assert ff.momentum_skip_pct(bars, 79, days=58) == 0.0
+    assert ff.momentum_skip_pct(bars, 79, days=59) is None
+
+
+def test_extra_factor_registry_has_skip21_windows():
+    assert ff.EXTRA_FACTOR_FUNCS["mom60_skip21"] is ff.mom60_skip21
+    assert ff.EXTRA_FACTOR_FUNCS["mom120_skip21"] is ff.mom120_skip21
+    bars = _bars([100.0] * 200)
+    assert ff.mom60_skip21(bars, 199) == ff.momentum_skip_pct(bars, 199, 60)
+    assert ff.mom120_skip21(bars, 199) == ff.momentum_skip_pct(bars, 199, 120)
+
+
 # ------------------------------------------------------- ma_cross_signal --
 
 def test_ma_cross_signal_hand_computed():

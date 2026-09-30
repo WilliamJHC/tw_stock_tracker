@@ -38,11 +38,14 @@ Each run:
      discipline as run_ranking_optimize.py's persist_trials().
 
 Usage:
-    python scripts/run_strategy_search.py [--dry-run] [--pbr]
+    python scripts/run_strategy_search.py [--dry-run] [--pbr | --skip21]
 
---pbr swaps the 4 named candidates for baseline vs with_pbr (value_pbr factor)
-and restricts the calendar to the PBR-data era (2021-10 onward) -- see
-build_pbr_candidates(). Default behavior is unchanged without it.
+--pbr swaps the 4 named candidates for baseline vs with_pbr/with_pbr_15
+(value_pbr factor) and restricts the calendar to the PBR-data era (2021-10
+onward) -- see build_pbr_candidates().
+--skip21 swaps them for baseline vs momentum-with-latest-21-bars-skipped
+(60/120-bar windows) over the full calendar -- see build_skip21_candidates().
+Default behavior (neither flag) is unchanged.
 
 --dry-run runs the full evaluation and prints what WOULD happen, without
 writing meta/optimization_runs or sending a Telegram message.
@@ -101,9 +104,32 @@ def build_pbr_candidates(active_weights):
     code before ~2021-10, so putting with_pbr in the default 4-candidate race
     would silently empty out the pre-2021 history for ma_cross/vol_price_div
     too."""
+    # Two weight levels, fixed up front and both counted in n_trials (so DSR
+    # already charges for trying more than one) -- not tuned after seeing
+    # fold results.
     return {
         "baseline": dict(active_weights),
         "with_pbr": {"revenue": 0.3, "roe": 0.2, "momentum": 0.2, "value_pbr": 0.3},
+        "with_pbr_15": {"revenue": 0.35, "roe": 0.25, "momentum": 0.25, "value_pbr": 0.15},
+    }
+
+
+def build_skip21_candidates(active_weights):
+    """--skip21 mode: the live baseline vs swapping ONLY the momentum term for
+    a skip-most-recent-21-bars window (60- or 120-bar), everything else
+    unchanged -- isolates the formation-window question from
+    docs/factor_candidates_momentum_ic_2026-09.md §2. Momentum's own weight
+    moves to the skip-21 factor; the plain "momentum" key is left out of
+    these weight dicts (composite_scores() skips keys a weight dict lacks).
+    Needs no PBR-era cut: both windows only need bars, so the full history
+    is usable. Kept out of build_candidates() for the same union-of-extra-
+    factors reason as build_pbr_candidates()."""
+    base = dict(active_weights)
+    momentum_w = base.pop("momentum", 0.0)
+    return {
+        "baseline": dict(active_weights),
+        "mom60_skip21": {**base, "mom60_skip21": momentum_w},
+        "mom120_skip21": {**base, "mom120_skip21": momentum_w},
     }
 
 
@@ -151,8 +177,11 @@ def _test_window_summary(sim_result, test_start, test_end):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dry-run", action="store_true", help="評估但不寫 meta/optimization_runs，也不發 Telegram")
-    ap.add_argument("--pbr", action="store_true",
-                    help="改跑 baseline vs with_pbr 二選一，且只用 PBR 有資料的區段（見 build_pbr_candidates）")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--pbr", action="store_true",
+                      help="改跑 baseline vs with_pbr（兩個權重），且只用 PBR 有資料的區段（見 build_pbr_candidates）")
+    mode.add_argument("--skip21", action="store_true",
+                      help="改跑 baseline vs 動能換成跳過最近 21 根的 60/120 視窗（見 build_skip21_candidates）")
     args = ap.parse_args()
 
     universe_data = rfi.load_cached_universe()
@@ -195,7 +224,12 @@ def main():
     train_universe = opt._slice_universe_by_date(universe_data, train_start, train_end)
 
     active_weights = db.get_meta_json(conn, ACTIVE_META_KEY, default=dict(ff.RANKING_WEIGHTS))
-    candidates = build_pbr_candidates(active_weights) if args.pbr else build_candidates(active_weights)
+    if args.pbr:
+        candidates = build_pbr_candidates(active_weights)
+    elif args.skip21:
+        candidates = build_skip21_candidates(active_weights)
+    else:
+        candidates = build_candidates(active_weights)
     print(f"candidates: {list(candidates)}")
 
     # Union of extra factors actually referenced across THIS cycle's 4 named
@@ -222,8 +256,15 @@ def main():
     winner = result["plateau"]["most_common"]
     decision = result["decision"]
     print(f"winner={winner} (point_best={result['point_best']['name']}) decision={decision}")
+    # Per-fold OOS returns and the aggregate stats print on EVERY path, not
+    # only when a candidate wins -- a "baseline held" verdict is otherwise
+    # unreadable (a near-tie and a blowout look identical).
+    for t in result["trials"]:
+        print(f"  fold {t['fold_idx']} {t['name']}: {t['score']}")
+    print(f"  candidate_scores={result['candidate_scores']} fold_argmax={result['fold_argmax']} "
+          f"pbo={result['pbo']} dsr={result['dsr']} n_trials={result['n_trials']}")
 
-    run_id = f"strategy_search{'_pbr' if args.pbr else ''}_{dt.date.today().isoformat()}"
+    run_id = f"strategy_search{'_pbr' if args.pbr else '_skip21' if args.skip21 else ''}_{dt.date.today().isoformat()}"
     if not args.dry_run:
         persist_trials(conn, run_id, result)
 

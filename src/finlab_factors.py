@@ -292,6 +292,33 @@ def momentum_pct(bars, idx, days=MOMENTUM_DAYS):
     return (_close(bars[idx]) - base) / base * 100
 
 
+MOMENTUM_SKIP_DAYS = 21
+
+
+def momentum_skip_pct(bars, idx, days, skip=MOMENTUM_SKIP_DAYS):
+    """`days`-bar percent return ending `skip` bars BEFORE bars[idx] -- the
+    "skip the most recent month" momentum variant (docs/factor_candidates_
+    momentum_ic_2026-09.md §2: dropping the latest ~21 bars flips the
+    short-term-reversal-contaminated sign). Same _close() (c_adj-first)
+    convention as momentum_pct(); skip=0 reproduces it. None if there are
+    fewer than days + skip bars of history, or the base close is 0."""
+    j = idx - skip
+    if j - days < 0:
+        return None
+    base = _close(bars[j - days])
+    if not base:
+        return None
+    return (_close(bars[j]) - base) / base * 100
+
+
+def mom60_skip21(bars, idx):
+    return momentum_skip_pct(bars, idx, 60)
+
+
+def mom120_skip21(bars, idx):
+    return momentum_skip_pct(bars, idx, 120)
+
+
 def ma_cross_signal(bars, idx, short_window=5, long_window=20):
     """Short-window vs long-window moving-average cross, as a signed percent
     gap: (short_ma - long_ma) / long_ma * 100, using _close() (c_adj-first,
@@ -397,6 +424,7 @@ value_pbr_factor.needs_entry = True
 
 EXTRA_FACTOR_FUNCS = {
     "ma_cross": ma_cross_signal, "vol_price_div": volume_price_divergence, "value_pbr": value_pbr_factor,
+    "mom60_skip21": mom60_skip21, "mom120_skip21": mom120_skip21,
 }
 
 REQUIRED_FACTOR_KEYS = frozenset({"revenue", "roe", "momentum"})
