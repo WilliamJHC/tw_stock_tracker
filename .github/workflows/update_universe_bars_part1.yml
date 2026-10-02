@@ -41,6 +41,10 @@ jobs:
     # 沒有這行 secrets.* 會全部解析成空字串。
     environment: Cloudflare
     env:
+      # update_universe_bars.py pulls daily bars from FinMind and its limiter
+      # assumes the token's 600 req/hr tier; without it the free tier's lower hourly
+      # cap applies (workflow was missing it; found 2026-10-02 while seeding).
+      FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
     steps:
@@ -48,6 +52,7 @@ jobs:
       - name: check secrets
         run: |
           missing=""
+          [ -z "$FINMIND_TOKEN" ] && missing="$missing FINMIND_TOKEN"
           [ -z "$TELEGRAM_BOT_TOKEN" ] && missing="$missing TELEGRAM_BOT_TOKEN"
           [ -z "$TELEGRAM_CHAT_ID" ] && missing="$missing TELEGRAM_CHAT_ID"
           if [ -n "$missing" ]; then

@@ -1,0 +1,128 @@
+name: seed-factor-run
+
+# One-off: build the Actions cache lineage `update-universe-bars-state-*` from
+# scratch by pulling the whole universe from FinMind inside GitHub Actions.
+# That lineage is what optimize.yml, strategy_search.yml, daily_recommendations
+# .yml and update_universe_bars_part1/2.yml all restore cache/factor_run from;
+# it was never created (cache/ is gitignored and the full pull used to be a
+# manual ~20h local run), so all of them ran empty/failed -- see
+# scripts/seed_factor_run.py's docstring.
+#
+# The full pull (~12k FinMind requests at the 550/hr limiter) does not fit in
+# one 6h job, so each run fetches for ~5h, saves its progress and, while it is
+# still making progress, dispatches the next run of this same workflow
+# (workflow_dispatch via GITHUB_TOKEN is the one event allowed to chain).
+# Expect roughly 4-6 runs back to back.
+#
+# Interim progress is saved under `factor-run-seed-*`, NOT under
+# `update-universe-bars-state-*`: the other workflows restore that prefix and
+# optimize.yml auto-applies ranking weights, so they must never see a
+# half-filled universe. Only the final, complete cache is saved under
+# `update-universe-bars-state-seed-<run_id>`; the weekly part1/part2 refreshes
+# then continue that lineage as usual.
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: '日線歷史天數（同 run_factor_backtest.py --days；預設 5300 ≈ 14.5 年，抓出來與本機既有的 2012 起長歷史逐日一致；1800 只有約 5 年）。續跑時必須與前一輪相同，否則整個重抓'
+        default: '5300'
+      auto_continue:
+        type: boolean
+        description: '未完成時自動接力下一輪'
+        default: true
+      force:
+        type: boolean
+        description: '即使 update-universe-bars-state-* 已存在也照跑（會從頭重抓，慎用）'
+        default: false
+
+concurrency:
+  group: seed-factor-run
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write   # gh workflow run (chain the next slice)
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # under the 360 hard cap; the script stops starting batches at 300
+    # FINMIND_TOKEN / TELEGRAM_* live in Environment「Cloudflare」(see snapshot.yml).
+    environment: Cloudflare
+    env:
+      FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: check secrets
+        run: |
+          missing=""
+          [ -z "$FINMIND_TOKEN" ] && missing="$missing FINMIND_TOKEN"
+          [ -z "$TELEGRAM_BOT_TOKEN" ] && missing="$missing TELEGRAM_BOT_TOKEN"
+          [ -z "$TELEGRAM_CHAT_ID" ] && missing="$missing TELEGRAM_CHAT_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::缺少或空白的 secrets:$missing（Settings → Environments → Cloudflare）"
+            exit 1
+          fi
+      # Refuse to start over a lineage that is already seeded (lookup-only: no download).
+      - name: check lineage not already seeded
+        id: existing
+        uses: actions/cache/restore@v4
+        with:
+          path: cache/factor_run
+          key: update-universe-bars-state-none
+          restore-keys: |
+            update-universe-bars-state-
+          lookup-only: true
+      - name: refuse if already seeded
+        if: steps.existing.outputs.cache-matched-key != '' && !inputs.force
+        run: |
+          echo "::error::快取 ${{ steps.existing.outputs.cache-matched-key }} 已存在，不需要播種。若真要從頭重抓，請勾選 force。"
+          exit 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-actions.txt
+      - run: pip install -r requirements-actions.txt
+      # Progress from earlier slices (interim lineage, invisible to other workflows).
+      - uses: actions/cache/restore@v4
+        with:
+          path: cache/factor_run
+          key: factor-run-seed-${{ github.run_id }}
+          restore-keys: |
+            factor-run-seed-
+      - name: seed_factor_run
+        id: seed
+        env:
+          DAYS: ${{ inputs.days }}
+        run: python -u scripts/seed_factor_run.py --days "$DAYS" --budget-minutes 300
+      # Both saves only run on success (default `if: success()`): if the script
+      # aborts (bad token, outage) this run's possibly-bogus skip files are dropped.
+      - name: save interim progress
+        if: steps.seed.outputs.remaining != '0'
+        uses: actions/cache/save@v4
+        with:
+          path: cache/factor_run
+          key: factor-run-seed-${{ github.run_id }}
+      - name: save final lineage
+        if: steps.seed.outputs.remaining == '0'
+        uses: actions/cache/save@v4
+        with:
+          path: cache/factor_run
+          key: update-universe-bars-state-seed-${{ github.run_id }}
+      # Chain only while this slice made progress, so a stuck run can't loop forever.
+      - name: dispatch next slice
+        if: steps.seed.outputs.remaining != '0' && steps.seed.outputs.progress != '0' && inputs.auto_continue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DAYS: ${{ inputs.days }}
+        run: gh workflow run seed_factor_run.yml --ref "${{ github.ref_name }}" -f days="$DAYS" -f auto_continue=true -f force=false
+      - name: report
+        run: |
+          echo "remaining=${{ steps.seed.outputs.remaining }} progress=${{ steps.seed.outputs.progress }}"
+          if [ "${{ steps.seed.outputs.remaining }}" != "0" ] && [ "${{ steps.seed.outputs.progress }}" = "0" ]; then
+            echo "::warning::本輪沒有任何進展且尚未完成，不再自動接力，請檢查 log"
+          fi
