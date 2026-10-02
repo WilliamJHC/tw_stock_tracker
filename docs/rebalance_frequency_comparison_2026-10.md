@@ -7,7 +7,7 @@
 - 3 個候選：月頻（每 1 個月）、雙月頻（每 2 個月）、季頻（每 3 個月）；**權重相同**，只有 `portfolio_backtest` 的 `rebalance_every_months` 不同。不試其他間隔。
 - 月份格以**日曆年**對齊：雙月 = 1/3/5/7/9/11 月，季頻 = 1/4/7/10 月，換倉日取當月第一個交易日；不隨 walk-forward 切片起點移動。
 - 資料：`train_test_split_by_calendar()` 的 train 段（2012-05-02 ~ 2026-01-13，1821 檔）；最後 6 個月（2026-03-16 起）保留為 held-out，**這次沒有碰**。4 個 purged anchored fold，與 `run_strategy_search.py` 同一套引擎；成本用引擎內建（來回 0.6% + 單邊滑價 0.1%）。
-- 權重：程式預設 `RANKING_WEIGHTS`（revenue .4 / roe .3 / momentum .3）。**雲端實際生效的 `active_ranking_weights` 尚未核實**，若不同，基準就不同。
+- 權重：程式預設 `RANKING_WEIGHTS`（revenue .4 / roe .3 / momentum .3）。雲端的 `active_ranking_weights` 於 2026-10-02 核實為「從未被寫入，用的就是這組預設」（推論而非直接讀值：該 key 只有 `optimize.yml` 採用/rollback 與 `apply_strategy_candidate.yml` 會寫；`optimize.yml` 的三次執行〔9/2、9/16、10/2〕都因雲端 `cache/factor_run` 還原失敗、載入 0 檔，在寫入前就結束；`apply_strategy_candidate.yml` 與 `apply_regime_weights_candidate.yml` 從未被執行過），所以基準成立。
 - 事先寫死的採用規則：非月頻的 X 要同時滿足 ①X 是 point_best（平均樣本外報酬最高）②X 的平均高於月頻 ③X 也是 per-fold 勝出的多數 ④`evaluate_decision()` 通過（DSR ≥ 0.95、PBO ≤ 0.5，以及 plateau 門檻：多數勝者的 fold 勝出比例 ≥ max(20%, 1/候選數)）。否則維持月頻。
 - 診斷（**不進規則**）：`--offset N` 把月份格位移 N 個月，看結果對起始月份有多敏感。
 
@@ -57,7 +57,7 @@
 ## 限制與沒做的事
 
 - 只有 4 個 fold；PBR／skip-21 那一輪的限制同樣適用（未含息收盤價、未做產業中立、生存者偏差）。
-- 基準權重未核實雲端值。
+- 順帶發現（與本結論無關，未處理）：雲端 `optimize.yml` 目前是空跑，因為 `update-universe-bars-state-*` 快取不存在、`cache/factor_run` 載入 0 檔；這代表雲端排程的權重最佳化實際上從未運作過。
 - 沒有做：held-out 區段檢查、不同權重下的對照、換倉間隔以外的執行參數（top_n 等）。
 - 沒有接進任何排程或 `apply_*` 流程。引擎新增的是 `rebalance_every_months` / `rebalance_offset_months` 兩個參數（預設 1 / 0，行為不變）與 `sweep_ranking_weights_walk_forward(candidate_params=...)`。
 
