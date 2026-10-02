@@ -296,9 +296,14 @@ def evaluate_decision(plateau, pbo_value, dsr_value, plateau_width_min_frac=PLAT
 def _pbo_and_dsr(scores_by_key, usable_folds, chosen_key, n_trials):
     """Shared overfitting-guard computation for both sweep_*_walk_forward()
     variants below: PBO across every candidate's per-fold OOS returns, and
-    the Deflated Sharpe Ratio for whichever candidate was actually chosen
-    (the plateau center for sweep_param_walk_forward(), the plateau's most-
-    common per-fold winner for sweep_ranking_weights_walk_forward()).
+    the Deflated Sharpe Ratio of `chosen_key`, which is whatever candidate
+    the CALLER passes -- the two callers do not pass the same kind of thing:
+    sweep_param_walk_forward() passes the plateau-center value (falling back
+    to the point-best value when no plateau is found), but
+    sweep_ranking_weights_walk_forward() passes `point_best_name` (highest
+    MEAN out-of-sample return), NOT the plateau's most-common per-fold
+    winner. So in the ranking-weights sweep the DSR describes the point-best
+    candidate even when a different candidate wins the plateau vote.
 
     scores_by_key: {key: [per-fold score%, ...]}, one entry per usable
     fold; a None score (candidate had no trades that fold) is treated as
@@ -711,6 +716,8 @@ def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, pur
     plateau = {"most_common": winner, "width_frac": stability}
     chance_threshold = max(PLATEAU_WIDTH_MIN_FRAC, 1 / len(names)) if names else PLATEAU_WIDTH_MIN_FRAC
 
+    # Note: the DSR is computed for point_best_name, not for plateau["most_common"]
+    # -- see _pbo_and_dsr()'s docstring.
     pbo_value, dsr_value = _pbo_and_dsr(scores_by_name, usable_folds, point_best_name, n_trials)
 
     oos_start, oos_end = folds[0]["test"][0], folds[-1]["test"][1]
