@@ -56,3 +56,19 @@
 - 新增測試通過、既有測試全過（完整 pytest）。
 - 第 5 步的前後對照表產出，並明確寫出「有／沒有任何過去結論被翻轉」。
 - 文件同步後，repo 內不再有「閘門 DSR 是 point_best 的」而未加註的說法（以 grep `point_best` 與 `DSR` 交叉核對，`docs/archive/` 排除）。
+
+## 執行記錄（2026-10-04）
+
+- 已照計畫施工並加 `dsr_of` 欄位（結果多一個 key，shape 測試同步更新）；新增 3 個測試（勝者 ≠ point_best、勝者 = point_best、勝者零變異 DSR 為 None），反向驗證：把呼叫暫時改回 point_best，第一個新測試會失敗。完整 pytest：527 passed（原 524 + 3）。
+- 歷史重跑（本機 1821 檔快取，`--dry-run`，未寫 DB、未發 Telegram；各 fold 分數、平均與 PBO 都重現文件記錄）：
+
+| 比賽 | 高原勝者 | point_best | 舊 DSR（point_best 的） | 新 DSR（勝者的） | 閘門 |
+|---|---|---|---|---|---|
+| 首次 PBR（baseline／with_pbr） | baseline | baseline | 0.91 | 0.91（同一個候選，未重跑） | 不變，未過 |
+| PBR 另一組（baseline／with_pbr／with_pbr_15） | with_pbr_15 | baseline | 0.92 | 0.86 | 不變，未過 |
+| skip-21（baseline／mom60／mom120） | mom120_skip21 | baseline | 0.76 | 0.47 | 不變，未過 |
+
+  舊 DSR 用同一批逐 fold 分數反算得 0.921／0.760，與文件記錄一致。**沒有任何過去的「不採用」結論被翻轉。**
+- 首次 PBR 那列的「新 DSR = 舊 DSR」是邏輯推論（高原勝者與 point_best 是同一個候選，所以輸入相同），不是重跑；該次是 2 候選的比賽，當時未保存逐 fold 分數。
+- 文件同步：ADR 0002 新增修訂記錄；ADR 0003 第 58 行、因子文件 §4／§5.1／§5.2／第 140 行、收尾記錄、方向清單的進度註記都加註，未改寫歷史數字。
+- 未動：`vs_buy_hold` 仍以 point_best 為對象；零變異 DSR 為 None 時不否決的行為（只用測試釘住，是否改成保守否決另案）；`optimize.yml` 第 28 行註解（日期寫錯）。

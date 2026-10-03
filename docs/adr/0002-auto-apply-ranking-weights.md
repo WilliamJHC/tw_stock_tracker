@@ -35,3 +35,7 @@ grilling 過程中列出的另一個候選。拒絕理由沿用 Phase 5 文件�
 - `src/finlab_factors.py`：不變——`composite_scores(weights=...)` 既有的 override 參數直接拿來用，模組維持「純函式、無 I/O」設計。
 - 新增 `.github/workflows/optimize.yml`：排程本身即是這個決策的執行者。workflow 失敗/超時如何處理（例如漏跑一個月）不在本 ADR 範圍，留給實作階段的一般性錯誤處理設計。
 - 這次調查/決策記錄本身不含程式碼變更，實作留給後續的 build 階段。
+
+## 修訂記錄
+
+- **2026-10-04：閘門的 DSR 對象改為高原勝者。** 權重掃描（`sweep_ranking_weights_walk_forward()`）原本對 point_best（樣本外平均報酬最高者）計算 DSR，但被採用的是高原勝者（逐 fold 勝出最多者），兩者可以不同，使「通過閘門」不保證被採用的候選自己通過 DSR。現在 DSR 改為對高原勝者計算，結果新增 `dsr_of` 欄位標明對象；DSR ≥ 0.95、PBO ≤ 0.5、高原寬度門檻的數值，以及自動套用／rollback 的決策本身不變。依據與歷史重跑影響見 `docs/plan_dsr_target_plateau_winner_2026-10.md`。

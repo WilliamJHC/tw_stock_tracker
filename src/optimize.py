@@ -297,13 +297,16 @@ def _pbo_and_dsr(scores_by_key, usable_folds, chosen_key, n_trials):
     """Shared overfitting-guard computation for both sweep_*_walk_forward()
     variants below: PBO across every candidate's per-fold OOS returns, and
     the Deflated Sharpe Ratio of `chosen_key`, which is whatever candidate
-    the CALLER passes -- the two callers do not pass the same kind of thing:
-    sweep_param_walk_forward() passes the plateau-center value (falling back
-    to the point-best value when no plateau is found), but
-    sweep_ranking_weights_walk_forward() passes `point_best_name` (highest
-    MEAN out-of-sample return), NOT the plateau's most-common per-fold
-    winner. So in the ranking-weights sweep the DSR describes the point-best
-    candidate even when a different candidate wins the plateau vote.
+    the CALLER passes. Both callers pass the candidate the plateau rule
+    selects, so the DSR describes the candidate that would actually be
+    adopted: sweep_param_walk_forward() passes the candidate value nearest
+    the plateau center (falling back to the point-best value when no
+    plateau is found), and sweep_ranking_weights_walk_forward() passes the
+    plateau's most-common per-fold winner (plateau["most_common"]) -- NOT
+    point_best (highest MEAN out-of-sample return), which can be a different
+    candidate. (Before 2026-10 the ranking-weights sweep passed point_best,
+    so its DSR could describe a candidate other than the adopted one; see
+    docs/plan_dsr_target_plateau_winner_2026-10.md.)
 
     scores_by_key: {key: [per-fold score%, ...]}, one entry per usable
     fold; a None score (candidate had no trades that fold) is treated as
@@ -630,8 +633,9 @@ def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, pur
 
     Returns None if there isn't enough calendar for even one purged fold.
     Otherwise: {"candidates", "plateau", "point_best", "fold_argmax",
-    "candidate_scores", "dsr", "pbo", "n_trials", "vs_buy_hold", "decision",
-    "trials"}. "plateau" here means "how many folds did the overall winner
+    "candidate_scores", "dsr", "dsr_of", "pbo", "n_trials", "vs_buy_hold",
+    "decision", "trials"}. "dsr_of" names the candidate "dsr" was computed
+    for (== plateau["most_common"]). "plateau" here means "how many folds did the overall winner
     actually win" (a numeric plateau range doesn't apply to named
     candidates) -- its accept/reject threshold is chance-adjusted to
     max(PLATEAU_WIDTH_MIN_FRAC, 1/len(candidates)), since e.g. a 2-candidate
@@ -716,9 +720,11 @@ def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, pur
     plateau = {"most_common": winner, "width_frac": stability}
     chance_threshold = max(PLATEAU_WIDTH_MIN_FRAC, 1 / len(names)) if names else PLATEAU_WIDTH_MIN_FRAC
 
-    # Note: the DSR is computed for point_best_name, not for plateau["most_common"]
-    # -- see _pbo_and_dsr()'s docstring.
-    pbo_value, dsr_value = _pbo_and_dsr(scores_by_name, usable_folds, point_best_name, n_trials)
+    # The DSR is computed for the plateau winner -- the same candidate
+    # run_ranking_optimize.py / run_strategy_search.py would adopt -- so the
+    # gate's three rules all describe one candidate. point_best_name can
+    # differ; it only feeds "point_best" and "vs_buy_hold" below.
+    pbo_value, dsr_value = _pbo_and_dsr(scores_by_name, usable_folds, winner, n_trials)
 
     oos_start, oos_end = folds[0]["test"][0], folds[-1]["test"][1]
     buy_hold_returns = []
@@ -736,6 +742,7 @@ def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, pur
         "fold_argmax": fold_argmax,
         "candidate_scores": mean_scores,
         "dsr": dsr_value,
+        "dsr_of": winner,
         "pbo": pbo_value,
         "n_trials": n_trials,
         "vs_buy_hold": {

@@ -12,6 +12,8 @@ data with a known-correct answer."""
 import datetime as dt
 import random
 
+import pytest
+
 import backtest as bt
 import optimize as opt
 import portfolio_backtest as pb
@@ -470,7 +472,7 @@ def test_sweep_ranking_weights_walk_forward_shape_and_trial_accounting():
     assert result is not None
     assert set(result) == {
         "candidates", "plateau", "point_best", "fold_argmax", "candidate_scores",
-        "dsr", "pbo", "n_trials", "vs_buy_hold", "decision", "trials",
+        "dsr", "dsr_of", "pbo", "n_trials", "vs_buy_hold", "decision", "trials",
     }
     usable_folds = len(result["fold_argmax"])
     assert usable_folds > 0
@@ -540,3 +542,83 @@ def test_sweep_ranking_weights_walk_forward_shares_ranks_cache_across_candidates
 
     assert two_candidate_calls > 0
     assert three_candidate_calls == two_candidate_calls
+
+
+# --- DSR target: plateau winner, not point_best -------------------------------
+# docs/plan_dsr_target_plateau_winner_2026-10.md. The accept gate's DSR must
+# describe the candidate the plateau vote picks (the one the scheduled scripts
+# adopt), even when a different candidate has the higher MEAN OOS return.
+
+_TAG_WEIGHTS = {
+    "A": {"revenue": 0.0, "roe": 0.0, "momentum": 1.0},
+    "B": {"revenue": 1.0, "roe": 0.0, "momentum": 0.0},
+}
+
+
+def _sweep_with_scripted_fold_returns(returns_pct_by_name):
+    """Run sweep_ranking_weights_walk_forward() with portfolio_backtest.
+    simulate() replaced by a fake that returns a scripted OOS return (in %)
+    per (candidate, fold): `returns_pct_by_name` = {"A": [r_fold1, ...], ...}."""
+    import unittest.mock as mock
+
+    universe = _ranking_universe(n_codes=4, days=900)
+    calendar = pb._trading_calendar(universe)
+    folds = opt.purged_calendar_walk_forward_splits(calendar, n_folds=4, purge_days=60)
+    assert len(folds) == 4
+    fold_by_test_end = {f["test"][1]: i for i, f in enumerate(folds)}
+    name_by_weights = {tuple(sorted(w.items())): n for n, w in _TAG_WEIGHTS.items()}
+
+    def fake_simulate(universe_data, params=None, ranks_cache=None):
+        name = name_by_weights[tuple(sorted(params["ranking_weights"].items()))]
+        test_end = max(b["date"] for d in universe_data.values() for b in d["bars"])
+        fold_idx = fold_by_test_end[test_end]
+        test_start = folds[fold_idx]["test"][0]
+        r = returns_pct_by_name[name][fold_idx]
+        return {"equity_curve": [{"date": test_start, "equity": 100.0},
+                                  {"date": test_end, "equity": 100.0 * (1 + r / 100)}]}
+
+    with mock.patch("optimize.pb.simulate", side_effect=fake_simulate):
+        return opt.sweep_ranking_weights_walk_forward(universe, _TAG_WEIGHTS, n_folds=4, purge_days=60)
+
+
+def _expected_dsr(returns_pct_by_name, chosen, n_trials):
+    scores = {n: list(v) for n, v in returns_pct_by_name.items()}
+    return opt._pbo_and_dsr(scores, 4, chosen, n_trials)[1]
+
+
+def test_ranking_sweep_dsr_is_computed_for_plateau_winner_not_point_best():
+    # A wins 3 of 4 folds by small margins (plateau winner); B wins one fold
+    # by a lot, which lifts its MEAN above A's (point_best).
+    scripted = {"A": [3.0, 3.0, 3.0, -10.0], "B": [1.0, 1.0, 1.0, 20.0]}
+    result = _sweep_with_scripted_fold_returns(scripted)
+    assert result["plateau"]["most_common"] == "A"
+    assert result["point_best"]["name"] == "B"
+    assert result["dsr_of"] == "A"
+    dsr_a = _expected_dsr(scripted, "A", result["n_trials"])
+    dsr_b = _expected_dsr(scripted, "B", result["n_trials"])
+    assert dsr_a is not None and dsr_b is not None and dsr_a != pytest.approx(dsr_b)
+    assert result["dsr"] == pytest.approx(dsr_a)
+    # The gate is built from the winner's DSR, not point_best's.
+    assert result["decision"] == opt.evaluate_decision(
+        result["plateau"], result["pbo"], result["dsr"],
+        plateau_width_min_frac=max(opt.PLATEAU_WIDTH_MIN_FRAC, 1 / 2),
+    )
+
+
+def test_ranking_sweep_dsr_unchanged_when_winner_is_point_best():
+    scripted = {"A": [3.0, 4.0, 2.0, -1.0], "B": [1.0, 1.0, 1.0, -3.0]}
+    result = _sweep_with_scripted_fold_returns(scripted)
+    assert result["plateau"]["most_common"] == result["point_best"]["name"] == "A"
+    assert result["dsr_of"] == "A"
+    assert result["dsr"] == pytest.approx(_expected_dsr(scripted, "A", result["n_trials"]))
+
+
+def test_ranking_sweep_dsr_is_none_when_winner_has_zero_variance():
+    # Pins current behavior (docs/plan_dsr_target_plateau_winner_2026-10.md
+    # "known boundary"): a flat winner has no Sharpe, so the DSR rule can't
+    # fire and evaluate_decision() treats None as "no evidence", not a veto.
+    scripted = {"A": [0.0, 0.0, 0.0, 0.0], "B": [-1.0, -2.0, -1.0, -2.0]}
+    result = _sweep_with_scripted_fold_returns(scripted)
+    assert result["dsr_of"] == "A"
+    assert result["dsr"] is None
+    assert not any("DSR" in reason for reason in result["decision"]["reasons"])
