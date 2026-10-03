@@ -48,7 +48,10 @@ product-judgment default):
     separate commission/tax lines.
   - Rebalance date = the trading calendar's first date in each new calendar
     month, matching finlab.backtest.sim(resample="M")'s month-boundary
-    convention.
+    convention. params["rebalance_every_months"] (default 1 = every month)
+    thins that to every k-th calendar month, anchored to the calendar year
+    (k=3 -> Jan/Apr/Jul/Oct), not to the run's first month, so a walk-forward
+    fold's start date doesn't shift which months it rebalances in.
 """
 import datetime as dt
 import math
@@ -71,6 +74,11 @@ PORTFOLIO_PARAMS = {
     # for how a caller tests a regime-conditional discount without changing
     # this global.
     "invest_pct": 100,
+    # Rebalance every k-th calendar month (1 = monthly, the pre-existing
+    # behavior); rebalance_offset_months shifts which months are used, only
+    # meant for phase-sensitivity checks -- see _rebalance_dates().
+    "rebalance_every_months": 1,
+    "rebalance_offset_months": 0,
 }
 
 # Regime-conditional overrides on top of PORTFOLIO_PARAMS, same layering
@@ -100,13 +108,22 @@ def _trading_calendar(universe_data):
     return sorted(dates)
 
 
-def _rebalance_dates(calendar):
-    """First trading-calendar date of each calendar month."""
+def _rebalance_dates(calendar, every_months=1, offset_months=0):
+    """First trading-calendar date of each calendar month, thinned to every
+    `every_months`-th calendar month. The month grid is anchored to the
+    calendar year ((year*12 + month-1 - offset_months) % every_months == 0),
+    so it doesn't depend on where the calendar slice starts. every_months=1
+    returns every month, unchanged from the original monthly behavior."""
+    if every_months < 1:
+        raise ValueError(f"every_months must be >= 1, got {every_months}")
     out, seen_months = [], set()
     for date in calendar:
         ym = date[:7]
-        if ym not in seen_months:
-            seen_months.add(ym)
+        if ym in seen_months:
+            continue
+        seen_months.add(ym)
+        month_index = int(ym[:4]) * 12 + int(ym[5:7]) - 1
+        if (month_index - offset_months) % every_months == 0:
             out.append(date)
     return out
 
@@ -205,7 +222,9 @@ def simulate(universe_data, params=None, ranks_cache=None, regime_by_date=None, 
     calendar = _trading_calendar(universe_data)
     if not calendar:
         return {"equity_curve": [], "trades": [], "summary": {}}
-    rebalance_dates = set(_rebalance_dates(calendar))
+    rebalance_dates = set(_rebalance_dates(
+        calendar, p.get("rebalance_every_months", 1), p.get("rebalance_offset_months", 0)
+    ))
 
     prices = {
         code: {b["date"]: (b["c_adj"] if b.get("c_adj") is not None else b["c"]) for b in d["bars"]}

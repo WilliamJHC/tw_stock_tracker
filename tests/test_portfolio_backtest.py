@@ -364,3 +364,52 @@ def test_compute_metrics_drawdown_hand_computed():
 
 def test_compute_metrics_too_short_returns_empty():
     assert pb._compute_metrics([{"date": "2023-01-01", "equity": 1_000_000}], 1_000_000) == {}
+
+
+def _daily_calendar(start, days):
+    d0 = dt.date.fromisoformat(start)
+    return [(d0 + dt.timedelta(days=i)).isoformat() for i in range(days)]
+
+
+def test_rebalance_dates_default_is_every_month():
+    calendar = _daily_calendar("2022-01-01", 200)
+    assert pb._rebalance_dates(calendar) == pb._rebalance_dates(calendar, 1)
+    assert pb._rebalance_dates(calendar)[:3] == ["2022-01-01", "2022-02-01", "2022-03-01"]
+
+
+def test_rebalance_dates_every_k_months_anchored_to_calendar_year():
+    calendar = _daily_calendar("2022-01-01", 400)
+    assert [d[:7] for d in pb._rebalance_dates(calendar, 3)] == ["2022-01", "2022-04", "2022-07", "2022-10", "2023-01"]
+    assert [d[:7] for d in pb._rebalance_dates(calendar, 2)][:4] == ["2022-01", "2022-03", "2022-05", "2022-07"]
+
+
+def test_rebalance_dates_grid_does_not_depend_on_where_calendar_starts():
+    # A slice starting in February still lands on Apr/Jul/Oct, not Feb/May/Aug.
+    calendar = _daily_calendar("2022-02-10", 300)
+    assert [d[:7] for d in pb._rebalance_dates(calendar, 3)] == ["2022-04", "2022-07", "2022-10"]
+
+
+def test_rebalance_dates_offset_shifts_phase():
+    calendar = _daily_calendar("2022-01-01", 200)
+    assert [d[:7] for d in pb._rebalance_dates(calendar, 3, offset_months=1)] == ["2022-02", "2022-05"]
+
+
+def test_rebalance_dates_rejects_non_positive_interval():
+    import pytest
+    with pytest.raises(ValueError):
+        pb._rebalance_dates(_daily_calendar("2022-01-01", 10), 0)
+
+
+def test_simulate_quarterly_trades_only_on_quarter_start_months():
+    universe = {"A": _entry(100, 0.1, days=300), "B": _entry(80, 0.05, days=300)}
+    result = pb.simulate(universe, params={"top_n": 2, "rebalance_every_months": 3})
+    assert result["trades"]
+    assert {t["date"][:7] for t in result["trades"]} <= {"2022-01", "2022-04", "2022-07", "2022-10"}
+
+
+def test_simulate_default_interval_matches_explicit_monthly():
+    universe = {"A": _entry(100, 0.1, days=200), "B": _entry(80, 0.05, days=200)}
+    base = pb.simulate(universe, params={"top_n": 2})
+    explicit = pb.simulate(universe, params={"top_n": 2, "rebalance_every_months": 1})
+    assert base["equity_curve"] == explicit["equity_curve"]
+    assert base["trades"] == explicit["trades"]

@@ -622,3 +622,24 @@ def test_ranking_sweep_dsr_is_none_when_winner_has_zero_variance():
     assert result["dsr_of"] == "A"
     assert result["dsr"] is None
     assert not any("DSR" in reason for reason in result["decision"]["reasons"])
+
+
+def test_sweep_ranking_weights_walk_forward_candidate_params_vary_execution_param():
+    universe = _ranking_universe()
+    weights = {"revenue": 0.4, "roe": 0.3, "momentum": 0.3}
+    candidates = {"monthly": dict(weights), "quarterly": dict(weights)}
+    result = opt.sweep_ranking_weights_walk_forward(
+        universe, candidates, n_folds=3, purge_days=60,
+        candidate_params={"quarterly": {"rebalance_every_months": 3}},
+    )
+    assert result is not None
+    scores = result["candidate_scores"]
+    assert scores["monthly"] != scores["quarterly"]
+
+    # Same weights and no override -> identical scores, and omitting
+    # candidate_params entirely behaves exactly like an empty dict.
+    plain = opt.sweep_ranking_weights_walk_forward(universe, candidates, n_folds=3, purge_days=60)
+    empty = opt.sweep_ranking_weights_walk_forward(universe, candidates, n_folds=3, purge_days=60, candidate_params={})
+    assert plain["candidate_scores"] == empty["candidate_scores"]
+    assert plain["candidate_scores"]["monthly"] == plain["candidate_scores"]["quarterly"]
+    assert plain["candidate_scores"]["monthly"] == scores["monthly"]

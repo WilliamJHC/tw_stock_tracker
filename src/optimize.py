@@ -598,7 +598,8 @@ def previous_candidate_eligible(active_weights_source, has_previous):
 
 
 def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, purge_days=60,
-                                        mode="anchored", sim_params=None, extra_factors=None):
+                                        mode="anchored", sim_params=None, extra_factors=None,
+                                        candidate_params=None):
     """Purged walk-forward comparison of NAMED finlab_factors.RANKING_WEIGHTS
     candidates -- e.g. the current fixed weights vs Phase 4's rank-IC-
     derived suggestions at a few horizons (docs/https-finlab-finance-blog-
@@ -622,6 +623,14 @@ def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, pur
     search's ma_cross/vol_price_div) through this same purged walk-forward
     machinery instead of a parallel search engine. None (the default)
     reproduces the pre-existing behavior exactly.
+
+    candidate_params: optional {name: {portfolio_backtest param: value}} --
+    per-candidate simulate() overrides layered on top of `sim_params` (e.g.
+    {"quarterly": {"rebalance_every_months": 3}}), so candidates can differ
+    in an execution parameter and not only in weights. Candidates absent
+    from the dict get `sim_params` unchanged; None reproduces the existing
+    behavior exactly. The per-fold factor_ranks() cache stays valid across
+    such overrides (it depends only on universe/date/extra_factors).
 
     Each fold reruns portfolio_backtest.simulate() from the trading
     calendar's start (mode="anchored") or the fold's own train_start
@@ -680,6 +689,7 @@ def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, pur
         fold_best_name, fold_best_score = None, float("-inf")
         for name in names:
             p = dict(sim_params or {})
+            p.update((candidate_params or {}).get(name, {}))
             p["ranking_weights"] = candidates[name]
             p["extra_factors"] = extra_factors
             result = pb.simulate(sliced, params=p, ranks_cache=ranks_cache)
