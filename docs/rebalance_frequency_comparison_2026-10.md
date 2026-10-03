@@ -25,7 +25,8 @@
 
 - point_best = 雙月頻；PBO 0.33；DSR 0.968；引擎 `decision.accept = True`。
 - per-fold 勝出：季頻、雙月頻、雙月頻、季頻（各 2 次，打平）。引擎在打平時取先出現者（季頻），所以規則的第③條不成立 → **規則判定：維持月頻**。這是一個靠第③條才擋下來的邊緣結果，不是明顯的否決；但我不事後改規則。
-- DSR 是引擎對 point_best 算的（`optimize.py` 的 `sweep_ranking_weights_walk_forward()` 呼叫 `_pbo_and_dsr(..., point_best_name, ...)`；該函式 docstring 寫成「被選中的候選」，與實際不一致，以實際程式為準），不是「想採用的那一組」自己的。這個說法同時記在 PBR 分支的 `docs/factor_candidates_momentum_ic_2026-09.md` §4（尚未合併進主線）。
+- DSR 是引擎對 point_best 算的（`optimize.py` 的 `sweep_ranking_weights_walk_forward()` 呼叫 `_pbo_and_dsr(..., point_best_name, ...)`；該函式 docstring 寫成「被選中的候選」，與實際不一致，以實際程式為準），不是「想採用的那一組」自己的。這個說法同時記在 `docs/factor_candidates_momentum_ic_2026-09.md` §4。
+- **【2026-10-04 更新】** 以上 DSR 是**改動前**的算法。此後閘門 DSR 改為對多數勝者計算（結果有 `dsr_of` 欄位，見 `docs/plan_dsr_target_plateau_winner_2026-10.md`）。用上表四捨五入後的逐 fold 分數反算：舊算法對雙月頻得 0.968（與上面一致，PBO 0.33），新算法對多數勝者（季頻）約得 0.947，略低於 0.95。因為輸入已四捨五入，這個 0.947 只是近似，要確切值得重跑 `scripts/run_rebalance_comparison.py`（**未重跑**）。**規則判定不受影響**：採用規則要求 X 同時是 point_best 與多數勝者，這個比賽兩者不同（雙月頻 vs 季頻），第①／③條不成立，仍是維持月頻。
 - 雙月頻的優勢集中在單一 fold：fold 1 月頻只有 +24.6、雙月頻 +62.5。雙月頻對月頻的平均差約 10.1 個百分點，fold 1 一個就貢獻約 9.5（+37.9 / 4）；拿掉 fold 1，雙月頻平均 88.2 對月頻 87.4（幾乎一樣）。
 - 季頻不是這個形態：拿掉 fold 1 仍領先（92.9 對 87.4），fold 0、fold 3 各領先 9.7、19.4，但 fold 2 落後 12.8，且 fold 1 同樣有 +17.9。季頻領先在 4 個 fold 中有 3 個，變動很大。
 

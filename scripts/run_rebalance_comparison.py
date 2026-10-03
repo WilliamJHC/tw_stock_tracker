@@ -17,9 +17,10 @@ results):
     is strictly above monthly's, X is also the per-fold-argmax majority
     winner, and evaluate_decision() accepts (DSR >= 0.95, PBO <= 0.5).
     Otherwise: keep monthly.
-  - Caveat printed with the result: the sweep's DSR is computed for
-    point_best, not for "the candidate you wish to adopt", and the 4 folds
-    are few; an accept/reject is evidence, not proof. Execution-parameter
+  - Caveat printed with the result: the sweep's DSR is computed for the
+    per-fold majority winner (result["dsr_of"]; before 2026-10 it was
+    point_best), which can differ from point_best, and the 4 folds are few;
+    an accept/reject is evidence, not proof. Execution-parameter
     change only -- never applied by this script (no DB writes, no Telegram).
 
 --offset N (diagnostic, NOT part of the decision rule) shifts the month grid
@@ -119,7 +120,8 @@ def main():
         and result["candidate_scores"][point_best] > mean_monthly and result["decision"]["accept"]
     )
     print(f"\nrule verdict: {'PROPOSE ' + point_best if proposes else 'KEEP monthly'}")
-    print("caveat: DSR here belongs to point_best; only 4 folds; evidence, not proof.")
+    print(f"caveat: DSR here belongs to dsr_of={result['dsr_of']} (per-fold majority winner), "
+          "which can differ from point_best; only 4 folds; evidence, not proof.")
 
 
 if __name__ == "__main__":
