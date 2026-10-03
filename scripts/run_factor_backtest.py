@@ -109,11 +109,13 @@ def code_cache_path(code):
     return os.path.join(RUN_CACHE_DIR, f"{code}.json")
 
 
-def _load_code_cache(code, days):
+def load_code_cache(code, days):
     """Returns None (cache miss) if the file is missing/corrupt OR if it was
     fetched under a different --days window -- otherwise a resumed run with
     a longer/shorter --days would silently reuse bars/fundamentals (or a
-    cached "skip" verdict) computed for the wrong history length."""
+    cached "skip" verdict) computed for the wrong history length.
+
+    Public interface: also used directly by scripts/seed_factor_run.py."""
     try:
         with open(code_cache_path(code), encoding="utf-8") as f:
             data = json.load(f)
@@ -131,7 +133,8 @@ def save_code_cache(code, data):
         json.dump(data, f)
 
 
-def _load_universe(name):
+def load_universe(name):
+    """Public interface: also used directly by scripts/seed_factor_run.py."""
     if name == "watchlist":
         with open(os.path.join(BASE_DIR, "watchlist.json"), encoding="utf-8") as f:
             rows = json.load(f)
@@ -252,7 +255,7 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
     module-level comment. A cache entry's own "fundamentals_days" key
     records which window its revenue_series/roe_series were computed at,
     independent of "days" (which still gates the bars/whole-entry window in
-    _load_code_cache()) -- so a cache hit with a stale/missing
+    load_code_cache()) -- so a cache hit with a stale/missing
     "fundamentals_days" gets its revenue_series/roe_series/margin-trend
     series backfilled in place, the same incremental pattern as the c_adj/
     per_pbr_series backfills below, without forcing a full re-fetch of bars."""
@@ -262,7 +265,7 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
     for i, code in enumerate(codes):
         market = market_by_code.get(code, "twse")
         twse_events = twse_by_code.get(code, [])
-        cached = _load_code_cache(code, days)
+        cached = load_code_cache(code, days)
         if cached is not None:
             if cached.get("skip"):
                 continue
@@ -400,7 +403,7 @@ def main():
     if args.capital <= 0:
         parser.error("--capital must be positive")
 
-    codes = _load_universe(args.universe)
+    codes = load_universe(args.universe)
     print(f"universe={args.universe} ({len(codes)} codes), days={args.days}")
     print("提醒：c_adj（動能因子排名 + 損益計算都用它）結合 TWSE 除權息表與 Yahoo 比值交叉驗證，"
           "逐檔盡力而為——任一代碼若不變量檢查未過，該檔會退回原始價（見執行過程中的 ⚠ 警告）。")

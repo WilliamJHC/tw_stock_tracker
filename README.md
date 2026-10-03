@@ -159,6 +159,17 @@ GitHub Actions（排程）
 `python scripts/run_factor_backtest.py --universe all`（見 `scripts/
 run_ranking_optimize.py` 檔頭 docstring 的 KNOWN GAP 說明）。
 
+**雲端快取的初次播種**：`cache/` 不進版控，雲端的 `update-universe-bars-state-*`
+快取血統一開始並不存在，`optimize.yml`／`strategy_search.yml`／
+`daily_recommendations.yml` 在空快取下只會空跑，每週的 `update_universe_bars_part1/2`
+則會因為「找到 0 檔」而失敗。要在雲端建立這份快取，到 Actions 手動執行
+**seed-factor-run**（`.github/workflows/seed_factor_run.yml`，腳本
+`scripts/seed_factor_run.py`）：它在 Actions 內分段全量抓取（每輪約 5 小時，
+有進展就自動接力下一輪，全部約需 4–6 輪、合計 20 小時以上），完成前的進度存在
+`factor-run-seed-*`（其他 workflow 讀不到，避免用殘缺資料自動調權重），完成後才存成
+`update-universe-bars-state-seed-*`，之後由每週更新接手。需要 Environment「Cloudflare」
+底下的 `FINMIND_TOKEN`。
+
 Secrets 沿用「手機雲端版」同一個 Environment「Cloudflare」底下的
 `TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID`（跟 `deploy-worker.yml` 用同一組），
 不需要另外設定。
