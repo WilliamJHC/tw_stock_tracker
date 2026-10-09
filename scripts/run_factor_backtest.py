@@ -10,13 +10,17 @@ Usage:
 --universe all pulls FinMind's whole 2162-name TWSE/TPEX universe. FinMind's
 free tier is 600 req/hr and can't batch-query (see get_universe()'s
 docstring on why); fetching every name's daily bars + revenue + financials
-is ~8600 requests, hours even with a two-stage fetch. Two-stage: Stage 1
-pulls daily bars only (1 req/code) and applies the liquidity filter once
-up front (a "did this name ever clear the bar in the window" proxy, not the
-per-rebalance-date exact check finlab_factors.liquidity_ok() does inside
-the backtest); only survivors get revenue+financials (3 more req/code) in
-Stage 2. A per-code JSON cache under cache/factor_run/ makes a killed run
-resumable -- rerun the same command and already-fetched codes are skipped.
+is thousands of requests, hours even with a two-stage fetch. Two-stage:
+Stage 1 pulls daily bars only (1 req/code) and applies the liquidity filter
+once up front (a "did this name ever clear the bar in the window" proxy,
+not the per-rebalance-date exact check finlab_factors.liquidity_ok() does
+inside the backtest); only survivors get revenue+financials (revenue 1 +
+financials 3 = 4 more req/code, see S2.3 below for why financials is 3 not
+2) in Stage 2, plus per_pbr/institutional (S2.2/Phase 6b, +1 each) --
+6 FinMind requests per surviving code total in Stage 2 as of S2.3 (not
+counting Phase 6a's Yahoo c_adj pull, a different provider/quota). A
+per-code JSON cache under cache/factor_run/ makes a killed run resumable --
+rerun the same command and already-fetched codes are skipped.
 
 Phase 6a (docs/https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md)
 adds one more request per surviving code: a Yahoo Adj Close pull, ratioed
@@ -37,6 +41,20 @@ finlab_factors.py's value_series()/gross_margin_trend_series()/
 operating_margin_trend_series()) for scripts/report_factor_ic.py to
 evaluate via factor_eval.evaluate_candidate_factor() -- these are NOT part
 of RANKING_WEIGHTS/composite_scores(), evaluation only.
+
+docs/institutional_and_accrual_factor_plan.md S2.2 adds one more Stage-2
+request per surviving code (get_institutional()) -- universe_data now also
+carries "institutional_flow_series" (see finlab_factors.py's
+institutional_flow_series()), same evaluation-only status as the Phase 6b
+candidates above.
+
+Same doc's S2.3 adds TotalAssets to get_financials() at zero extra cost
+(rides on the already-fetched BalanceSheet request) but also adds ONE new
+request for TaiwanStockCashFlowsStatement (operating cash flow) -- so
+get_financials() now issues 3 requests, not 2 (see the
+`limiter.before_request()` call counts below). universe_data now also
+carries "accrual_quality_series" (see finlab_factors.py's
+accrual_quality_series()), same evaluation-only status.
 """
 import argparse
 import collections
@@ -290,6 +308,35 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
                 per_pbr_rows = ds.get_per_pbr(code, days=days, cache=False)
                 cached = {**cached, "per_pbr_series": ff.value_series(per_pbr_rows or [])}
                 cache_dirty = True
+            # institutional_flow_series is another standalone 1-request
+            # backfill (S2.2, docs/institutional_and_accrual_factor_plan.md)
+            # -- same cheap-to-add-later pattern as per_pbr_series above.
+            if "institutional_flow_series" not in cached:
+                limiter.before_request()
+                inst_rows = ds.get_institutional(code, days=days, cache=False)
+                cached = {**cached, "institutional_flow_series": ff.institutional_flow_series(inst_rows or [], bars)}
+                cache_dirty = True
+            # accrual_quality_series (S2.3, docs/institutional_and_accrual_
+            # factor_plan.md) is NOT cheap to backfill like per_pbr_series/
+            # institutional_flow_series above -- it needs financials_rows,
+            # which the fundamentals-lead-in block below only re-fetches when
+            # fundamentals_days is stale, so an already-current cache entry
+            # would otherwise never get this key populated. Refetch
+            # get_financials() (3 requests) here on any cache entry missing
+            # the key -- but ONLY when the lead-in block below (fundamentals_
+            # days already current) won't ALSO refetch+recompute it: a cache
+            # entry that's both missing this key AND has a stale
+            # fundamentals_days would otherwise trigger get_financials()
+            # twice (3 requests each) in the same pass, with the second call
+            # unconditionally overwriting what the first just computed --
+            # 2026-09-25 code review finding, see git log for this line.
+            if "accrual_quality_series" not in cached and cached.get("fundamentals_days", 0) >= fundamentals_days:
+                limiter.before_request()
+                limiter.before_request()
+                limiter.before_request()  # get_financials() issues 3 requests internally (income/balance/cashflow)
+                accrual_financials_rows = ds.get_financials(code, days=cached.get("fundamentals_days", fundamentals_days), cache=False)
+                cached = {**cached, "accrual_quality_series": ff.accrual_quality_series(accrual_financials_rows or [])}
+                cache_dirty = True
             # A cache entry whose revenue_series/roe_series were computed at
             # a narrower fundamentals window (or from before this field
             # existed at all) gets re-fetched at the current
@@ -304,21 +351,34 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
                 limiter.before_request()
                 revenue_rows = ds.get_monthly_revenue(code, days=fundamentals_days, cache=False)
                 limiter.before_request()
-                limiter.before_request()  # get_financials() issues 2 requests internally
+                limiter.before_request()
+                limiter.before_request()  # get_financials() issues 3 requests internally (income/balance/cashflow)
                 financials_rows = ds.get_financials(code, days=fundamentals_days, cache=False)
                 new_revenue_series = ff.revenue_yoy_series(revenue_rows or [])
                 new_roe_series = ff.roe_series(financials_rows or [])
-                if new_revenue_series and new_roe_series:
+                # gross/operating margin trend and accrual_quality all derive
+                # ONLY from financials_rows (same source as roe_series), not
+                # from revenue_rows -- a revenue-only failure must not throw
+                # them away too (2026-09-26 code review finding: this used to
+                # be one combined `if new_revenue_series and new_roe_series`
+                # gate, so a transient revenue fetch failure discarded
+                # perfectly good financials-derived series on every run until
+                # revenue happened to succeed again).
+                if new_roe_series:
                     cached = {
                         **cached,
-                        "revenue_series": new_revenue_series,
                         "roe_series": new_roe_series,
                         "gross_margin_trend_series": ff.gross_margin_trend_series(financials_rows or []),
                         "operating_margin_trend_series": ff.operating_margin_trend_series(financials_rows or []),
-                        "fundamentals_days": fundamentals_days,
+                        "accrual_quality_series": ff.accrual_quality_series(financials_rows or []),
                     }
                     cache_dirty = True
-                else:
+                if new_revenue_series:
+                    cached = {**cached, "revenue_series": new_revenue_series}
+                    cache_dirty = True
+                if new_revenue_series and new_roe_series:
+                    cached["fundamentals_days"] = fundamentals_days
+                if not (new_revenue_series and new_roe_series):
                     print(f"  {code}: lead-in 重抓後 revenue/roe 序列仍不足，保留原快取，下次再試")
             if cache_dirty:
                 save_code_cache(code, cached)
@@ -336,6 +396,8 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
                 # docstring), so this .get() default is enough.
                 "gross_margin_trend_series": cached.get("gross_margin_trend_series", []),
                 "operating_margin_trend_series": cached.get("operating_margin_trend_series", []),
+                "institutional_flow_series": cached.get("institutional_flow_series", []),
+                "accrual_quality_series": cached.get("accrual_quality_series", []),
             }
             continue
 
@@ -359,10 +421,13 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
         limiter.before_request()
         revenue_rows = ds.get_monthly_revenue(code, days=fundamentals_days, cache=False)
         limiter.before_request()
-        limiter.before_request()  # get_financials() issues 2 requests internally
+        limiter.before_request()
+        limiter.before_request()  # get_financials() issues 3 requests internally (income/balance/cashflow)
         financials_rows = ds.get_financials(code, days=fundamentals_days, cache=False)
         limiter.before_request()
         per_pbr_rows = ds.get_per_pbr(code, days=days, cache=False)
+        limiter.before_request()
+        inst_rows = ds.get_institutional(code, days=days, cache=False)
 
         revenue_series = ff.revenue_yoy_series(revenue_rows or [])
         roe_series_ = ff.roe_series(financials_rows or [])
@@ -373,15 +438,20 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
 
         # Zero extra requests -- financials_rows was already fetched above
         # for roe_series() (docs/https-finlab-finance-blog-python-get-tai-
-        # memoized-lighthouse.md Phase 6b).
+        # memoized-lighthouse.md Phase 6b / docs/institutional_and_accrual_
+        # factor_plan.md S2.3 for accrual_quality_series).
         gross_margin_trend = ff.gross_margin_trend_series(financials_rows or [])
         operating_margin_trend = ff.operating_margin_trend_series(financials_rows or [])
+        accrual_quality = ff.accrual_quality_series(financials_rows or [])
         value_series_ = ff.value_series(per_pbr_rows or [])
+        institutional_flow = ff.institutional_flow_series(inst_rows or [], bars)
 
         save_code_cache(code, {
             "bars": bars, "revenue_series": revenue_series, "roe_series": roe_series_,
             "per_pbr_series": value_series_, "gross_margin_trend_series": gross_margin_trend,
-            "operating_margin_trend_series": operating_margin_trend, "days": days,
+            "operating_margin_trend_series": operating_margin_trend,
+            "institutional_flow_series": institutional_flow,
+            "accrual_quality_series": accrual_quality, "days": days,
             "fundamentals_days": fundamentals_days,
         })
         universe_data[code] = {
@@ -389,6 +459,8 @@ def fetch_universe_data(codes, days, limiter, market_by_code, twse_by_code):
             "revenue_series": revenue_series, "roe_series": roe_series_,
             "value_series": value_series_, "gross_margin_trend_series": gross_margin_trend,
             "operating_margin_trend_series": operating_margin_trend,
+            "institutional_flow_series": institutional_flow,
+            "accrual_quality_series": accrual_quality,
         }
     return universe_data
 

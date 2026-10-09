@@ -182,6 +182,31 @@ def test_margin_trend_series_skips_quarter_missing_numerator():
     assert ff.gross_margin_trend_series(rows) == []
 
 
+# ------------------------------------------------- accrual_quality_series --
+
+def test_accrual_quality_series_hand_computed():
+    rows = [
+        {"date": "2023-12-31", "net_income": 120.0, "total_assets": 1000.0, "operating_cash_flow": 100.0},
+    ]
+    out = ff.accrual_quality_series(rows)
+    # (120 - 100) / 1000 = 0.02
+    assert out == [{"usable_date": "2024-02-29", "accrual_ratio": 0.02}]
+
+
+def test_accrual_quality_series_skips_missing_operating_cash_flow():
+    rows = [{"date": "2023-12-31", "net_income": 120.0, "total_assets": 1000.0, "operating_cash_flow": None}]
+    assert ff.accrual_quality_series(rows) == []
+
+
+def test_accrual_quality_series_skips_non_positive_total_assets():
+    rows = [{"date": "2023-12-31", "net_income": 120.0, "total_assets": 0, "operating_cash_flow": 100.0}]
+    assert ff.accrual_quality_series(rows) == []
+
+
+def test_accrual_quality_series_empty_input_returns_empty():
+    assert ff.accrual_quality_series([]) == []
+
+
 # -------------------------------------------------------------- value_series --
 
 def test_value_series_flips_pbr_sign():
@@ -196,6 +221,42 @@ def test_value_series_flips_pbr_sign():
 def test_value_series_skips_missing_pbr():
     rows = [{"date": "2024-01-02", "per": 17.17, "pbr": None}]
     assert ff.value_series(rows) == []
+
+
+# --------------------------------------------------- institutional_flow_series --
+
+def _bars_for_inst_flow(dates, vol=1000):
+    return [{"date": d, "v": vol} for d in dates]
+
+
+def test_institutional_flow_series_usable_date_is_next_trading_day():
+    dates = ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-08", "2024-01-09"]
+    bars = _bars_for_inst_flow(dates)
+    inst_rows = [
+        {"date": d, "foreign": 100, "trust": 0, "dealer": 0} for d in dates[:5]
+    ]
+    out = ff.institutional_flow_series(inst_rows, bars)
+    # window=5 needs exactly 5 rows for the first point; that window's last
+    # date is dates[4] ("2024-01-08"), so usable_date must be the NEXT bar
+    # ("2024-01-09"), not "2024-01-08" itself -- same-day use would be
+    # look-ahead (see the function's docstring on the disclosure-timing risk).
+    assert len(out) == 1
+    assert out[0]["usable_date"] == "2024-01-09"
+    assert out[0]["inst_net_5d"] == 500 / 1000  # 5 * 100 net / 1000 avg vol
+
+
+def test_institutional_flow_series_skips_window_with_no_next_bar():
+    dates = ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-08"]
+    bars = _bars_for_inst_flow(dates)
+    inst_rows = [{"date": d, "foreign": 100, "trust": 0, "dealer": 0} for d in dates]
+    # window's last date is the most recent bar -- no next trading day yet.
+    assert ff.institutional_flow_series(inst_rows, bars) == []
+
+
+def test_institutional_flow_series_skips_short_input():
+    bars = _bars_for_inst_flow(["2024-01-02", "2024-01-03"])
+    inst_rows = [{"date": "2024-01-02", "foreign": 1, "trust": 0, "dealer": 0}]
+    assert ff.institutional_flow_series(inst_rows, bars) == []
 
 
 # ------------------------------------------------------------------ _as_of --

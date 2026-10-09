@@ -413,3 +413,51 @@ def test_simulate_default_interval_matches_explicit_monthly():
     explicit = pb.simulate(universe, params={"top_n": 2, "rebalance_every_months": 1})
     assert base["equity_curve"] == explicit["equity_curve"]
     assert base["trades"] == explicit["trades"]
+
+
+# ---------------------------------------------------- _rebalance_dates freq --
+
+def test_rebalance_dates_monthly_is_unchanged_default():
+    calendar = ["2023-01-02", "2023-01-03", "2023-02-01", "2023-02-02", "2023-03-01"]
+    assert pb._rebalance_dates(calendar) == ["2023-01-02", "2023-02-01", "2023-03-01"]
+    assert pb._rebalance_dates(calendar, freq="monthly") == pb._rebalance_dates(calendar)
+
+
+def test_rebalance_dates_weekly_groups_by_iso_week():
+    # 2023-01-02 is a Monday (ISO week 1); 2023-01-09 is the next Monday (week 2).
+    calendar = ["2023-01-02", "2023-01-03", "2023-01-06", "2023-01-09", "2023-01-10"]
+    assert pb._rebalance_dates(calendar, freq="weekly") == ["2023-01-02", "2023-01-09"]
+
+
+def test_rebalance_dates_biweekly_pairs_consecutive_iso_weeks():
+    # 2023-01-09/16/23 are ISO weeks 2/3/4 -> week//2 groups (2,3) into pair 1
+    # and 4 alone into pair 2 (grouping is by absolute week parity, not by
+    # position within this calendar -- see _rebalance_dates() docstring).
+    calendar = ["2023-01-09", "2023-01-16", "2023-01-23"]
+    assert pb._rebalance_dates(calendar, freq="biweekly") == ["2023-01-09", "2023-01-23"]
+
+
+def test_rebalance_dates_unknown_freq_raises():
+    try:
+        pb._rebalance_dates(["2023-01-02"], freq="daily")
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
+def test_simulate_accepts_rebalance_freq_param_without_error():
+    universe = {"A": _entry(100, 0.1)}
+    result = pb.simulate(universe, params={"rebalance_freq": "weekly", "top_n": 1})
+    assert result["equity_curve"]
+
+
+def test_rebalance_dates_month_interval_only_applies_to_monthly_freq():
+    # every_months/offset_months (merged from the interval work) and freq
+    # (weekly/biweekly) are different dimensions; mixing them is ambiguous.
+    import pytest
+    calendar = _daily_calendar("2023-01-02", 60)
+    with pytest.raises(ValueError):
+        pb._rebalance_dates(calendar, 3, freq="weekly")
+    with pytest.raises(ValueError):
+        pb._rebalance_dates(calendar, offset_months=1, freq="biweekly")
+    assert pb._rebalance_dates(calendar, 1, freq="weekly") == pb._rebalance_dates(calendar, freq="weekly")

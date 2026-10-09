@@ -67,6 +67,7 @@ PORTFOLIO_PARAMS = {
     "slippage_pct": 0.1,  # one-way, see module docstring
     "ranking_weights": None,  # optional RANKING_WEIGHTS override, see finlab_factors.composite_scores()
     "extra_factors": None,  # optional {name: fn(bars, idx)} override, see finlab_factors.composite_scores()
+    "rebalance_freq": "monthly",  # "monthly"/"weekly"/"biweekly", see _rebalance_dates() -- docs/factor_timeframe_optimization_directions.md S3.3 candidate, unevaluated, default preserves the original monthly-only behavior
     # % of current portfolio value actually deployed at each rebalance; the
     # rest sits idle as `cash` until the next rebalance re-evaluates it. 100
     # (invest everything, the pre-existing behavior) everywhere by default --
@@ -108,23 +109,55 @@ def _trading_calendar(universe_data):
     return sorted(dates)
 
 
-def _rebalance_dates(calendar, every_months=1, offset_months=0):
-    """First trading-calendar date of each calendar month, thinned to every
-    `every_months`-th calendar month. The month grid is anchored to the
-    calendar year ((year*12 + month-1 - offset_months) % every_months == 0),
-    so it doesn't depend on where the calendar slice starts. every_months=1
-    returns every month, unchanged from the original monthly behavior."""
+def _rebalance_dates(calendar, every_months=1, offset_months=0, freq="monthly"):
+    """First trading-calendar date of each rebalance period.
+
+    freq="monthly" (default, original behavior): first date of each calendar
+    month, thinned to every `every_months`-th calendar month. The month grid
+    is anchored to the calendar year ((year*12 + month-1 - offset_months) %
+    every_months == 0), so it doesn't depend on where the calendar slice
+    starts. every_months=1 returns every month. offset_months shifts which
+    months are used (phase-sensitivity checks only).
+
+    freq="weekly": ISO calendar week (year, week). freq="biweekly": every
+    other ISO calendar week, grouped by (year, week // 2) -- a deterministic
+    function of the calendar, not a rolling N-trading-day counter, so it
+    lines up with the same "period boundary" idea monthly already uses
+    rather than being sensitive to holidays shifting a fixed-count window.
+    every_months/offset_months only apply to freq="monthly".
+
+    See docs/factor_timeframe_optimization_directions.md S3.3 -- non-default
+    values are unevaluated candidate dimensions, not default changes;
+    PORTFOLIO_PARAMS keeps "monthly" every 1 month until a walk-forward
+    report justifies otherwise."""
     if every_months < 1:
         raise ValueError(f"every_months must be >= 1, got {every_months}")
-    out, seen_months = [], set()
+    if freq == "monthly":
+        key_fn = None
+    elif freq == "weekly":
+        key_fn = lambda d: dt.date.fromisoformat(d).isocalendar()[:2]
+    elif freq == "biweekly":
+        def key_fn(d):
+            iso_year, iso_week, _ = dt.date.fromisoformat(d).isocalendar()
+            return (iso_year, iso_week // 2)
+    else:
+        raise ValueError(f"_rebalance_dates: unknown freq {freq!r}")
+    if freq != "monthly" and (every_months != 1 or offset_months != 0):
+        raise ValueError(f"every_months/offset_months only apply to freq='monthly', got freq={freq!r}")
+    out, seen = [], set()
     for date in calendar:
-        ym = date[:7]
-        if ym in seen_months:
+        if key_fn is None:
+            key = date[:7]
+        else:
+            key = key_fn(date)
+        if key in seen:
             continue
-        seen_months.add(ym)
-        month_index = int(ym[:4]) * 12 + int(ym[5:7]) - 1
-        if (month_index - offset_months) % every_months == 0:
-            out.append(date)
+        seen.add(key)
+        if key_fn is None:
+            month_index = int(key[:4]) * 12 + int(key[5:7]) - 1
+            if (month_index - offset_months) % every_months != 0:
+                continue
+        out.append(date)
     return out
 
 
@@ -223,7 +256,8 @@ def simulate(universe_data, params=None, ranks_cache=None, regime_by_date=None, 
     if not calendar:
         return {"equity_curve": [], "trades": [], "summary": {}}
     rebalance_dates = set(_rebalance_dates(
-        calendar, p.get("rebalance_every_months", 1), p.get("rebalance_offset_months", 0)
+        calendar, p.get("rebalance_every_months", 1), p.get("rebalance_offset_months", 0),
+        freq=p.get("rebalance_freq", "monthly"),
     ))
 
     prices = {

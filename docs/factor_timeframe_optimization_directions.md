@@ -2,7 +2,7 @@
 
 2026-09-22。這是一份**研究方向清單**，不是決策記錄——沒有任何一項在本文件裡被「採用」，每一項的落地都必須先過專案既有的驗證關卡（見第 4 節）。
 
-> **2026-09-29 進度**：§2.1（Phase 6b 三個候選因子）與 §3.1（動能 formation window）兩個「立即」項目已執行，結果與後續 PBR 的 walk-forward 見 `docs/factor_candidates_momentum_ic_2026-09.md`：毛利率／營益率趨勢排除；PBR 單因子 IC 顯著但 ADR 0003 walk-forward 組合層輸給基準、閘門未過（DSR 0.91 < 0.95，此為 point_best 即 baseline 的 DSR，非 PBR 候選自己的），不採用；skip-21 動能在完整樣本增益小，walk-forward 也未過（閘門 DSR 0.76，同樣是 baseline 的；2026-10-04 起閘門改對高原勝者計算，PBR 第二組權重與 skip-21 重跑後的勝者 DSR 分別為 0.86、0.47，結論不變，見因子文件 §5）；§2.2 法人買賣超已用完整 1821 檔做單因子 IC：h=20 為三個區間符號一致的小幅負值（後段不顯著）、h=60 為邊緣正值（詳見同一份結果文件 §6），單因子證據不足，未進 walk-forward。§2.3 以後尚未開始。以下正文保留 2026-09-22 撰寫時的原貌，未回頭改寫。目的是回答「除了現有 revenue/roe/momentum 三因子、單一月頻 rebalance 之外，還有哪些站得住腳的方向可以研究」，依據是通讀 `CONTEXT.md`、`README.md`、`docs/adr/*`、`docs/regime_strategy_research.md`、`docs/regime_switch_vs_0050.md`、`docs/https-finlab-...-lighthouse.md`，以及 `finlab_factors.py`/`factor_eval.py`/`market_regime.py`/`optimize.py`/`backtest.py`/`portfolio_backtest.py`/`breakout_strategy.py`/`pipeline.py`/`data_sources.py`/`analysis.py` 的實際程式碼後的結果。
+> **2026-09-29 進度**：§2.1（Phase 6b 三個候選因子）與 §3.1（動能 formation window）兩個「立即」項目已執行，結果與後續 PBR 的 walk-forward 見 `docs/factor_candidates_momentum_ic_2026-09.md`：毛利率／營益率趨勢排除；PBR 單因子 IC 顯著但 ADR 0003 walk-forward 組合層輸給基準、閘門未過（DSR 0.91 < 0.95，此為 point_best 即 baseline 的 DSR，非 PBR 候選自己的），不採用；skip-21 動能在完整樣本增益小，walk-forward 也未過（閘門 DSR 0.76，同樣是 baseline 的；2026-10-04 起閘門改對高原勝者計算，PBR 第二組權重與 skip-21 重跑後的勝者 DSR 分別為 0.86、0.47，結論不變，見因子文件 §5）；§2.2 法人買賣超已用完整 1821 檔做單因子 IC：h=20 為三個區間符號一致的小幅負值（後段不顯著）、h=60 為邊緣正值（詳見同一份結果文件 §6），單因子證據不足，未進 walk-forward。**2026-10-09 補記**：另一條研究線（9/22–9/26，同日併入）已把 §2.2 另一版定義（`inst_net_5d`）、§2.3、§2.4、§3.2、§3.3 都執行過，各項結論見 §4 的標註；兩條線的結論互相一致，沒有任何一項被採用。以下正文保留 2026-09-22 撰寫時的原貌，未回頭改寫。目的是回答「除了現有 revenue/roe/momentum 三因子、單一月頻 rebalance 之外，還有哪些站得住腳的方向可以研究」，依據是通讀 `CONTEXT.md`、`README.md`、`docs/adr/*`、`docs/regime_strategy_research.md`、`docs/regime_switch_vs_0050.md`、`docs/https-finlab-...-lighthouse.md`，以及 `finlab_factors.py`/`factor_eval.py`/`market_regime.py`/`optimize.py`/`backtest.py`/`portfolio_backtest.py`/`breakout_strategy.py`/`pipeline.py`/`data_sources.py`/`analysis.py` 的實際程式碼後的結果。
 
 ## 核心結論（先講重點）
 
@@ -102,21 +102,21 @@ Sloan 原始的 balance-sheet 法：`accruals = (ΔCurrentAssets − ΔCash) −
 
 這個專案已經有完整的三層驗證紀律：**IC/ICIR 顯著性檢定 → purged walk-forward + DSR/PBO/高原寬度門檻 → 依風險分兩軌治理**（ADR 0002 既有已驗證因子權重調整走自動套用+rollback；ADR 0003 全新邏輯走人工審核）。本文件所有建議都必須走這條路，不建議為了求快繞過。建議順序：
 
-**立即（零成本，數小時）**（兩項皆已於 2026-09-29 完成，見 `docs/factor_candidates_momentum_ic_2026-09.md`）
-1. §2.1：把 `gross_margin_trend`/`operating_margin_trend`/`value(PBR)` 三個已寫好的候選跑一次 `evaluate_candidate_factor` 報告。
-2. §3.1：動能 formation window（20/60/120-skip-21 日）對照實驗，用 `evaluate_factors()` 現成框架。
+**立即（零成本，數小時）**
+1. ~~§2.1：把 `gross_margin_trend`/`operating_margin_trend`/`value(PBR)` 三個已寫好的候選跑一次 `evaluate_candidate_factor` 報告。~~ 已完成，見 `docs/factor_ic_candidate_and_momentum_window_report.md`——value/pbr pooled 顯著但正式 walk-forward 的 DSR 未過門檻，不採用（PBR 後續兩組權重的 walk-forward 與閘門數字見 `docs/factor_candidates_momentum_ic_2026-09.md` §4、§5.1）。
+2. ~~§3.1：動能 formation window（20/60/120-skip-21 日）對照實驗，用 `evaluate_factors()` 現成框架。~~ 已完成，見同一份報告——120d-skip-21 三盤勢分桶後結論保守，不建議換 `MOMENTUM_DAYS`（skip-21 的 walk-forward 見 `docs/factor_candidates_momentum_ic_2026-09.md` §5.2，同樣不採用）。
 
 **短期（資料已在手或只差既有 dataset 的欄位，數天工程量級）**
-3. §2.2：法人買賣超持續性因子，`evaluate_candidate_factor` 驗證。
-4. §2.3：應計盈餘品質因子——先花半天查 FinMind `TaiwanStockBalanceSheet` 的 type 覆蓋率，可行再動工。
+3. ~~§2.2：法人買賣超持續性因子，`evaluate_candidate_factor` 驗證。~~ 已完成，見 `docs/institutional_and_accrual_factor_plan.md`——`inst_net_5d` 各 horizon 皆不顯著，不採用（另一版定義〔外資＋投信、20 日比率〕的完整 1821 檔單因子 IC 見 `docs/factor_candidates_momentum_ic_2026-09.md` §6，同樣證據不足）。
+4. ~~§2.3：應計盈餘品質因子——先花半天查 FinMind `TaiwanStockBalanceSheet` 的 type 覆蓋率，可行再動工。~~ 已完成，見 `docs/factor_ic_candidate_and_momentum_window_report.md` §2.3——pooled IC 是目前所有候選裡最強的一個，但正式 walk-forward 的 DSR 差 0.0023 沒過門檻，暫不採用，標記為資料累積後優先重跑對象。
 
 **中期（需要新整合，約一週工程量級）**
-5. §3.2：多因子排名 top-N ＋ `breakout_strategy.py` 進場濾網的分層回測。
-6. §3.3：rebalance 頻率（週/雙週/月）對照實驗。
+5. ~~§3.2：多因子排名 top-N ＋ `breakout_strategy.py` 進場濾網的分層回測。~~ 已完成，見 `docs/breakout_entry_layer_report.md`——明確不建議採用，DSR=0.39 遠低於門檻（非邊緣案例），等訊號確認導致大量候選永遠不成交、資金閒置，OOS 平均報酬只有現況的約 1/4。
+6. ~~§3.3：rebalance 頻率（週/雙週/月）對照實驗。~~ 已完成，見 `docs/rebalance_frequency_report.md`——月頻（現況）4 折平均報酬最高，但 DSR 差 0.0041 沒過門檻，維持月頻，不提案變更（月／雙月／季頻的對照另見 `docs/rebalance_frequency_comparison_2026-10.md`，同樣維持月頻）。
 
 **長期／先做可行性調查**
-7. §2.4：董監質押比率治理風險因子——先查資料來源可行性，未必值得投入。
-8. §2.5：低波動因子、sector-neutral 排名——放進候選池，暫不排工程排期。
+7. ~~§2.4：董監質押比率治理風險因子——先查資料來源可行性，未必值得投入。~~ 可行性查證已完成，見 `docs/pledge_ratio_feasibility.md`——FinMind 沒有這個 dataset，證交所開放資料只有當月快照、無歷史回溯，能回測的歷史資料只能靠付費源（TEJ/CMoney），現階段不建議投入工程時間。
+8. §2.5：低波動因子、sector-neutral 排名——放進候選池，暫不排工程排期。尚未執行（文件本身建議暫不做）。
 
 每一項通過 IC 顯著性檢定後，視風險等級走 ADR 0002 或 ADR 0003 的既有審核路徑，套用門檻（DSR ≥ 0.95、PBO ≤ 0.5、高原寬度 ≥ 搜尋範圍 20%）維持不變，不為了讓新因子過關而放寬。
 

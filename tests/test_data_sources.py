@@ -294,33 +294,61 @@ def test_get_financials_joins_income_and_equity_by_date():
         {"date": "2023-06-30", "type": "Equity", "value": 1100.0},
     ]
     with patch("data_sources.requests.get", side_effect=[
-        _fake_response(data=income_rows), _fake_response(data=equity_rows),
+        _fake_response(data=income_rows), _fake_response(data=equity_rows), _fake_response(data=[]),
     ]):
         result = ds.get_financials("2330")
     assert result == [
-        {"date": "2023-03-31", "net_income": 100.0, "equity": 1000.0,
-         "revenue": None, "gross_profit": None, "operating_income": None},
-        {"date": "2023-06-30", "net_income": 120.0, "equity": 1100.0,
-         "revenue": None, "gross_profit": 999.0, "operating_income": None},
+        {"date": "2023-03-31", "net_income": 100.0, "equity": 1000.0, "total_assets": None,
+         "operating_cash_flow": None, "revenue": None, "gross_profit": None, "operating_income": None},
+        {"date": "2023-06-30", "net_income": 120.0, "equity": 1100.0, "total_assets": None,
+         "operating_cash_flow": None, "revenue": None, "gross_profit": 999.0, "operating_income": None},
     ]
 
 
-def test_get_financials_margin_fields_ride_along_zero_extra_requests():
+def test_get_financials_total_assets_rides_along_cashflow_is_one_extra_request():
     income_rows = [
         {"date": "2023-03-31", "type": "IncomeAfterTaxes", "value": 100.0},
         {"date": "2023-03-31", "type": "Revenue", "value": 500.0},
         {"date": "2023-03-31", "type": "GrossProfit", "value": 200.0},
         {"date": "2023-03-31", "type": "OperatingIncome", "value": 150.0},
     ]
+    equity_rows = [
+        {"date": "2023-03-31", "type": "Equity", "value": 1000.0},
+        {"date": "2023-03-31", "type": "TotalAssets", "value": 5000.0},
+    ]
+    cashflow_rows = [{"date": "2023-03-31", "type": "NetCashInflowFromOperatingActivities", "value": 80.0}]
+    with patch("data_sources.requests.get", side_effect=[
+        _fake_response(data=income_rows), _fake_response(data=equity_rows), _fake_response(data=cashflow_rows),
+    ]) as mock_get:
+        result = ds.get_financials("2330")
+    # total_assets rides along on the equity request; only operating_cash_flow
+    # (docs/institutional_and_accrual_factor_plan.md S2.3) is a genuinely new
+    # 3rd request beyond the original 2 this function used to make.
+    assert mock_get.call_count == 3
+    assert result == [{
+        "date": "2023-03-31", "net_income": 100.0, "equity": 1000.0, "total_assets": 5000.0,
+        "operating_cash_flow": 80.0, "revenue": 500.0, "gross_profit": 200.0, "operating_income": 150.0,
+    }]
+
+
+def test_get_financials_cashflow_failure_degrades_gracefully():
+    """2026-09-26 code review finding: a CashFlowsStatement-only failure
+    used to null out the WHOLE result (income/equity too) because all 3
+    requests shared one try/except. Now it must only drop
+    operating_cash_flow, keeping net_income/equity/revenue intact."""
+    income_rows = [
+        {"date": "2023-03-31", "type": "IncomeAfterTaxes", "value": 100.0},
+        {"date": "2023-03-31", "type": "Revenue", "value": 500.0},
+    ]
     equity_rows = [{"date": "2023-03-31", "type": "Equity", "value": 1000.0}]
     with patch("data_sources.requests.get", side_effect=[
         _fake_response(data=income_rows), _fake_response(data=equity_rows),
-    ]) as mock_get:
+        _fake_response(status=402, body_status=402, msg="quota exceeded"),
+    ]):
         result = ds.get_financials("2330")
-    assert mock_get.call_count == 2  # same 2 requests as before this extension
     assert result == [{
-        "date": "2023-03-31", "net_income": 100.0, "equity": 1000.0,
-        "revenue": 500.0, "gross_profit": 200.0, "operating_income": 150.0,
+        "date": "2023-03-31", "net_income": 100.0, "equity": 1000.0, "total_assets": None,
+        "operating_cash_flow": None, "revenue": 500.0, "gross_profit": None, "operating_income": None,
     }]
 
 
@@ -328,7 +356,7 @@ def test_get_financials_drops_dates_missing_either_side():
     income_rows = [{"date": "2023-03-31", "type": "IncomeAfterTaxes", "value": 100.0}]
     equity_rows = []  # no equity at all -> no usable date
     with patch("data_sources.requests.get", side_effect=[
-        _fake_response(data=income_rows), _fake_response(data=equity_rows),
+        _fake_response(data=income_rows), _fake_response(data=equity_rows), _fake_response(data=[]),
     ]):
         result = ds.get_financials("2330")
     assert result is None

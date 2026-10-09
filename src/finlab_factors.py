@@ -232,6 +232,47 @@ def operating_margin_trend_series(financials_rows):
     return _margin_trend_series(financials_rows, "operating_income")
 
 
+def accrual_quality_series(financials_rows):
+    """get_financials()'s extended [{date, net_income, total_assets,
+    operating_cash_flow, ...}] (ascending, quarterly) -> [{usable_date,
+    accrual_ratio}]. accrual_ratio = (net_income - operating_cash_flow) /
+    total_assets -- simplified Sloan (1996) accrual: a company whose
+    reported earnings run well above its actual operating cash flow has a
+    larger non-cash ("accrual") component, which the accrual-anomaly
+    literature finds predicts WORSE future returns (accruals partly reverse/
+    earnings quality is lower), so this factor's raw sign is "higher
+    accrual_ratio = worse", the opposite of every other factor in this
+    module's "bigger number ranks higher" convention -- deliberately NOT
+    flipped here (unlike value_series()'s -pbr) because this is still an
+    unevaluated candidate (docs/institutional_and_accrual_factor_plan.md
+    §2.3): the sign should be decided from the measured IC's sign, not
+    guessed in advance the way value_series() could be (value/PBS's sign is
+    settled finance theory; the accrual anomaly's sign in THIS market/
+    universe is exactly what evaluate_candidate_factor() is for).
+
+    Denominator uses the SAME quarter's total_assets (simplified, not the
+    average of period-start/period-end total_assets some accrual papers
+    use -- see plan doc's §2.3 "因子定義" on this being an intentional
+    simplification to evaluate first, refine only if IC is significant).
+    usable_date = quarter-end + FINANCIALS_LAG_DAYS, same disclosure-lag
+    convention as roe_series()/_margin_trend_series() -- all three ride the
+    same get_financials() quarterly rows. Skips a quarter missing
+    total_assets, operating_cash_flow (both None on FinMind's response
+    before docs/institutional_and_accrual_factor_plan.md §2.3, or on a row
+    where that specific type happened to be absent -- see get_financials()'s
+    docstring) or with non-positive total_assets."""
+    out = []
+    for r in financials_rows or []:
+        total_assets, ocf = r.get("total_assets"), r.get("operating_cash_flow")
+        if not total_assets or total_assets <= 0 or ocf is None:
+            continue
+        out.append({
+            "usable_date": _shift_date(r["date"], FINANCIALS_LAG_DAYS),
+            "accrual_ratio": (r["net_income"] - ocf) / total_assets,
+        })
+    return out
+
+
 def value_series(per_pbr_rows):
     """data_sources.get_per_pbr()'s [{date, per, pbr}] (ascending) ->
     [{usable_date, value_score}]. value_score = -pbr so this factor's sign
@@ -287,6 +328,49 @@ def institutional_net_ratio_series(net_by_date, bars, window=20):
             vol_sum -= vols[i - window]
         if i + 1 >= window and vol_sum > 0:
             out.append({"usable_date": bars[i + 1]["date"], "net_ratio": net_sum / vol_sum})
+    return out
+
+
+INSTITUTIONAL_FLOW_WINDOW = 5
+
+
+def institutional_flow_series(inst_rows, bars, window=INSTITUTIONAL_FLOW_WINDOW):
+    """data_sources.get_institutional()'s [{date, foreign, trust, dealer}]
+    (ascending, net shares) + this code's own bars -> [{usable_date,
+    inst_net_5d}]. inst_net_5d = trailing `window`-day net institutional
+    buy/sell (foreign+trust+dealer summed) / trailing `window`-day average
+    volume (shares) -- normalizing by volume so large- and small-cap codes'
+    raw buy/sell magnitudes don't dominate the percentile rank, same idea as
+    liquidity_ok()'s turnover window.
+
+    usable_date = the next trading day AFTER the window's last flow date,
+    not that date itself: TaiwanStockInstitutionalInvestorsBuySell is a
+    same-day-close disclosure with an unconfirmed exact publish time (see
+    docs/institutional_and_accrual_factor_plan.md §2.2's flagged open risk),
+    so treating `date` as already-usable the way value_series() does for
+    FinMind's intraday-updated PER series would risk look-ahead here.
+
+    Skips a window where any date is missing from `bars` (a trading
+    suspension on the institutional side without a matching bar, or the
+    window's last date being the most recent bar with no next trading day
+    yet) or has zero volume. Candidate factor, same evaluate-before-adopt
+    status as value_series()/gross_margin_trend_series() above."""
+    if not inst_rows or len(inst_rows) < window:
+        return []
+    bar_dates = [b["date"] for b in bars]
+    vol_by_date = {b["date"]: b["v"] for b in bars}
+    out = []
+    for i in range(window - 1, len(inst_rows)):
+        chunk = inst_rows[i - window + 1:i + 1]
+        vols = [vol_by_date.get(r["date"]) or 0 for r in chunk]
+        if any(v <= 0 for v in vols):
+            continue
+        net_sum = sum((r.get("foreign") or 0) + (r.get("trust") or 0) + (r.get("dealer") or 0) for r in chunk)
+        avg_vol = sum(vols) / window
+        idx = _bar_index_on_or_before(bar_dates, chunk[-1]["date"])
+        if idx is None or idx + 1 >= len(bar_dates):
+            continue
+        out.append({"usable_date": bar_dates[idx + 1], "inst_net_5d": net_sum / avg_vol})
     return out
 
 
