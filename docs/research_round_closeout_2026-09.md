@@ -31,13 +31,17 @@
 ## 未結事項
 
 1. **雲端 `active_ranking_weights`：已核實（2026-10-02，推論，非直接讀值）為程式預設 0.4/0.3/0.3，從未被寫過。** 依據：該 key 只有 `optimize.yml` 的採用／rollback 與 `apply_strategy_candidate.yml` 會寫；`optimize.yml` 三次執行（9/2、9/16、10/2）都因雲端 `cache/factor_run` 還原失敗、載入 0 檔而在寫入前結束，兩個 `apply_*` workflow 從未執行過。所以 walk-forward 的 baseline 成立。
-   - 順帶發現：雲端 `update-universe-bars-state-*` 快取血統從未被建立，`optimize`／`strategy_search`／`daily_recommendations` 都在空快取下空跑，`update_universe_bars_part1/2` 失敗。補救是 `worktree-seed-factor-run` 分支的 `seed_factor_run.yml`（尚未 push、尚未在雲端執行）。播種完成後，雙週 `optimize.yml` 第一次真的跑起來時可能自動套用新權重。
-2. **分支 `worktree-pbr-factor-adr0003`（未 push）要不要併回主線。** 該分支比本地 `main` 多 8 個 commit（`main` 已含 PBR 接入的前三個 commit），乾跑合併無衝突、可快轉。`EXTRA_FACTOR_FUNCS` 註冊 PBR／skip-21 不會讓已否決的候選進入排程搜尋：`used_extra_factors()` 只收權重有引用到的 extra factor，排程的候選池（`build_candidates()`）是固定的，`strategy_search.yml` 也沒帶 `--pbr`／`--skip21`（那兩個只是手動模式）。是否併入由你決定；本地 `main` 本身也領先 `origin/main` 3 個 commit，同樣尚未 push。
+   - 順帶發現：雲端 `update-universe-bars-state-*` 快取血統從未被建立，`optimize`／`strategy_search`／`daily_recommendations` 都在空快取下空跑，`update_universe_bars_part1/2` 失敗。補救是 `seed_factor_run.yml`（已併入主線並於 2026-10-09 前由使用者 push 到 origin；是否已在雲端執行以 Actions 為準，這份文件寫成時尚未驗證）。注意：2026-10-09 併入另一條研究線後，`fetch_universe_data()` 每檔多抓法人買賣超與現金流量表，每檔存活代碼約 9 個請求，播種總時間約 25–30 小時（估計）。播種完成後，雙週 `optimize.yml` 第一次真的跑起來時可能自動套用新權重。
+2. **【已完成：2026-10-04 併入主線，分支已刪】分支 `worktree-pbr-factor-adr0003`（當時未 push）要不要併回主線。** 該分支比本地 `main` 多 8 個 commit（`main` 已含 PBR 接入的前三個 commit），乾跑合併無衝突、可快轉。`EXTRA_FACTOR_FUNCS` 註冊 PBR／skip-21 不會讓已否決的候選進入排程搜尋：`used_extra_factors()` 只收權重有引用到的 extra factor，排程的候選池（`build_candidates()`）是固定的，`strategy_search.yml` 也沒帶 `--pbr`／`--skip21`（那兩個只是手動模式）。是否併入由你決定；本地 `main` 本身也領先 `origin/main` 3 個 commit，同樣尚未 push。
 3. **PBR 資料過期問題（29 檔超過 30 天）**：因 PBR 不採用，暫不需處理；日後重啟 PBR 才要定義。
-4. **文件同步**：本地 `main` 上的 `docs/factor_candidates_momentum_ic_2026-09.md`（888f3e2 版）沒有 §5（後續兩輪 walk-forward）與 §6（法人買賣超），且寫著 skip-21「尚未進 walk-forward」；分支版已補上，合併後以分支版為準。
+4. **【已完成】文件同步**：本地 `main` 上的 `docs/factor_candidates_momentum_ic_2026-09.md`（888f3e2 版）沒有 §5（後續兩輪 walk-forward）與 §6（法人買賣超），且寫著 skip-21「尚未進 walk-forward」；分支版已補上，合併後以分支版為準。
 
 ## 尚未開始的方向（沒有被否決，只是這一輪沒做）
 
-- 月頻選股 + `breakout_strategy` 進場濾網（方向清單 §3.2）。
-- ~~rebalance 頻率對照（§3.3）~~ 已在另一個分支 `worktree-rebalance-freq` 做完（未 push、未併）：依事先寫死的規則維持月頻，詳見該分支的 `docs/rebalance_frequency_comparison_2026-10.md`。
-- 應計品質（accrual）因子；董監事質押比（FinMind 查不到對應 dataset，可行性待確認）。
+> **2026-10-09 更正**：下面這份清單寫成時，我不知道另一條研究線（9/22–9/26，原本只存在本地分支 `worktree-serene-puzzling-otter`，同日併入主線）已經做過其中大部分。以下是對照後的實際狀態，全部沒有被採用。
+
+- ~~月頻選股 + `breakout_strategy` 進場濾網（方向清單 §3.2）~~ 已做完，見 `docs/breakout_entry_layer_report.md`：DSR 0.39 遠低於門檻，明確不採用。
+- ~~rebalance 頻率對照（§3.3）~~ 已做兩組，都維持月頻：月／雙月／季頻見 `docs/rebalance_frequency_comparison_2026-10.md`；月／雙週／週頻見 `docs/rebalance_frequency_report.md`（含 2026-10-09 的 DSR 對象補註）。`portfolio_backtest._rebalance_dates()` 現在同時支援兩種維度。
+- ~~應計品質（accrual）因子~~ 已做完，見 `docs/factor_ic_candidate_and_momentum_window_report.md` §2.3：pooled IC 是各候選裡最強的（h=60 t=-4.78），但 walk-forward DSR 0.9477 差一點沒過門檻（該腳本本來就對高原勝者算 DSR，不受 2026-10-04 的閘門變更影響），暫不採用，標記為歷史累積後優先重跑的對象。
+- ~~董監事質押比~~ 可行性已查：FinMind 沒有對應 dataset，證交所只有當月快照，見 `docs/pledge_ratio_feasibility.md`，現階段不投入。
+- 仍未做：低波動因子、sector-neutral 排名（方向清單 §2.5，文件本身建議暫不做）。
