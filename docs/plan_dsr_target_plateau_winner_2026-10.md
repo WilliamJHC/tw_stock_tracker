@@ -19,7 +19,7 @@
 ## 要做什麼（開工後的步驟）
 
 1. **改一行**：`sweep_ranking_weights_walk_forward()` 的 `_pbo_and_dsr(..., point_best_name, ...)` 改傳 `winner`（`plateau["most_common"]`，第 714 行已算好、此時必不為 None，因為 `usable_folds > 0` 時 `argmax_counts` 非空）。`sweep_param_walk_forward()` 傳的是離高原中心最近的候選值（無高原時退回 point_best 值），不動。另一個邊界：`evaluate_decision()` 對 `dsr_value is None` 不否決，而 `metrics.sharpe_ratio` 在零變異時回 None；若高原勝者各 fold 報酬恆為 0，改傳 winner 後 DSR 會是 None 並靜默放行。步驟 4 加一個測試釘住這個行為（先確認現況，再與你決定要不要改成保守否決，不順手改）。
-2. **`vs_buy_hold` 不動**：它的 `chosen_name` 仍是 point_best，是「平均報酬最高者對買進持有」的獨立指標，不屬於閘門；是否一併改成另案。
+2. （2026-10-09 更新：`vs_buy_hold` 已另案改為以高原勝者為對象，見 `docs/plan_adopt_requires_beating_active_2026-10.md`；以下為 10-04 當時的決定。）**`vs_buy_hold` 不動**：它的 `chosen_name` 仍是 point_best，是「平均報酬最高者對買進持有」的獨立指標，不屬於閘門；是否一併改成另案。
 3. **更新兩處文字**：`_pbo_and_dsr()` docstring 與第 719 行註解（現在寫「DSR 描述 point_best」，改成兩個呼叫端一致）。
 4. **測試**（`tests/test_optimize.py`；現有 `mock.patch("optimize.pb.simulate", side_effect=spy)` 的手法可沿用，但要製造情境比直接沿用複雜：假的 `simulate` 必須回傳 `{"equity_curve": [{"date", "equity"}, ...]}`，且在各 fold 的 test 區間內至少有 2 個點，所以得先用 `opt.purged_calendar_walk_forward_splits` 算出 fold 邊界，或依呼叫順序（每個 fold 依候選順序）腳本化）：
    - 新增：造出「point_best ≠ 高原勝者」（一個候選贏 3 fold 但每次小贏、另一個贏 1 fold 但大贏拉高平均；2 個候選時 chance_threshold 為 0.5，3/4 足夠），斷言 `result["dsr"]` 等於對高原勝者單獨呼叫 `_pbo_and_dsr` 的值、且不等於對 point_best 的值。

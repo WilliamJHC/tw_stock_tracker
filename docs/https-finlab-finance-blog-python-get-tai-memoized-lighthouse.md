@@ -293,7 +293,7 @@ IC 的 t-stat 未達顯著的因子標記排除，不進入候選池，這條規
 **沿用既有設計，不新增決策空間**：`sweep_ranking_weights_walk_forward()` 本來就是離散具名候選互相比較，這裡只是把「贏家要不要採用」從人工決定改成規則決定。不對 `RANKING_WEIGHTS` 三個數值做連續搜尋，Phase 5 文件已經寫過理由（同一批雜訊上重學一次），這次沒有理由推翻。
 
 - **持久化位置**：`RANKING_WEIGHTS` 模組常數維持原樣當 fallback default，override 機制維持「純函式、無 I/O」不變（`finlab_factors.py` 本身在 6b 有新增因子函式，但這個 override 掛鉤不因此改變設計）。實際生效的候選寫進 `db.py` 既有的 `meta` 表（`set_meta(conn, "active_ranking_weights", json.dumps({...}))`），呼叫端（`scripts/run_factor_backtest.py`／未來任何消費者）用 `get_meta()` 讀出後，透過 `composite_scores(weights=...)` 既有的 override 參數傳入，這個掛鉤 8/18 那次驗證就已經在用，不需要新增介面。
-- **套用條件**：候選必須同時通過 DSR ≥ 0.95、PBO ≤ 0.5、高原寬度 ≥ 搜尋範圍 20%（`optimize.py` 既有三道門檻，不新增不放寬）。
+- **套用條件**：候選必須同時通過 DSR ≥ 0.95、PBO ≤ 0.5、高原寬度 ≥ 搜尋範圍 20%（`optimize.py` 既有三道門檻，不新增不放寬）。（2026-10-09 註：實作後另加一條「勝者樣本外平均須嚴格高於 active」，見 ADR 0002 修訂記錄；三道門檻的數值未放寬。）
 - **rollback**：套用後的下一個排程週期（月），用該週期新產生的樣本外數據比較「新候選」vs「被取代的前一組設定」的 walk-forward 表現；新設定明顯更差（低於前一組，或低於同期買進持有）就把 `meta.active_ranking_weights` 寫回前一組，並將整個事件（採用時間、比較數字、rollback 判定）記進既有的 `optimization_runs` 表。
 - **通知**：每次排程跑完（不論結果是「維持現況」「採用新候選」「rollback」）都呼叫 `alerts.py` 現成的 `send_telegram()` 發一則事件摘要。這則通知是事件層級，不是選股清單，範圍已在 grilling 中排除選股清單出口。
 

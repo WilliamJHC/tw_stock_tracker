@@ -236,6 +236,20 @@ def test_resolve_ranking_weights_action_keeps_when_active_mean_is_none():
         _ACCEPT, "previous", True, {"active": None, "previous": 50.0}) == "keep"
 
 
+def test_resolve_ranking_weights_action_keeps_when_winner_key_is_absent_from_scores():
+    # Defensive: a missing key must read as "no evidence" -> keep, not KeyError.
+    assert opt.resolve_ranking_weights_action(_ACCEPT, "ic_suggested", False, {"active": 10.0}) == "keep"
+    assert opt.resolve_ranking_weights_action(_ACCEPT, "previous", True, {"active": 10.0}) == "keep"
+
+
+def test_resolve_ranking_weights_action_compares_negative_means_correctly():
+    # -5 > -10: a smaller loss still counts as beating active.
+    assert opt.resolve_ranking_weights_action(
+        _ACCEPT, "ic_suggested", False, {"active": -10.0, "ic_suggested": -5.0}) == "adopt_suggested"
+    assert opt.resolve_ranking_weights_action(
+        _ACCEPT, "ic_suggested", False, {"active": -5.0, "ic_suggested": -10.0}) == "keep"
+
+
 # ------------------------------------------ sweep_param_walk_forward (e2e) --
 
 def _synthetic_bars(n=600, seed=13, p0=60.0):

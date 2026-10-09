@@ -91,7 +91,7 @@
 - 文件：ADR 0002 修訂記錄、ADR 0003 三處「不變」加註、收尾記錄「未結事項」第 5 項、週／雙週頻報告補註。`factor_timeframe_optimization_directions.md` 沒有需要更新的進度註記，未動。
 
 **驗證（已驗證）**
-- `resolve_ranking_weights_action` 的測試由 5 個擴為 10 個（既有 5 個補傳 `candidate_scores`；新增 keep ≤、keep 相等、rollback 平均不夠、任一邊 None、active 為 None），另新增 1 個 `vs_buy_hold` 測試。完整 pytest：562 passed（之前 556，淨增 6）。
+- `resolve_ranking_weights_action` 的測試由 5 個擴為 12 個（既有 5 個補傳 `candidate_scores`；新增 keep ≤、keep 相等、rollback 平均不夠、任一邊 None、active 為 None、勝者 key 不在 scores 裡、負值平均比較），另新增 1 個 `vs_buy_hold` 測試。完整 pytest：564 passed（之前 556，淨增 8）。獨立 read-back（fresh-context agent）檢查程式、測試與文件後，補了 README／lighthouse／ADR 0002 本文／10-04 計畫書的加註與上述兩個測試。
 - 反向驗證：把 `_mean_beats()` 的條件拿掉（改成恆為真），5 個「應 keep」測試失敗；把 `vs_buy_hold` 改回 point_best，`test_ranking_sweep_vs_buy_hold_describes_the_plateau_winner` 失敗。兩個變更都還原後重跑通過。
 
 **歷史影響（若把同一條規則「勝者平均 > 對照組平均」套用到過去各場比賽；純對照文件上已記錄的數字，沒有重跑回測、沒寫 DB、沒發 Telegram）**
@@ -104,7 +104,7 @@
 | PBR 另一組權重（`--pbr`） | with_pbr_15 | +32.9% | baseline +35.8% | 擋下 | 不採用，本來就被 DSR 擋下（高原勝者 0.86） |
 | PBR 權重 .3 | baseline（贏家與 point_best 同為基準） | — | — | 不適用 | 不採用（基準勝出，無候選要換） |
 
-**結論：沒有任何過去的「不採用」被翻成「採用」。** 新規則在 5 場裡擋下 3 場（其中 2 場本來就被 DSR 擋下）、不擋 1 場（季頻，本來由 DSR 擋下）、1 場不適用。應計品質（DSR 0.9477）與進場濾網（DSR 0.39）兩場沒有重新核對勝者平均，不在表內；兩者本來都被 DSR 擋下，新規則只會多擋、不會多放，結論不可能翻轉。
+**結論：沒有任何過去的「不採用」被翻成「採用」。** 新規則在 5 場裡擋下 3 場（其中 2 場本來就被 DSR 擋下）、不擋 1 場（季頻，本來由 DSR 擋下）、1 場不適用。應計品質（DSR 0.9477，該腳本本來就對高原勝者算 DSR）與進場濾網（DSR 0.39，其腳本沿用舊的 point_best DSR，未在高原勝者算法下重跑）兩場沒有重新核對勝者平均，不在表內。「新規則只會多擋、不會多放」是規則本身的性質（多加一個 AND 條件），所以不會把任何本來的「不採用」翻成「採用」，不依賴這兩場的 DSR 是對誰算的。
 
 **注意**：週／雙週頻那場是類比，不是排程路徑上的候選差異（排程候選差在權重，不在 `rebalance_freq`），見上文「要解決什麼」。
 

@@ -10,7 +10,7 @@
 
 ## 決策
 
-不設人工審核關卡：候選只要同時通過 DSR ≥ 0.95、PBO ≤ 0.5、高原寬度 ≥ 搜尋範圍 20%，就自動生效（寫進 `db.py` 的 `meta.active_ranking_weights`，透過 `finlab_factors.composite_scores(weights=...)` 既有的 override 參數生效）。用**自動 rollback** 取代人工審核：套用後的下一個排程週期，若新候選的樣本外表現明顯劣於前一組設定或買進持有，自動退回前一組，事件記進既有的 `optimization_runs` 表。每次排程跑完（採用/維持/rollback 任一結果）都發 Telegram 通知——通知本身不是審核關卡，只是可觀測性。
+不設人工審核關卡：候選只要同時通過 DSR ≥ 0.95、PBO ≤ 0.5、高原寬度 ≥ 搜尋範圍 20%，就自動生效（2026-10-09 起另需勝者樣本外平均報酬嚴格高於現行權重，見文末修訂記錄；寫進 `db.py` 的 `meta.active_ranking_weights`，透過 `finlab_factors.composite_scores(weights=...)` 既有的 override 參數生效）。用**自動 rollback** 取代人工審核：套用後的下一個排程週期，若新候選的樣本外表現明顯劣於前一組設定或買進持有，自動退回前一組，事件記進既有的 `optimization_runs` 表。每次排程跑完（採用/維持/rollback 任一結果）都發 Telegram 通知——通知本身不是審核關卡，只是可觀測性。
 
 ## 為什麼這樣分界
 

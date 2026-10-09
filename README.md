@@ -152,7 +152,7 @@ GitHub Actions（排程）
 `src/finlab_factors.py` 的 `RANKING_WEIGHTS`（營收 YoY／ROE／動能）用哪組權重，
 不是拍腦袋定案——`.github/workflows/optimize.yml` 每月重跑一次 rank-IC 評估，
 把新算出的建議權重跟目前生效的權重做 purged walk-forward 比較，通過 DSR/PBO/
-高原三道門檻才自動套用（見 `docs/adr/0002-auto-apply-ranking-weights.md`）；
+高原三道門檻、且樣本外平均報酬嚴格高於目前生效的權重，才自動套用（見 `docs/adr/0002-auto-apply-ranking-weights.md`）；
 套用後下一週期表現變差會自動退回前一組。**已知限制**：這個 workflow 只重新
 評估既有快取（`cache/factor_run/`，靠 `actions/cache` 跨執行留存），不會自己
 重抓資料——增量更新／季度全量重抛目前還沒做，要更新底層資料得手動跑
