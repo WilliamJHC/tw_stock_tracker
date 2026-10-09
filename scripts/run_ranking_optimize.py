@@ -26,7 +26,9 @@ Each run:
      omitted entirely if None).
   4. src/optimize.py's resolve_ranking_weights_action() turns that result's
      decision/winner into "keep" / "adopt_suggested" / "rollback_to_previous"
-     -- see that function's docstring for the full rule set. A switch
+     -- see that function's docstring for the full rule set (besides the
+     DSR/PBO/plateau gates, a switch or rollback also needs the winner's
+     mean OOS return to be strictly above "active"'s). A switch
      updates meta.active_ranking_weights (and meta.previous_ranking_weights
      to whatever was just replaced, so a rollback is possible next cycle);
      a rollback restores meta.active_ranking_weights from
@@ -213,7 +215,9 @@ def main():
     # resolve_ranking_weights_action() docstring.
     winner = result["plateau"]["most_common"]
     decision = result["decision"]
-    action = opt.resolve_ranking_weights_action(decision, winner, has_previous)
+    action = opt.resolve_ranking_weights_action(
+        decision, winner, has_previous, result["candidate_scores"],
+    )
     print(f"winner={winner} (point_best={result['point_best']['name']}) decision={decision} action={action}")
 
     run_id = f"ranking_weights_{dt.date.today().isoformat()}"
@@ -226,6 +230,7 @@ def main():
     message = (
         f"[排程最佳化] {summary}\n"
         f"winner={winner}  dsr={result['dsr']}  pbo={result['pbo']}  n_trials={result['n_trials']}\n"
+        f"candidate_scores={result['candidate_scores']}\n"
         f"vs_buy_hold={result['vs_buy_hold']}"
     )
     print(message)

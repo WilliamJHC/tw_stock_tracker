@@ -164,33 +164,76 @@ def test_evaluate_decision_none_plateau_rejects():
 
 
 # ---------------------------------- resolve_ranking_weights_action (6d) --
+# Since 2026-10 a switch/rollback also needs the winner's mean OOS return to
+# be strictly above "active"'s (docs/plan_adopt_requires_beating_active_2026-10.md).
+
+_ACCEPT = {"accept": True, "reasons": []}
+
 
 def test_resolve_ranking_weights_action_keeps_when_rejected():
     decision = {"accept": False, "reasons": ["PBO too high"]}
-    assert opt.resolve_ranking_weights_action(decision, winner="ic_suggested", has_previous=False) == "keep"
+    scores = {"active": 10.0, "ic_suggested": 50.0}
+    assert opt.resolve_ranking_weights_action(decision, "ic_suggested", False, scores) == "keep"
 
 
 def test_resolve_ranking_weights_action_keeps_when_active_wins():
-    decision = {"accept": True, "reasons": []}
-    assert opt.resolve_ranking_weights_action(decision, winner="active", has_previous=True) == "keep"
+    scores = {"active": 50.0, "previous": 10.0}
+    assert opt.resolve_ranking_weights_action(_ACCEPT, "active", True, scores) == "keep"
 
 
-def test_resolve_ranking_weights_action_adopts_suggested_when_it_wins():
-    decision = {"accept": True, "reasons": []}
-    assert opt.resolve_ranking_weights_action(decision, winner="ic_suggested", has_previous=False) == "adopt_suggested"
+def test_resolve_ranking_weights_action_adopts_suggested_when_it_wins_and_beats_active():
+    scores = {"active": 10.0, "ic_suggested": 12.0}
+    assert opt.resolve_ranking_weights_action(_ACCEPT, "ic_suggested", False, scores) == "adopt_suggested"
 
 
-def test_resolve_ranking_weights_action_rolls_back_when_previous_wins():
-    decision = {"accept": True, "reasons": []}
-    assert opt.resolve_ranking_weights_action(decision, winner="previous", has_previous=True) == "rollback_to_previous"
+def test_resolve_ranking_weights_action_keeps_when_suggested_wins_folds_but_not_mean():
+    # Passes every gate (accept=True) yet its average is lower -> no switch.
+    scores = {"active": 12.0, "ic_suggested": 10.0}
+    assert opt.resolve_ranking_weights_action(_ACCEPT, "ic_suggested", False, scores) == "keep"
+
+
+def test_resolve_ranking_weights_action_keeps_when_suggested_mean_equals_active():
+    scores = {"active": 10.0, "ic_suggested": 10.0}
+    assert opt.resolve_ranking_weights_action(_ACCEPT, "ic_suggested", False, scores) == "keep"
+
+
+def test_resolve_ranking_weights_action_rolls_back_when_previous_wins_and_beats_active():
+    scores = {"active": 10.0, "previous": 12.0}
+    assert opt.resolve_ranking_weights_action(_ACCEPT, "previous", True, scores) == "rollback_to_previous"
+
+
+def test_resolve_ranking_weights_action_keeps_when_previous_wins_folds_but_not_mean():
+    scores = {"active": 12.0, "previous": 10.0}
+    assert opt.resolve_ranking_weights_action(_ACCEPT, "previous", True, scores) == "keep"
+    scores = {"active": 10.0, "previous": 10.0}
+    assert opt.resolve_ranking_weights_action(_ACCEPT, "previous", True, scores) == "keep"
 
 
 def test_resolve_ranking_weights_action_no_rollback_without_a_real_previous_candidate():
     # winner=="previous" should never happen when has_previous is False (it
     # wasn't even in the candidate pool that cycle) -- guard against it
-    # anyway rather than trust the caller.
-    decision = {"accept": True, "reasons": []}
-    assert opt.resolve_ranking_weights_action(decision, winner="previous", has_previous=False) == "keep"
+    # anyway rather than trust the caller. A great "previous" score in the
+    # dict must not matter either.
+    scores = {"active": 10.0, "previous": 99.0}
+    assert opt.resolve_ranking_weights_action(_ACCEPT, "previous", False, scores) == "keep"
+
+
+def test_resolve_ranking_weights_action_keeps_when_a_mean_is_none():
+    # No evidence of improvement = no switch.
+    assert opt.resolve_ranking_weights_action(
+        _ACCEPT, "ic_suggested", False, {"active": 10.0, "ic_suggested": None}) == "keep"
+    assert opt.resolve_ranking_weights_action(
+        _ACCEPT, "previous", True, {"active": 10.0, "previous": None}) == "keep"
+
+
+def test_resolve_ranking_weights_action_keeps_when_active_mean_is_none():
+    # Pins a known inconsistency: _pbo_and_dsr() treats a None score as 0%,
+    # but here an active setting with no measurable mean (e.g. no trades)
+    # blocks even a clearly better winner.
+    assert opt.resolve_ranking_weights_action(
+        _ACCEPT, "ic_suggested", False, {"active": None, "ic_suggested": 50.0}) == "keep"
+    assert opt.resolve_ranking_weights_action(
+        _ACCEPT, "previous", True, {"active": None, "previous": 50.0}) == "keep"
 
 
 # ------------------------------------------ sweep_param_walk_forward (e2e) --
@@ -603,6 +646,17 @@ def test_ranking_sweep_dsr_is_computed_for_plateau_winner_not_point_best():
         result["plateau"], result["pbo"], result["dsr"],
         plateau_width_min_frac=max(opt.PLATEAU_WIDTH_MIN_FRAC, 1 / 2),
     )
+
+
+def test_ranking_sweep_vs_buy_hold_describes_the_plateau_winner():
+    # Same scripted race as above: winner A (3 of 4 folds), point_best B.
+    # vs_buy_hold must follow the winner so DSR, plateau and vs_buy_hold all
+    # describe one candidate; point_best stays informational.
+    scripted = {"A": [3.0, 3.0, 3.0, -10.0], "B": [1.0, 1.0, 1.0, 20.0]}
+    result = _sweep_with_scripted_fold_returns(scripted)
+    assert result["point_best"]["name"] == "B"
+    assert result["vs_buy_hold"]["chosen_name"] == "A" == result["plateau"]["most_common"]
+    assert result["vs_buy_hold"]["chosen_oos_mean_return_pct"] == pytest.approx(result["candidate_scores"]["A"])
 
 
 def test_ranking_sweep_dsr_unchanged_when_winner_is_point_best():

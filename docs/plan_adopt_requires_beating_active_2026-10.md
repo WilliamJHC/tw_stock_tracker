@@ -1,6 +1,6 @@
 # 計畫：自動套用／rollback 必須「勝者平均報酬高於現行權重」
 
-2026-10-09。**這是計畫，不是施工紀錄：尚未動任何程式碼，等你說「開工」才做。**
+2026-10-09。**以下「要解決什麼」到「驗收標準」是施工前寫的計畫（原文保留）；施工結果見文末「施工紀錄」。**
 
 ## 要解決什麼
 
@@ -79,3 +79,35 @@
 - 新增測試通過、反向驗證有效、完整 pytest 全過。
 - 步驟 5 的對照表產出，明確寫出「有／沒有任何過去結論被改變」。
 - 文件同步後，repo 內不再有「`resolve_ranking_weights_action()` 不變」或「自動套用只看三條規則」而未加註的說法（以 grep `resolve_ranking_weights_action` 交叉核對）。
+
+## 施工紀錄（2026-10-09，本地，未 push）
+
+六個決定都照建議：步驟 3（`vs_buy_hold` 改勝者）一併做；策略搜尋不動；None → `keep`；rollback 同規則；嚴格大於；先做這份。
+
+**改了什麼**
+- `src/optimize.py`：`resolve_ranking_weights_action(decision, winner, has_previous, candidate_scores)`，`candidate_scores` 必填；新增小函式 `_mean_beats()`（兩邊都非 None 且嚴格大於才為真）；只在走到 `previous`／`ic_suggested` 分支時才查 key。`vs_buy_hold` 的 `chosen_name`／`chosen_oos_mean_return_pct` 改用 `winner`。docstring 與註解同步。
+- `scripts/run_ranking_optimize.py`：傳入 `result["candidate_scores"]`；Telegram 訊息多一行 `candidate_scores=...`；模組 docstring 步驟 4 補一句。
+- `src/factor_eval.py`：`suggest_weights` docstring 同步。
+- 文件：ADR 0002 修訂記錄、ADR 0003 三處「不變」加註、收尾記錄「未結事項」第 5 項、週／雙週頻報告補註。`factor_timeframe_optimization_directions.md` 沒有需要更新的進度註記，未動。
+
+**驗證（已驗證）**
+- `resolve_ranking_weights_action` 的測試由 5 個擴為 10 個（既有 5 個補傳 `candidate_scores`；新增 keep ≤、keep 相等、rollback 平均不夠、任一邊 None、active 為 None），另新增 1 個 `vs_buy_hold` 測試。完整 pytest：562 passed（之前 556，淨增 6）。
+- 反向驗證：把 `_mean_beats()` 的條件拿掉（改成恆為真），5 個「應 keep」測試失敗；把 `vs_buy_hold` 改回 point_best，`test_ranking_sweep_vs_buy_hold_describes_the_plateau_winner` 失敗。兩個變更都還原後重跑通過。
+
+**歷史影響（若把同一條規則「勝者平均 > 對照組平均」套用到過去各場比賽；純對照文件上已記錄的數字，沒有重跑回測、沒寫 DB、沒發 Telegram）**
+
+| 比賽 | 高原勝者 | 勝者平均 | 對照組平均 | 新規則 | 原本結論與擋下者 |
+|---|---|---|---|---|---|
+| 週／雙週／月頻（`report_rebalance_freq_walkforward.py`） | 雙週頻（贏 2 折） | 94.41% | 月頻 107.74% | 擋下 | 維持月頻（本來靠平均較低與無穩定 plateau 判斷；高原勝者 DSR 0.9669 其實過了） |
+| 月／雙月／季頻（`run_rebalance_comparison.py`） | 季頻（打平取先出現者） | 80.3% | 月頻 71.7% | **不擋** | 維持月頻，由 DSR 0.9475 < 0.95 擋下 |
+| 動能跳過 21 根（`--skip21`） | mom120_skip21 | 67.6% | baseline 71.4% | 擋下 | 不採用，本來就被高原勝者 DSR 0.47 擋下 |
+| PBR 另一組權重（`--pbr`） | with_pbr_15 | +32.9% | baseline +35.8% | 擋下 | 不採用，本來就被 DSR 擋下（高原勝者 0.86） |
+| PBR 權重 .3 | baseline（贏家與 point_best 同為基準） | — | — | 不適用 | 不採用（基準勝出，無候選要換） |
+
+**結論：沒有任何過去的「不採用」被翻成「採用」。** 新規則在 5 場裡擋下 3 場（其中 2 場本來就被 DSR 擋下）、不擋 1 場（季頻，本來由 DSR 擋下）、1 場不適用。應計品質（DSR 0.9477）與進場濾網（DSR 0.39）兩場沒有重新核對勝者平均，不在表內；兩者本來都被 DSR 擋下，新規則只會多擋、不會多放，結論不可能翻轉。
+
+**注意**：週／雙週頻那場是類比，不是排程路徑上的候選差異（排程候選差在權重，不在 `rebalance_freq`），見上文「要解決什麼」。
+
+**未動**（同計畫「範圍外」）：`evaluate_decision()`、`sweep_param_walk_forward()`、`optimize.yml`（含第 28 行註解日期錯誤）、`.2f` DSR 顯示問題、零變異勝者 DSR=None 靜默放行、策略搜尋。
+
+**已知限制**：只防「換成更差或持平的」，不防「換成其實沒更好、只是雜訊略高的」；平均仍被單一 fold 主導；4 折檢定力不變；10/16 排程不受影響（雲端快取是空的，仍空跑）。

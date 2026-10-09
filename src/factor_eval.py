@@ -264,8 +264,9 @@ def suggest_weights(evaluate_result, horizon=20, min_icir=0.0):
     this proposal automatically on a schedule -- scripts/run_ranking_optimize.py
     feeds this function's output into src/optimize.py's
     sweep_ranking_weights_walk_forward() + resolve_ranking_weights_action(),
-    which only adopts it after it wins a purged walk-forward comparison AND
-    clears DSR/PBO/plateau gates (and can auto-rollback the next cycle). "No
+    which only adopts it after it wins a purged walk-forward comparison, clears
+    DSR/PBO/plateau gates, AND has a mean OOS return strictly above the
+    active weights' (and can auto-rollback the next cycle). "No
     human in the loop by default" is that pipeline's decision, not this
     function's -- this function stays a pure proposal generator either way."""
     icirs = {}

@@ -220,7 +220,7 @@ def detect_plateau(values, scores, tolerance_frac=0.1):
     return {"range": (lo, hi), "center": (lo + hi) / 2, "width_frac": width_frac}
 
 
-def resolve_ranking_weights_action(decision, winner, has_previous):
+def resolve_ranking_weights_action(decision, winner, has_previous, candidate_scores):
     """Pure decision logic for scripts/run_ranking_optimize.py's scheduled
     run (docs/https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md
     Phase 6d, docs/adr/0002-auto-apply-ranking-weights.md). Each scheduled
@@ -244,12 +244,15 @@ def resolve_ranking_weights_action(decision, winner, has_previous):
 
     "keep": nothing changes. Either no candidate cleared evaluate_decision()'s
     DSR/PBO/plateau gates (decision["accept"] is False -- absence of
-    evidence isn't evidence FOR switching either), or "active" itself won
-    (still the best-performing setting this cycle).
+    evidence isn't evidence FOR switching either), "active" itself won
+    (still the best-performing setting this cycle), or the winner cleared
+    the gates but its mean OOS return is not strictly above "active"'s (see
+    `candidate_scores` below).
 
-    "rollback_to_previous": "previous" won AND cleared the gates -- Phase
-    6d's ADR: the setting "active" replaced has now demonstrably
-    outperformed it on a fresh out-of-sample cycle, so revert.
+    "rollback_to_previous": "previous" won AND cleared the gates AND its mean
+    OOS return is strictly above "active"'s -- Phase 6d's ADR: the setting
+    "active" replaced has now demonstrably outperformed it on a fresh
+    out-of-sample cycle, so revert.
     has_previous guards this from ever firing on a cycle where "previous"
     isn't even a real candidate (plateau["most_common"]'s name space is
     just the `candidates` dict's keys -- there is no scenario where
@@ -257,15 +260,39 @@ def resolve_ranking_weights_action(decision, winner, has_previous):
     caller not being trusted to only pass real winner names here keeps this
     function's contract self-contained).
 
-    "adopt_suggested": "ic_suggested" won AND cleared the gates -- this
-    cycle's fresh rank-IC proposal beat whatever's currently active."""
+    "adopt_suggested": "ic_suggested" won AND cleared the gates AND its mean
+    OOS return is strictly above "active"'s -- this cycle's fresh rank-IC
+    proposal beat whatever's currently active.
+
+    `candidate_scores` is the sweep result's {name: mean OOS return%}
+    (values may be None). It is required, not defaulted, so a future caller
+    can't silently skip the "must beat active" check. The gates above only
+    validate that the winner won enough folds and isn't overfit; none of
+    them says its average is higher than the current setting's, so a
+    winner can pass them and still be worse on average. No margin: equal
+    means -> "keep". A None mean on either side -> "keep" (no evidence of
+    improvement = no switch; this is deliberately the opposite of
+    evaluate_decision(), where missing evidence doesn't veto, because here
+    the action edits live config). Keys are looked up only in the branch
+    that needs them: "ic_suggested" may be absent from the dict, and
+    "previous" only exists when has_previous."""
     if not decision["accept"]:
         return "keep"
     if winner == "previous" and has_previous:
-        return "rollback_to_previous"
+        if _mean_beats(candidate_scores, "previous", "active"):
+            return "rollback_to_previous"
+        return "keep"
     if winner == "ic_suggested":
-        return "adopt_suggested"
+        if _mean_beats(candidate_scores, "ic_suggested", "active"):
+            return "adopt_suggested"
+        return "keep"
     return "keep"
+
+
+def _mean_beats(candidate_scores, challenger, incumbent):
+    """True iff both means exist and challenger's is strictly greater."""
+    a, b = candidate_scores.get(challenger), candidate_scores.get(incumbent)
+    return a is not None and b is not None and a > b
 
 
 def evaluate_decision(plateau, pbo_value, dsr_value, plateau_width_min_frac=PLATEAU_WIDTH_MIN_FRAC):
@@ -644,7 +671,9 @@ def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, pur
     Otherwise: {"candidates", "plateau", "point_best", "fold_argmax",
     "candidate_scores", "dsr", "dsr_of", "pbo", "n_trials", "vs_buy_hold",
     "decision", "trials"}. "dsr_of" names the candidate "dsr" was computed
-    for (== plateau["most_common"]). "plateau" here means "how many folds did the overall winner
+    for (== plateau["most_common"]); "vs_buy_hold" describes that same
+    candidate (the plateau winner), while "point_best" is informational
+    only. "plateau" here means "how many folds did the overall winner
     actually win" (a numeric plateau range doesn't apply to named
     candidates) -- its accept/reject threshold is chance-adjusted to
     max(PLATEAU_WIDTH_MIN_FRAC, 1/len(candidates)), since e.g. a 2-candidate
@@ -732,8 +761,8 @@ def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, pur
 
     # The DSR is computed for the plateau winner -- the same candidate
     # run_ranking_optimize.py / run_strategy_search.py would adopt -- so the
-    # gate's three rules all describe one candidate. point_best_name can
-    # differ; it only feeds "point_best" and "vs_buy_hold" below.
+    # gate's three rules (and "vs_buy_hold" below) all describe one
+    # candidate. point_best_name can differ; it only feeds "point_best".
     pbo_value, dsr_value = _pbo_and_dsr(scores_by_name, usable_folds, winner, n_trials)
 
     oos_start, oos_end = folds[0]["test"][0], folds[-1]["test"][1]
@@ -756,8 +785,8 @@ def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, pur
         "pbo": pbo_value,
         "n_trials": n_trials,
         "vs_buy_hold": {
-            "chosen_name": point_best_name,
-            "chosen_oos_mean_return_pct": mean_scores.get(point_best_name),
+            "chosen_name": winner,
+            "chosen_oos_mean_return_pct": mean_scores.get(winner),
             "universe_mean_buy_hold_return_pct": universe_buy_hold,
         },
         "decision": evaluate_decision(plateau, pbo_value, dsr_value, plateau_width_min_frac=chance_threshold),

@@ -36,6 +36,8 @@
 3. **PBR 資料過期問題（29 檔超過 30 天）**：因 PBR 不採用，暫不需處理；日後重啟 PBR 才要定義。
 4. **【已完成】文件同步**：本地 `main` 上的 `docs/factor_candidates_momentum_ic_2026-09.md`（888f3e2 版）沒有 §5（後續兩輪 walk-forward）與 §6（法人買賣超），且寫著 skip-21「尚未進 walk-forward」；分支版已補上，合併後以分支版為準。
 
+5. **【已完成：2026-10-09，本地】自動套用／rollback 補上「勝者平均報酬須嚴格高於 active」。** 之前排程只看 DSR／PBO／高原三條，勝者可能過閘門但平均較低仍被換上去。`resolve_ranking_weights_action()` 現在要 `candidate_scores`，`ic_suggested`／`previous` 的平均須 > `active`，否則 `keep`（見 ADR 0002 修訂記錄、`docs/plan_adopt_requires_beating_active_2026-10.md`）。這一輪所有「不採用」結論不變。策略搜尋（人工審核）沒套用，仍可能送來平均低於 baseline 的待審候選。
+
 ## 尚未開始的方向（沒有被否決，只是這一輪沒做）
 
 > **2026-10-09 更正**：下面這份清單寫成時，我不知道另一條研究線（9/22–9/26，原本只存在本地分支 `worktree-serene-puzzling-otter`，同日併入主線）已經做過其中大部分。以下是對照後的實際狀態，全部沒有被採用。
