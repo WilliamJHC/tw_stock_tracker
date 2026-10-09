@@ -220,7 +220,7 @@ def detect_plateau(values, scores, tolerance_frac=0.1):
     return {"range": (lo, hi), "center": (lo + hi) / 2, "width_frac": width_frac}
 
 
-def resolve_ranking_weights_action(decision, winner, has_previous, candidate_scores):
+def resolve_ranking_weights_action(decision, winner, has_previous, adoption_scores):
     """Pure decision logic for scripts/run_ranking_optimize.py's scheduled
     run (docs/https-finlab-finance-blog-python-get-tai-memoized-lighthouse.md
     Phase 6d, docs/adr/0002-auto-apply-ranking-weights.md). Each scheduled
@@ -247,7 +247,7 @@ def resolve_ranking_weights_action(decision, winner, has_previous, candidate_sco
     evidence isn't evidence FOR switching either), "active" itself won
     (still the best-performing setting this cycle), or the winner cleared
     the gates but its mean OOS return is not strictly above "active"'s (see
-    `candidate_scores` below).
+    `adoption_scores` below).
 
     "rollback_to_previous": "previous" won AND cleared the gates AND its mean
     OOS return is strictly above "active"'s -- Phase 6d's ADR: the setting
@@ -264,34 +264,36 @@ def resolve_ranking_weights_action(decision, winner, has_previous, candidate_sco
     OOS return is strictly above "active"'s -- this cycle's fresh rank-IC
     proposal beat whatever's currently active.
 
-    `candidate_scores` is the sweep result's {name: mean OOS return%}
-    (values may be None). It is required, not defaulted, so a future caller
-    can't silently skip the "must beat active" check. The gates above only
-    validate that the winner won enough folds and isn't overfit; none of
-    them says its average is higher than the current setting's, so a
-    winner can pass them and still be worse on average. No margin: equal
-    means -> "keep". A None mean on either side -> "keep" (no evidence of
-    improvement = no switch; this is deliberately the opposite of
-    evaluate_decision(), where missing evidence doesn't veto, because here
-    the action edits live config). Keys are looked up only in the branch
-    that needs them: "ic_suggested" may be absent from the dict, and
-    "previous" only exists when has_previous."""
+    `adoption_scores` is the sweep result's "adoption_scores" ({name: mean
+    OOS return%}, a no-trade fold counted as 0% exactly as the DSR/PBO gates
+    count it -- NOT "candidate_scores", which skips None folds and so can
+    average over different folds than the gates saw). It is required, not
+    defaulted, so a future caller can't silently skip the "must beat active"
+    check. The gates above only validate that the winner won enough folds
+    and isn't overfit; none of them says its average is higher than the
+    current setting's, so a winner can pass them and still be worse on
+    average. No margin: equal means -> "keep". A missing key or None on
+    either side -> "keep" (no evidence of improvement = no switch; this is
+    deliberately the opposite of evaluate_decision(), where missing evidence
+    doesn't veto, because here the action edits live config). Keys are
+    looked up only in the branch that needs them: "ic_suggested" may be
+    absent from the dict, and "previous" only exists when has_previous."""
     if not decision["accept"]:
         return "keep"
     if winner == "previous" and has_previous:
-        if _mean_beats(candidate_scores, "previous", "active"):
+        if _mean_beats(adoption_scores, "previous", "active"):
             return "rollback_to_previous"
         return "keep"
     if winner == "ic_suggested":
-        if _mean_beats(candidate_scores, "ic_suggested", "active"):
+        if _mean_beats(adoption_scores, "ic_suggested", "active"):
             return "adopt_suggested"
         return "keep"
     return "keep"
 
 
-def _mean_beats(candidate_scores, challenger, incumbent):
+def _mean_beats(adoption_scores, challenger, incumbent):
     """True iff both means exist and challenger's is strictly greater."""
-    a, b = candidate_scores.get(challenger), candidate_scores.get(incumbent)
+    a, b = adoption_scores.get(challenger), adoption_scores.get(incumbent)
     return a is not None and b is not None and a > b
 
 
@@ -669,8 +671,11 @@ def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, pur
 
     Returns None if there isn't enough calendar for even one purged fold.
     Otherwise: {"candidates", "plateau", "point_best", "fold_argmax",
-    "candidate_scores", "dsr", "dsr_of", "pbo", "n_trials", "vs_buy_hold",
-    "decision", "trials"}. "dsr_of" names the candidate "dsr" was computed
+    "candidate_scores", "adoption_scores", "dsr", "dsr_of", "pbo", "n_trials",
+    "vs_buy_hold", "decision", "trials"}. "adoption_scores" is {name: mean OOS
+    return%} with a None fold counted as 0% (as the DSR/PBO gates do); it
+    feeds resolve_ranking_weights_action()'s "beats active" check, whereas
+    "candidate_scores" skips None folds. "dsr_of" names the candidate "dsr" was computed
     for (== plateau["most_common"]); "vs_buy_hold" describes that same
     candidate (the plateau winner), while "point_best" is informational
     only. "plateau" here means "how many folds did the overall winner
@@ -748,6 +753,13 @@ def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, pur
     for name in names:
         valid = [s for s in scores_by_name[name] if s is not None]
         mean_scores[name] = sum(valid) / len(valid) if valid else None
+    # Same None -> 0% convention as _pbo_and_dsr(), so the adopt/rollback
+    # "beats active" check compares means over the same folds the DSR/PBO
+    # gates saw (a no-trade fold counts as 0%, it isn't skipped).
+    adoption_scores = {
+        name: sum(s if s is not None else 0.0 for s in scores_by_name[name]) / usable_folds
+        for name in names
+    }
     valid_means = {n: s for n, s in mean_scores.items() if s is not None}
     point_best_name = max(valid_means, key=valid_means.get) if valid_means else None
 
@@ -780,6 +792,7 @@ def sweep_ranking_weights_walk_forward(universe_data, candidates, n_folds=4, pur
         "point_best": {"name": point_best_name, "score": valid_means.get(point_best_name)},
         "fold_argmax": fold_argmax,
         "candidate_scores": mean_scores,
+        "adoption_scores": adoption_scores,
         "dsr": dsr_value,
         "dsr_of": winner,
         "pbo": pbo_value,

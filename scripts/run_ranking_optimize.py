@@ -28,7 +28,8 @@ Each run:
      decision/winner into "keep" / "adopt_suggested" / "rollback_to_previous"
      -- see that function's docstring for the full rule set (besides the
      DSR/PBO/plateau gates, a switch or rollback also needs the winner's
-     mean OOS return to be strictly above "active"'s). A switch
+     mean OOS return -- result["adoption_scores"], a no-trade fold counted
+     as 0% like the DSR/PBO gates do -- to be strictly above "active"'s). A switch
      updates meta.active_ranking_weights (and meta.previous_ranking_weights
      to whatever was just replaced, so a rollback is possible next cycle);
      a rollback restores meta.active_ranking_weights from
@@ -164,6 +165,12 @@ def persist_trials(conn, run_id, result):
     db.upsert_optimization_trials(conn, run_id, rows)
 
 
+def _round_values(d, ndigits=2):
+    """Display-only: round the float values of a flat dict (None and strings
+    pass through) so the Telegram message stays readable."""
+    return {k: round(v, ndigits) if isinstance(v, float) else v for k, v in d.items()}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--horizon", type=int, default=DEFAULT_HORIZON)
@@ -216,7 +223,7 @@ def main():
     winner = result["plateau"]["most_common"]
     decision = result["decision"]
     action = opt.resolve_ranking_weights_action(
-        decision, winner, has_previous, result["candidate_scores"],
+        decision, winner, has_previous, result["adoption_scores"],
     )
     print(f"winner={winner} (point_best={result['point_best']['name']}) decision={decision} action={action}")
 
@@ -230,8 +237,8 @@ def main():
     message = (
         f"[排程最佳化] {summary}\n"
         f"winner={winner}  dsr={result['dsr']}  pbo={result['pbo']}  n_trials={result['n_trials']}\n"
-        f"candidate_scores={result['candidate_scores']}\n"
-        f"vs_buy_hold={result['vs_buy_hold']}"
+        f"adoption_scores={_round_values(result['adoption_scores'])}\n"
+        f"vs_buy_hold={_round_values(result['vs_buy_hold'])}"
     )
     print(message)
     if not args.dry_run:

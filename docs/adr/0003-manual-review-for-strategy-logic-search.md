@@ -32,7 +32,7 @@ ADR 0002 的理由是「DSR/PBO 已經是把主觀判斷規則化的機制，人
 
 兩條管線切成兩組完全獨立的 key（例如 `strategy_active_ranking_weights` 另開一組）表面上更乾淨、不會互相干擾，但有一個實質缺點：`scripts/run_ranking_optimize.py` 之後每次比較的「active」基準會跟真正上線生效的設定脫節——如果人工核准了一個策略搜尋候選，但 RANKING_WEIGHTS 管線仍然只認自己那組 key 裡的「active」，它會繼續拿一個已經不是真正上線設定的基準去做比較與 rollback 判斷，這條管線的自動化就失去意義。
 
-共用同一組 key 保證「不管哪條管線改的，`active_ranking_weights` 永遠只有一個生效版本」，唯一要解決的副作用是本文件開頭那個未經設計的衝突：`build_candidates()` 原本「只要 `previous` 存在就納入候選」的判斷，會讓 RANKING_WEIGHTS 管線在人工核准後的下一輪把它當成候選、贏了就 `rollback_to_previous`，直接推翻人工決定。`active_weights_source` + `previous_candidate_eligible()` 這個一次性保護（只擋 `previous` 進候選池一輪，`ic_suggested` 照常評估，且保護會在 RANKING_WEIGHTS 管線跑完這一輪就無條件解除，不看這輪結果是 `keep` 還是真的換手）用最小改動解決這個副作用，不需要引入第二組 key、不需要改 `resolve_ranking_weights_action()`/門檻本身（2026-10-09 註：該函式後來多了 `candidate_scores` 參數與「勝者平均須高於 active」一條規則，見 ADR 0002 修訂記錄；與這裡的協調邏輯無關）。
+共用同一組 key 保證「不管哪條管線改的，`active_ranking_weights` 永遠只有一個生效版本」，唯一要解決的副作用是本文件開頭那個未經設計的衝突：`build_candidates()` 原本「只要 `previous` 存在就納入候選」的判斷，會讓 RANKING_WEIGHTS 管線在人工核准後的下一輪把它當成候選、贏了就 `rollback_to_previous`，直接推翻人工決定。`active_weights_source` + `previous_candidate_eligible()` 這個一次性保護（只擋 `previous` 進候選池一輪，`ic_suggested` 照常評估，且保護會在 RANKING_WEIGHTS 管線跑完這一輪就無條件解除，不看這輪結果是 `keep` 還是真的換手）用最小改動解決這個副作用，不需要引入第二組 key、不需要改 `resolve_ranking_weights_action()`/門檻本身（2026-10-09 註：該函式後來多了 `adoption_scores` 參數與「勝者平均須高於 active」一條規則，見 ADR 0002 修訂記錄；與這裡的協調邏輯無關）。
 
 ## 考慮過但拒絕的方案
 
@@ -46,7 +46,7 @@ ADR 0002 的理由是「DSR/PBO 已經是把主觀判斷規則化的機制，人
 
 - `src/finlab_factors.py`：新增 `ma_cross_signal()`/`volume_price_divergence()`/`EXTRA_FACTOR_FUNCS`；`factor_ranks()`/`composite_scores()` 新增可選的 `extra_factors` 參數（預設 `None`，行為與改動前完全一致）。
 - `src/portfolio_backtest.py`：`PORTFOLIO_PARAMS`/`simulate()` 新增 `extra_factors` 透傳。
-- `src/optimize.py`：新增 `train_test_split_by_calendar()`（策略搜尋的 train/test 切分）、`previous_candidate_eligible()`（本文件的協調邏輯）；`sweep_ranking_weights_walk_forward()` 新增 `extra_factors` 參數。`resolve_ranking_weights_action()`/`evaluate_decision()`（ADR 0002 的門檻本身）不變（2026-10-09 註：`resolve_ranking_weights_action()` 之後新增 `candidate_scores` 參數與「勝者平均須高於 active」規則，見 ADR 0002 修訂記錄；`evaluate_decision()` 仍不變）。
+- `src/optimize.py`：新增 `train_test_split_by_calendar()`（策略搜尋的 train/test 切分）、`previous_candidate_eligible()`（本文件的協調邏輯）；`sweep_ranking_weights_walk_forward()` 新增 `extra_factors` 參數。`resolve_ranking_weights_action()`/`evaluate_decision()`（ADR 0002 的門檻本身）不變（2026-10-09 註：`resolve_ranking_weights_action()` 之後新增 `adoption_scores` 參數與「勝者平均須高於 active」規則，見 ADR 0002 修訂記錄；`evaluate_decision()` 仍不變）。
 - `src/db.py`：新增 `active_weights_source`、`pending_strategy_candidate` 兩個 `meta` key，通用 key-value 表，不需要 schema migration。
 - 新增 `scripts/run_strategy_search.py`（排程用，只產生報告）、`scripts/apply_strategy_candidate.py`（人工執行套用/`--reject`，須透過下面的 workflow 執行）、`.github/workflows/strategy_search.yml`（雙週排程，20:00 UTC，跟 `optimize.yml`(22:00)/`daily_recommendations.yml`(23:00) 都錯開，共用 `backtest-db-state` concurrency group）、`.github/workflows/apply_strategy_candidate.yml`（`workflow_dispatch` 專用，人工到 Actions 頁面手動觸發，同樣共用 `backtest-db-state`）。
 - `scripts/run_daily_recommendations.py`：`factor_ranks()`/`composite_scores()` 呼叫補上 `extra_factors=ff.EXTRA_FACTOR_FUNCS`，否則套用後的 `ma_cross`/`vol_price_div` 權重會靜默失效（`composite_scores()` 對沒被算過的 key 直接跳過，不報錯）。

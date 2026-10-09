@@ -82,6 +82,8 @@
 
 ## 施工紀錄（2026-10-09，本地，未 push）
 
+> **後續修正（同日，`/code-review` 之後，你確認照建議改）**：上文計畫與下面「改了什麼」寫的參數名 `candidate_scores` 已改為 **`adoption_scores`**。原因：`candidate_scores` 的平均略過無法算分（None）的 fold，而 DSR／PBO 把這種 fold 當 0%，新規則等於在另一批 fold 上比較。`sweep_ranking_weights_walk_forward()` 現在另回傳 `adoption_scores`（None fold 計 0%，除以可用 fold 數），`resolve_ranking_weights_action()` 與 `run_ranking_optimize.py` 改用它；`candidate_scores` 保留給 `point_best` 與其他腳本。順帶消除「`active` 平均為 None 就永遠換不上去」的不一致（經過 sweep 的 `adoption_scores` 不會有 None；`resolve` 對缺值仍保守 `keep`）。Telegram 訊息改印四捨五入到小數 2 位的 `adoption_scores` 與 `vs_buy_hold`（`_round_values()`）。新增 3 組測試（None fold 計 0%、用跳過式平均會誤換而用 `adoption_scores` 不會、`_round_values`）；反向驗證（把 `adoption_scores` 改回跳過式平均）讓前兩個測試失敗。完整 pytest 568 passed。下方歷史影響表用的是文件上記錄的各場平均，沒有逐場確認有無 None fold；「只會多擋、不會多放」是 AND 條件的性質，不依賴這點。
+
 六個決定都照建議：步驟 3（`vs_buy_hold` 改勝者）一併做；策略搜尋不動；None → `keep`；rollback 同規則；嚴格大於；先做這份。
 
 **改了什麼**

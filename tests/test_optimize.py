@@ -227,9 +227,8 @@ def test_resolve_ranking_weights_action_keeps_when_a_mean_is_none():
 
 
 def test_resolve_ranking_weights_action_keeps_when_active_mean_is_none():
-    # Pins a known inconsistency: _pbo_and_dsr() treats a None score as 0%,
-    # but here an active setting with no measurable mean (e.g. no trades)
-    # blocks even a clearly better winner.
+    # Defensive: the sweep's adoption_scores never contain None (a no-trade
+    # fold counts as 0%), but if a caller passes one, no evidence -> keep.
     assert opt.resolve_ranking_weights_action(
         _ACCEPT, "ic_suggested", False, {"active": None, "ic_suggested": 50.0}) == "keep"
     assert opt.resolve_ranking_weights_action(
@@ -529,7 +528,7 @@ def test_sweep_ranking_weights_walk_forward_shape_and_trial_accounting():
     assert result is not None
     assert set(result) == {
         "candidates", "plateau", "point_best", "fold_argmax", "candidate_scores",
-        "dsr", "dsr_of", "pbo", "n_trials", "vs_buy_hold", "decision", "trials",
+        "adoption_scores", "dsr", "dsr_of", "pbo", "n_trials", "vs_buy_hold", "decision", "trials",
     }
     usable_folds = len(result["fold_argmax"])
     assert usable_folds > 0
@@ -631,6 +630,8 @@ def _sweep_with_scripted_fold_returns(returns_pct_by_name):
         fold_idx = fold_by_test_end[test_end]
         test_start = folds[fold_idx]["test"][0]
         r = returns_pct_by_name[name][fold_idx]
+        if r is None:  # no usable OOS curve -> the sweep scores this fold None
+            return {"equity_curve": [{"date": test_start, "equity": 100.0}]}
         return {"equity_curve": [{"date": test_start, "equity": 100.0},
                                   {"date": test_end, "equity": 100.0 * (1 + r / 100)}]}
 
@@ -671,6 +672,31 @@ def test_ranking_sweep_vs_buy_hold_describes_the_plateau_winner():
     assert result["point_best"]["name"] == "B"
     assert result["vs_buy_hold"]["chosen_name"] == "A" == result["plateau"]["most_common"]
     assert result["vs_buy_hold"]["chosen_oos_mean_return_pct"] == pytest.approx(result["candidate_scores"]["A"])
+
+
+def test_ranking_sweep_adoption_scores_count_a_none_fold_as_zero_like_the_gates():
+    # A has no usable fold-3 curve. candidate_scores skips that fold (mean of
+    # the other three = 10); adoption_scores counts it as 0% (7.5), which is
+    # what _pbo_and_dsr() feeds the DSR/PBO gates.
+    scripted = {"A": [10.0, 10.0, 10.0, None], "B": [8.0, 8.0, 8.0, -20.0]}
+    result = _sweep_with_scripted_fold_returns(scripted)
+    assert result["candidate_scores"]["A"] == pytest.approx(10.0)
+    assert result["adoption_scores"]["A"] == pytest.approx(7.5)
+    assert result["adoption_scores"]["B"] == pytest.approx(result["candidate_scores"]["B"])
+    assert result["adoption_scores"]["B"] == pytest.approx(1.0)
+
+
+def test_resolve_with_sweep_adoption_scores_does_not_reward_a_skipped_fold():
+    # Using the skipping mean, ic_suggested (10.0) would look better than
+    # active (9.0); on the gates' basis (None = 0%) it's 7.5 < 9.0 -> keep.
+    scripted = {"A": [10.0, 10.0, 10.0, None], "B": [9.0, 9.0, 9.0, 9.0]}
+    result = _sweep_with_scripted_fold_returns(scripted)
+    assert result["candidate_scores"]["A"] > result["candidate_scores"]["B"]
+    scores = {"ic_suggested": result["adoption_scores"]["A"], "active": result["adoption_scores"]["B"]}
+    assert opt.resolve_ranking_weights_action(_ACCEPT, "ic_suggested", False, scores) == "keep"
+    # And the skipping mean would have switched:
+    skipping = {"ic_suggested": result["candidate_scores"]["A"], "active": result["candidate_scores"]["B"]}
+    assert opt.resolve_ranking_weights_action(_ACCEPT, "ic_suggested", False, skipping) == "adopt_suggested"
 
 
 def test_ranking_sweep_dsr_unchanged_when_winner_is_point_best():
