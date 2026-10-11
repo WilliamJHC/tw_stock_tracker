@@ -38,14 +38,16 @@ Each run:
      discipline as run_ranking_optimize.py's persist_trials().
 
 Usage:
-    python scripts/run_strategy_search.py [--dry-run] [--pbr | --skip21]
+    python scripts/run_strategy_search.py [--dry-run] [--pbr | --skip21 | --high250]
 
 --pbr swaps the 4 named candidates for baseline vs with_pbr/with_pbr_15
 (value_pbr factor) and restricts the calendar to the PBR-data era (2021-10
 onward) -- see build_pbr_candidates().
 --skip21 swaps them for baseline vs momentum-with-latest-21-bars-skipped
 (60/120-bar windows) over the full calendar -- see build_skip21_candidates().
-Default behavior (neither flag) is unchanged.
+--high250 swaps them for baseline vs 52-week-high proximity replacing or
+sharing the momentum weight -- see build_high250_candidates().
+Default behavior (no flag) is unchanged.
 
 --dry-run runs the full evaluation and prints what WOULD happen, without
 writing meta/optimization_runs or sending a Telegram message.
@@ -133,6 +135,26 @@ def build_skip21_candidates(active_weights):
     }
 
 
+def build_high250_candidates(active_weights):
+    """--high250 mode: the live baseline vs 52-week-high proximity
+    (ff.high250_ratio) either REPLACING the momentum term or SHARING it
+    half/half -- answers "substitute or complement" in one race. Weights are
+    fixed up front, not tuned, and both non-baseline candidates count in
+    n_trials. Needs no PBR-era cut (bars only) but needs 250 bars of
+    history, so every candidate (baseline included) is evaluated on codes
+    with at least that much -- see ff.used_extra_factors()'s union
+    behavior; baseline numbers here are therefore not comparable to other
+    modes'. Kept out of build_candidates() for the same union-of-extra-
+    factors reason as build_pbr_candidates()."""
+    base = dict(active_weights)
+    momentum_w = base.pop("momentum", 0.0)
+    return {
+        "baseline": dict(active_weights),
+        "high250": {**base, "high250": momentum_w},
+        "mom_high250_half": {**base, "momentum": momentum_w / 2, "high250": momentum_w / 2},
+    }
+
+
 def pbr_history_start(universe_data):
     """Earliest value_series usable_date across the universe, or None if no
     code has any PBR history."""
@@ -182,6 +204,8 @@ def main():
                       help="改跑 baseline vs with_pbr（兩個權重），且只用 PBR 有資料的區段（見 build_pbr_candidates）")
     mode.add_argument("--skip21", action="store_true",
                       help="改跑 baseline vs 動能換成跳過最近 21 根的 60/120 視窗（見 build_skip21_candidates）")
+    mode.add_argument("--high250", action="store_true",
+                      help="改跑 baseline vs 52 週高點接近度（取代動能／與動能對半，見 build_high250_candidates）")
     args = ap.parse_args()
 
     universe_data = rfi.load_cached_universe()
@@ -228,6 +252,8 @@ def main():
         candidates = build_pbr_candidates(active_weights)
     elif args.skip21:
         candidates = build_skip21_candidates(active_weights)
+    elif args.high250:
+        candidates = build_high250_candidates(active_weights)
     else:
         candidates = build_candidates(active_weights)
     print(f"candidates: {list(candidates)}")
@@ -264,7 +290,7 @@ def main():
     print(f"  candidate_scores={result['candidate_scores']} fold_argmax={result['fold_argmax']} "
           f"pbo={result['pbo']} dsr={result['dsr']} n_trials={result['n_trials']}")
 
-    run_id = f"strategy_search{'_pbr' if args.pbr else '_skip21' if args.skip21 else ''}_{dt.date.today().isoformat()}"
+    run_id = f"strategy_search{'_pbr' if args.pbr else '_skip21' if args.skip21 else '_high250' if args.high250 else ''}_{dt.date.today().isoformat()}"
     if not args.dry_run:
         persist_trials(conn, run_id, result)
 

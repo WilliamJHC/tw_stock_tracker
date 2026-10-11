@@ -383,6 +383,34 @@ def test_extra_factor_registry_has_skip21_windows():
     assert ff.mom120_skip21(bars, 199) == ff.momentum_skip_pct(bars, 199, 120)
 
 
+# --------------------------------------------------------- high250_ratio --
+
+def test_high250_ratio_at_and_below_window_high():
+    # 250 bars: rises 100 -> 349, last bar is the window high -> ratio 1.0
+    rising = _bars([100.0 + i for i in range(250)])
+    assert ff.high250_ratio(rising, 249) == 1.0
+    # peak 200 at bar 100, last close 150 -> 0.75
+    closes = [100.0] * 250
+    closes[100] = 200.0
+    closes[249] = 150.0
+    assert ff.high250_ratio(_bars(closes), 249) == 0.75
+
+
+def test_high250_ratio_needs_full_window_and_ignores_older_bars():
+    bars = _bars([100.0] * 300)
+    assert ff.high250_ratio(bars, 248) is None  # only 249 bars available
+    assert ff.high250_ratio(bars, 249) == 1.0
+    # a spike older than the trailing 250 bars must not count
+    closes = [100.0] * 300
+    closes[10] = 1000.0
+    assert ff.high250_ratio(_bars(closes), 299) == 1.0
+    assert ff.high250_ratio(_bars(closes), 259) == 0.1  # spike still inside window
+
+
+def test_extra_factor_registry_has_high250():
+    assert ff.EXTRA_FACTOR_FUNCS["high250"] is ff.high250_ratio
+
+
 # ------------------------------------------------------- ma_cross_signal --
 
 def test_ma_cross_signal_hand_computed():

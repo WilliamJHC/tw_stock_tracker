@@ -451,6 +451,23 @@ def mom120_skip21(bars, idx):
     return momentum_skip_pct(bars, idx, 120)
 
 
+HIGH_PROXIMITY_DAYS = 250
+
+
+def high250_ratio(bars, idx, window=HIGH_PROXIMITY_DAYS):
+    """52-week-high proximity: close at bars[idx] divided by the highest close
+    over the trailing `window` bars (idx inclusive), in (0, 1]; 1.0 = closing
+    at the window high. Same _close() (c_adj-first) convention as
+    momentum_pct(). None if fewer than `window` bars of history, or the
+    window high is 0."""
+    if idx + 1 < window:
+        return None
+    hi = max(_close(b) for b in bars[idx + 1 - window: idx + 1])
+    if not hi:
+        return None
+    return _close(bars[idx]) / hi
+
+
 def ma_cross_signal(bars, idx, short_window=5, long_window=20):
     """Short-window vs long-window moving-average cross, as a signed percent
     gap: (short_ma - long_ma) / long_ma * 100, using _close() (c_adj-first,
@@ -557,6 +574,7 @@ value_pbr_factor.needs_entry = True
 EXTRA_FACTOR_FUNCS = {
     "ma_cross": ma_cross_signal, "vol_price_div": volume_price_divergence, "value_pbr": value_pbr_factor,
     "mom60_skip21": mom60_skip21, "mom120_skip21": mom120_skip21,
+    "high250": high250_ratio,
 }
 
 REQUIRED_FACTOR_KEYS = frozenset({"revenue", "roe", "momentum"})
