@@ -153,11 +153,23 @@ GitHub Actions（排程）
 不是拍腦袋定案——`.github/workflows/optimize.yml` 每月重跑一次 rank-IC 評估，
 把新算出的建議權重跟目前生效的權重做 purged walk-forward 比較，通過 DSR/PBO/
 高原三道門檻、且樣本外平均報酬嚴格高於目前生效的權重，才自動套用（見 `docs/adr/0002-auto-apply-ranking-weights.md`）；
-套用後下一週期表現變差會自動退回前一組。**已知限制**：這個 workflow 只重新
-評估既有快取（`cache/factor_run/`，靠 `actions/cache` 跨執行留存），不會自己
-重抓資料——增量更新／季度全量重抛目前還沒做，要更新底層資料得手動跑
-`python scripts/run_factor_backtest.py --universe all`（見 `scripts/
-run_ranking_optimize.py` 檔頭 docstring 的 KNOWN GAP 說明）。
+套用後下一週期表現變差會自動退回前一組。這個 workflow 本身只重新評估既有快取
+（`cache/factor_run/`，靠 `actions/cache` 跨執行留存），不會自己重抓資料；快取
+的更新分兩條線：日線由每週的 `update_universe_bars_part1/2` 負責，月營收與季財報
+由 `update-fundamentals`（見下）負責。
+
+**月營收／季財報的定期更新**（`.github/workflows/update_fundamentals.yml`，腳本
+`scripts/update_fundamentals.py`）：每月 11 日（營收截止日 10 日之後）與 15 日（補抓
+遲交）、5/16、4/1 各跑一次，8/15、11/15 由每月 15 日那班順便涵蓋（`--kind auto`
+會處理所有到期的種類，營收優先）。做法是每檔重抓近 760 天營收（1 個請求）／900 天
+財報（3 個請求），重算後**併入**快取裡既有的完整歷史序列（不是覆蓋，否則回測歷史會被截斷）。
+哪些檔「到期」由目標期別決定（營收＝10 日後該公布的最新月份；財報＝法定截止日
+5/15、8/14、11/14、3/31 之後的最新一季），已追上就不再抓，所以漏跑一次、被中斷、
+手動重跑都安全；該期尚未公布的檔每天最多重試一次，不會無限接力。成本：營收
+全市場約 3–4 小時；財報約 10 小時，會分數輪自動接力。與每週日線更新共用
+`update-universe-bars` concurrency group（兩者都讀寫同一份快取，不能並行）。
+**第一次**（快取剛播種完）所有檔都沒有期別標記，會整批重抓一輪營收＋財報再進入常態。
+這條路徑已用真實 FinMind 對單檔實測過合併結果，但整個 workflow 尚未在雲端實跑。
 
 **雲端快取的初次播種**：`cache/` 不進版控，雲端的 `update-universe-bars-state-*`
 快取血統一開始並不存在，`optimize.yml`／`strategy_search.yml`／
