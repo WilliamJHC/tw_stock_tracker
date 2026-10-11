@@ -1,0 +1,143 @@
+name: update-fundamentals
+
+# Periodic refresh of cache/factor_run/*.json's revenue_series (weight 0.4) and the
+# financials-derived series (roe 0.3 + margin trends + accrual), which
+# update_universe_bars_part1/2 never touch. See scripts/update_fundamentals.py's
+# module docstring for the design (target-period markers -> idempotent, resumable).
+#
+# Schedule (UTC; Taiwan = UTC+8):
+#   11th & 15th every month  revenue deadline is the 10th; the 15th retries late
+#                            codes. The 15th of Aug/Nov also lands just after the
+#                            Q2/Q3 filing deadlines (8/14, 11/14), so those quarters
+#                            are picked up there too ("auto" does whatever is due).
+#   16 May                   Q1 deadline 5/15
+#   1 Apr                    Q4/annual deadline 3/31
+# Cost: revenue ~1 req/code (~3.3h for the universe at 550 req/hr), financials
+# 3 req/code (~10h) -> the job is time-boxed and re-dispatches itself while it
+# still makes progress, same pattern as seed_factor_run.yml.
+#
+# Shares the `update-universe-bars` concurrency group with the weekly bar refresh:
+# all of them read-modify-write the same cache/factor_run lineage, so they must
+# never run at the same time (parallel runs would each save a snapshot and the
+# later one would silently drop the other's updates). GitHub keeps only ONE pending
+# run per group and a newer pending run cancels the older one, so the relay step
+# does not dispatch the next slice while a weekly bar refresh is waiting (it would
+# cancel it). The refresh is idempotent: the next schedule resumes the remainder.
+on:
+  schedule:
+    - cron: '0 0 11,15 * *'
+    - cron: '0 0 16 5 *'
+    - cron: '0 0 1 4 *'
+  workflow_dispatch:
+    inputs:
+      kind:
+        type: choice
+        description: 'auto = 所有到期的種類（營收優先）'
+        options: [auto, revenue, financials]
+        default: auto
+      dry_run:
+        type: boolean
+        description: '只抓取/合併並印出結果，不寫回 cache、不發 Telegram'
+        default: false
+      limit:
+        type: string
+        description: '只處理前 N 檔（留空 = 全部），小樣本測試用'
+        default: ''
+      auto_continue:
+        type: boolean
+        description: '未完成時自動接力下一輪'
+        default: true
+
+concurrency:
+  group: update-universe-bars
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write   # gh workflow run (chain the next slice)
+
+jobs:
+  update-fundamentals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # under the 360 hard cap; the script stops starting codes at 300
+    environment: Cloudflare
+    env:
+      FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: check secrets
+        run: |
+          missing=""
+          [ -z "$FINMIND_TOKEN" ] && missing="$missing FINMIND_TOKEN"
+          [ -z "$TELEGRAM_BOT_TOKEN" ] && missing="$missing TELEGRAM_BOT_TOKEN"
+          [ -z "$TELEGRAM_CHAT_ID" ] && missing="$missing TELEGRAM_CHAT_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::缺少或空白的 secrets:$missing（Settings → Environments → Cloudflare）"
+            exit 1
+          fi
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-actions.txt
+      - run: pip install -r requirements-actions.txt
+      # Same lineage as update_universe_bars_part1/2: restore the newest snapshot,
+      # save a new one on success (a failed run, e.g. bad token, saves nothing).
+      - uses: actions/cache@v4
+        with:
+          path: cache/factor_run
+          key: update-universe-bars-state-${{ github.run_id }}
+          restore-keys: |
+            update-universe-bars-state-
+      - name: update_fundamentals
+        id: fund
+        env:
+          KIND: ${{ inputs.kind || 'auto' }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          args=(--kind "$KIND" --budget-minutes 300)
+          [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
+          if [ -n "$LIMIT" ]; then
+            if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then
+              echo "::error::limit 必須是整數，收到：$LIMIT"
+              exit 1
+            fi
+            args+=(--limit "$LIMIT")
+          fi
+          python -u scripts/update_fundamentals.py "${args[@]}"
+      # Scheduled runs have no `inputs` (null), and in expressions `null != false`
+      # is false (both coerce to 0) -- so test the event name explicitly instead of
+      # "auto_continue != false". A run with `limit` is a smoke test: never chain it
+      # (its `remaining` only covers the limited subset, the next slice would not be).
+      - name: dispatch next slice
+        if: steps.fund.outputs.remaining != '0' && steps.fund.outputs.progress != '0' && (github.event_name == 'schedule' || inputs.auto_continue) && !inputs.dry_run && inputs.limit == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          KIND: ${{ inputs.kind || 'auto' }}
+        run: |
+          # GitHub keeps ONE pending run per concurrency group and a newer pending
+          # run cancels the older one. If a weekly bar refresh is already waiting
+          # behind this job, dispatching the next slice would cancel it -- let it
+          # run first; the 11th/15th schedule (or a manual dispatch) resumes the rest.
+          waiting=0
+          for wf in update_universe_bars_part1.yml update_universe_bars_part2.yml; do
+            for st in queued pending waiting; do
+              n=$(gh run list --workflow "$wf" --status "$st" --json databaseId --jq 'length')
+              waiting=$((waiting + n))
+            done
+          done
+          if [ "$waiting" -gt 0 ]; then
+            echo "::notice::週更日線 run 正在排隊（$waiting 個），不接力以免把它擠掉；剩餘項目由下一次排程接手"
+            exit 0
+          fi
+          gh workflow run update_fundamentals.yml --ref "${{ github.ref_name }}" -f kind="$KIND" -f auto_continue=true
+      - name: report
+        run: |
+          echo "remaining=${{ steps.fund.outputs.remaining }} progress=${{ steps.fund.outputs.progress }}"
+          if [ "${{ steps.fund.outputs.remaining }}" != "0" ] && [ "${{ steps.fund.outputs.progress }}" = "0" ]; then
+            echo "::warning::本輪沒有任何進展且尚未完成，不再自動接力，請檢查 log"
+          fi
