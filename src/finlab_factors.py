@@ -604,6 +604,23 @@ def used_extra_factors(weight_dicts):
     return {k: EXTRA_FACTOR_FUNCS[k] for k in used_keys}
 
 
+# Calendar days of pre-window history a factor needs when a simulation is
+# sliced to start at a segment's own first date. 250 trading bars is about
+# 350 calendar days; 400 leaves room for long holiday stretches. Only
+# factors whose window outruns optimize.ROLLING_MOMENTUM_LOOKBACK_BUFFER_DAYS
+# (120) are listed -- the rest are already covered by that default.
+EXTRA_FACTOR_LOOKBACK_DAYS = {"high250": 400}
+
+
+def extra_factor_lookback_days(weight_dicts, default):
+    """Calendar-day buffer to slice ahead of a held-out segment so every
+    extra factor in `weight_dicts` has its full window at the segment's
+    first rebalance: the larger of `default` and the longest need among the
+    factors those weights reference."""
+    need = [EXTRA_FACTOR_LOOKBACK_DAYS[k] for w in weight_dicts for k in w if k in EXTRA_FACTOR_LOOKBACK_DAYS]
+    return max([default, *need])
+
+
 def _pct_rank(values):
     """{code: number} -> {code: percentile in (0, 1]}, average-rank ties
     (matches pandas .rank(pct=True), which the original FinLab strategy

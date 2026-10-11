@@ -146,11 +146,17 @@ def build_high250_candidates(active_weights):
     behavior; baseline numbers here are therefore not comparable to other
     modes'. Kept out of build_candidates() for the same union-of-extra-
     factors reason as build_pbr_candidates()."""
+    if "high250" in active_weights:
+        raise ValueError(
+            "active weights already include high250; --high250 races a "
+            "momentum->high250 swap against a baseline without it and would "
+            "overwrite the live high250 weight"
+        )
     base = dict(active_weights)
     momentum_w = base.pop("momentum", 0.0)
     return {
         "baseline": dict(active_weights),
-        "high250": {**base, "high250": momentum_w},
+        "high250":{**base, "high250": momentum_w},
         "mom_high250_half": {**base, "momentum": momentum_w / 2, "high250": momentum_w / 2},
     }
 
@@ -311,24 +317,30 @@ def main():
     # momentum_pct()/ma_cross_signal()/volume_price_divergence() already
     # have enough lookback history at the test segment's own first
     # rebalance dates instead of returning None there.
-    buffered_start = (dt.date.fromisoformat(test_start)
-                       - dt.timedelta(days=opt.ROLLING_MOMENTUM_LOOKBACK_BUFFER_DAYS)).isoformat()
+    winner_weights = candidates[winner]
+    baseline_weights = candidates["baseline"]
+    # Longer-window factors (high250 needs 250 bars) get a longer buffer, or
+    # their value is None at every test-segment rebalance and the sim is
+    # empty. Wider of the two candidates' needs so both sims share one slice.
+    lookback_days = ff.extra_factor_lookback_days(
+        [winner_weights, baseline_weights], opt.ROLLING_MOMENTUM_LOOKBACK_BUFFER_DAYS)
+    buffered_start = (dt.date.fromisoformat(test_start) - dt.timedelta(days=lookback_days)).isoformat()
     test_sim_start = max(calendar[0], buffered_start)
     test_universe = opt._slice_universe_by_date(universe_data, test_sim_start, test_end)
 
-    winner_weights = candidates[winner]
-    # Only the extra factor(s) winner/baseline actually use -- NOT the full
-    # ff.EXTRA_FACTOR_FUNCS. Using the full set here would apply
-    # vol_price_div's eligibility filter to baseline_sim (and to winner_sim
-    # if winner is "with_ma_cross") even though neither candidate's weights
-    # reference it, artificially narrowing the held-out test-segment
-    # universe relative to how each candidate actually behaves in
-    # production (used_extra_factors([weights]) there too, see
-    # run_daily_recommendations.py) -- exactly the bias this human-facing
-    # apply/reject report must not have.
-    test_extra_factors = ff.used_extra_factors([winner_weights, candidates["baseline"]])
-    winner_sim = pb.simulate(test_universe, params={"ranking_weights": winner_weights, "extra_factors": test_extra_factors})
-    baseline_sim = pb.simulate(test_universe, params={"ranking_weights": candidates["baseline"], "extra_factors": test_extra_factors})
+    # Each candidate gets only the extra factor(s) ITS OWN weights use, as in
+    # production (used_extra_factors([weights]), see
+    # run_daily_recommendations.py) -- NOT the full ff.EXTRA_FACTOR_FUNCS and
+    # NOT a shared winner+baseline union. Either would apply an extra
+    # factor's eligibility filter (every extra factor must be non-None) to a
+    # candidate whose weights never reference it, artificially narrowing its
+    # held-out test-segment universe -- exactly the bias this human-facing
+    # apply/reject report must not have. (The TRAIN race still uses a union
+    # on purpose, for an apples-to-apples walk-forward.)
+    winner_sim = pb.simulate(test_universe, params={
+        "ranking_weights": winner_weights, "extra_factors": ff.used_extra_factors([winner_weights])})
+    baseline_sim = pb.simulate(test_universe, params={
+        "ranking_weights": baseline_weights, "extra_factors": ff.used_extra_factors([baseline_weights])})
     winner_test_summary = _test_window_summary(winner_sim, test_start, test_end)
     baseline_test_summary = _test_window_summary(baseline_sim, test_start, test_end)
 

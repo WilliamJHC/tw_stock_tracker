@@ -679,3 +679,18 @@ def test_composite_scores_reuses_precomputed_ranks_instead_of_recomputing():
 def test_top_n_descending_and_truncated():
     scores = {"A": 0.9, "B": 0.5, "C": 0.7, "D": 0.1}
     assert ff.top_n(scores, 2) == ["A", "C"]
+
+
+# ----------------------------------------------- extra_factor_lookback_days --
+
+def test_extra_factor_lookback_days_default_when_no_long_factor():
+    assert ff.extra_factor_lookback_days([{"revenue": 0.4, "roe": 0.3, "momentum": 0.3}], 120) == 120
+    assert ff.extra_factor_lookback_days([], 120) == 120
+
+
+def test_extra_factor_lookback_days_widens_for_high250_in_any_candidate():
+    base = {"revenue": 0.4, "roe": 0.3, "momentum": 0.3}
+    with_high = {"revenue": 0.4, "roe": 0.3, "high250": 0.3}
+    assert ff.extra_factor_lookback_days([base, with_high], 120) == 400
+    # 400 calendar days comfortably covers 250 trading bars.
+    assert 400 > ff.HIGH_PROXIMITY_DAYS * 7 / 5
