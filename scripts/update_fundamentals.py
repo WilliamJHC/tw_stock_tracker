@@ -33,9 +33,9 @@ Usage:
                                           [--budget-minutes 300] [--limit N]
                                           [--dry-run]
 
-Reports through $GITHUB_OUTPUT (when set): `remaining` (codes still due, not yet
-attempted today) and `progress` (codes attempted by this run); the workflow
-chains another slice only while both are > 0.
+Reports through $GITHUB_OUTPUT (when set): `remaining` (items still due, not yet
+attempted today) and `progress` (items this run handled without a fetch
+failure); the workflow chains another slice only while both are > 0.
 """
 import argparse
 import datetime as dt
@@ -95,16 +95,31 @@ def financials_target(today):
     return best
 
 
-def merge_series(old, new, tolerance_days=MERGE_TOLERANCE_DAYS):
+def first_yoy_lag_date(rows):
+    """Fixed-lag usable_date of the first revenue period that yields a YoY point
+    (its prior-year month is present). Deterministic -- unlike the fresh series'
+    first usable_date, which may be a later announce_date -- so it is a stable
+    anchor for where the cached series should be cut."""
+    dates = {r["date"] for r in rows}
+    for d in sorted(dates):
+        if f"{int(d[:4]) - 1:04d}{d[4:]}" in dates:
+            return ff._month_end_lag_date(d, ff.REVENUE_LAG_DAYS)
+    return None
+
+
+def merge_series(old, new, tolerance_days=MERGE_TOLERANCE_DAYS, anchor_date=None):
     """Append the freshly recomputed `new` series to the cached `old` one.
-    Old points from `new`'s first period onward are dropped (the fresh fetch wins,
-    e.g. restated figures); the tolerance matches the same period even when its
-    usable_date moved between computations. usable_date is then clamped to be
-    non-decreasing -- _as_of() bisects assuming ascending order. An empty `new`
-    leaves `old` untouched."""
+    Old points from the first refetched period onward are dropped (the fresh
+    fetch wins, e.g. restated figures). That period is located by `anchor_date`
+    when given (revenue: first_yoy_lag_date()), else by new[0]'s usable_date --
+    exact for the quarterly series, whose usable_date is quarter-end + 60d in
+    every computation. The tolerance absorbs a period's usable_date moving a few
+    days between computations. usable_date is then clamped to be non-decreasing
+    -- _as_of() bisects assuming ascending order. An empty `new` leaves `old`
+    untouched."""
     if not new:
         return old or []
-    cut = ff._shift_date(new[0]["usable_date"], -tolerance_days)
+    cut = ff._shift_date(anchor_date or new[0]["usable_date"], -tolerance_days)
     merged = [p for p in (old or []) if p["usable_date"] < cut] + list(new)
     out, last = [], None
     for p in merged:
@@ -125,10 +140,19 @@ def is_due(cached, kind, target, today):
 
 
 def refresh_code(code, kind, target, today, dry_run, limiter, fetch_revenue=None, fetch_financials=None):
-    """Returns {"status": "updated"|"stale"|"failed"|"skipped", "detail": str}.
-    updated = rows reached the target period; stale = fetched and merged but
-    the target period is not published yet; failed = fetch error / no usable
-    series (cache untouched except the attempt marker). Never raises."""
+    """Returns {"status": "updated"|"stale"|"insufficient"|"failed"|"skipped",
+    "detail": str}.
+      updated      rows reached the target period (marked done)
+      stale        fetched and merged, but the target period is not published
+                   yet (retried at most once per day)
+      insufficient rows came back but are too few to build the series (new
+                   listing, gaps) -- terminal for this period, so it is marked
+                   done instead of burning requests on every run
+      failed       no rows at all: a fetch error and "no data" look the same
+                   (get_*() return None for both), so nothing is written and
+                   no marker is set -- a transient 429/timeout is retried by
+                   the next slice/run rather than waiting a whole period
+    Never raises."""
     fetch_revenue = fetch_revenue or ds.get_monthly_revenue
     fetch_financials = fetch_financials or ds.get_financials
     try:
@@ -140,12 +164,13 @@ def refresh_code(code, kind, target, today, dry_run, limiter, fetch_revenue=None
         return {"status": "skipped", "detail": "not due"}
 
     fr = dict(cached.get("fund_refresh") or {})
-    fr[f"{kind}_attempt"] = today.isoformat()
+    anchors = {}
     try:
         if kind == "revenue":
             limiter.before_request()
             rows = fetch_revenue(code, days=REVENUE_DAYS, cache=False)
             fresh = {"revenue_series": ff.revenue_yoy_series(rows or [])}
+            anchors["revenue_series"] = first_yoy_lag_date(rows or [])
             ok = bool(fresh["revenue_series"])
         else:
             for _ in range(3):  # get_financials() issues 3 requests (income/balance/cashflow)
@@ -156,16 +181,26 @@ def refresh_code(code, kind, target, today, dry_run, limiter, fetch_revenue=None
     except Exception as e:  # noqa: BLE001 -- one bad code must not kill the run
         return {"status": "failed", "detail": f"{kind} fetch error: {e}"}
 
+    if not rows:
+        return {"status": "failed", "detail": f"{kind}: no rows (fetch error or no data)"}
+
+    fr[f"{kind}_attempt"] = today.isoformat()
     if not ok:
+        fr[kind] = target
+        cached["fund_refresh"] = fr
         if not dry_run:
-            cached["fund_refresh"] = fr
             rfb.save_code_cache(code, cached)
-        return {"status": "failed", "detail": f"{kind}: no usable rows/series"}
+        return {"status": "insufficient", "detail": f"{kind}: {len(rows)} rows, too few for a series"}
 
     latest = rows[-1]["date"]
     reached = latest >= target
+    if kind == "financials":
+        # The cash-flow request is swallowed inside get_financials(): if it alone
+        # failed, the newest quarter has no operating_cash_flow and
+        # accrual_quality_series silently lacks it. Don't mark done in that case.
+        reached = reached and rows[-1].get("operating_cash_flow") is not None
     for key, series in fresh.items():
-        cached[key] = merge_series(cached.get(key), series)
+        cached[key] = merge_series(cached.get(key), series, anchor_date=anchors.get(key))
     if reached:
         fr[kind] = target
     cached["fund_refresh"] = fr
@@ -178,25 +213,29 @@ def refresh_code(code, kind, target, today, dry_run, limiter, fetch_revenue=None
 
 def build_todo(codes, kinds, today):
     """[(kind, code, target)] in `kinds` order (revenue first: higher weight and
-    cheaper). Reads each cache file once per kind."""
+    cheaper). Reads each cache file (multi-MB with bars) once."""
     targets = {"revenue": revenue_target(today), "financials": financials_target(today)}
-    todo = []
-    for kind in kinds:
-        for code in codes:
-            try:
-                with open(rfb.code_cache_path(code), encoding="utf-8") as f:
-                    cached = json.load(f)
-            except (OSError, ValueError):
-                continue
+    due = {kind: [] for kind in kinds}
+    for code in codes:
+        try:
+            with open(rfb.code_cache_path(code), encoding="utf-8") as f:
+                cached = json.load(f)
+        except (OSError, ValueError):
+            continue
+        for kind in kinds:
             if is_due(cached, kind, targets[kind], today):
-                todo.append((kind, code, targets[kind]))
-    return todo
+                due[kind].append((kind, code, targets[kind]))
+    return [item for kind in kinds for item in due[kind]]
 
 
 def probe_finmind():
+    """True when a real FinMind request succeeds. Deliberately NOT
+    ds.get_daily(): that falls back to Fugle/TWSE/yfinance, so it would pass
+    with a bad FINMIND_TOKEN while every revenue/financials request fails."""
     try:
-        return bool(ds.get_daily(PROBE_CODE, days=10, cache=False))
-    except Exception as e:  # noqa: BLE001
+        start = (dt.date.today() - dt.timedelta(days=30)).isoformat()
+        return bool(ds._finmind("TaiwanStockPrice", PROBE_CODE, start))
+    except Exception as e:  # noqa: BLE001 -- any failure means "do not trust this run"
         print(f"probe {PROBE_CODE} failed: {e}")
         return False
 
@@ -207,7 +246,7 @@ def run(todo, today, dry_run, budget_seconds, limiter, refresh=refresh_code, pro
     failures). Raises RuntimeError after MAX_CONSECUTIVE_FAILURES failures in a
     row when the probe request also fails (bad token / outage): the workflow then
     discards this slice instead of saving it."""
-    counts = {"updated": 0, "stale": 0, "failed": 0, "skipped": 0}
+    counts = {"updated": 0, "stale": 0, "insufficient": 0, "failed": 0, "skipped": 0}
     failures, attempted, streak = [], 0, 0
     deadline = clock() + budget_seconds
     for i, (kind, code, target) in enumerate(todo):
@@ -278,12 +317,16 @@ def main():
 
     counts, attempted, failures = run(todo, today, args.dry_run, args.budget_minutes * 60, rfb.RateLimiter())
     remaining = len(build_todo(codes, kinds, today)) if not args.dry_run else len(todo) - attempted
+    # Failed items stay due (no marker), so they are not "progress": a slice that
+    # only re-tried failures reports 0 and ends the relay chain.
+    progress = attempted - counts["failed"]
     msg = (f"[基本面增量更新] 本次處理 {attempted} 項：updated={counts['updated']} "
-           f"stale={counts['stale']}（目標期尚未公布）failed={counts['failed']}；尚餘 {remaining} 項")
+           f"stale={counts['stale']}（目標期尚未公布）insufficient={counts['insufficient']}（歷史不足）"
+           f"failed={counts['failed']}（無資料或抓取錯誤，下次重試）；尚餘 {remaining} 項")
     if failures:
         msg += "\n失敗清單（前 10）：" + "; ".join(failures[:10])
     print(msg)
-    write_outputs(remaining, attempted)
+    write_outputs(remaining, progress)
     if not args.dry_run:
         try:
             alerts.send_telegram(msg)

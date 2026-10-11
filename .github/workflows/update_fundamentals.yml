@@ -20,8 +20,9 @@ name: update-fundamentals
 # all of them read-modify-write the same cache/factor_run lineage, so they must
 # never run at the same time (parallel runs would each save a snapshot and the
 # later one would silently drop the other's updates). GitHub keeps only ONE pending
-# run per group, so a queued run can be superseded by a newer one -- harmless here
-# because the refresh is idempotent and the next schedule resumes the remainder.
+# run per group and a newer pending run cancels the older one, so the relay step
+# does not dispatch the next slice while a weekly bar refresh is waiting (it would
+# cancel it). The refresh is idempotent: the next schedule resumes the remainder.
 on:
   schedule:
     - cron: '0 0 11,15 * *'
@@ -97,20 +98,43 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           LIMIT: ${{ inputs.limit }}
         run: |
-          args="--kind $KIND --budget-minutes 300"
-          [ "$DRY_RUN" = "true" ] && args="$args --dry-run"
-          [ -n "$LIMIT" ] && args="$args --limit $LIMIT"
-          python -u scripts/update_fundamentals.py $args
+          args=(--kind "$KIND" --budget-minutes 300)
+          [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
+          if [ -n "$LIMIT" ]; then
+            if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then
+              echo "::error::limit 必須是整數，收到：$LIMIT"
+              exit 1
+            fi
+            args+=(--limit "$LIMIT")
+          fi
+          python -u scripts/update_fundamentals.py "${args[@]}"
       # Scheduled runs have no `inputs` (null), and in expressions `null != false`
       # is false (both coerce to 0) -- so test the event name explicitly instead of
-      # "auto_continue != false".
+      # "auto_continue != false". A run with `limit` is a smoke test: never chain it
+      # (its `remaining` only covers the limited subset, the next slice would not be).
       - name: dispatch next slice
-        if: steps.fund.outputs.remaining != '0' && steps.fund.outputs.progress != '0' && (github.event_name == 'schedule' || inputs.auto_continue) && !inputs.dry_run
+        if: steps.fund.outputs.remaining != '0' && steps.fund.outputs.progress != '0' && (github.event_name == 'schedule' || inputs.auto_continue) && !inputs.dry_run && inputs.limit == ''
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           KIND: ${{ inputs.kind || 'auto' }}
-        run: gh workflow run update_fundamentals.yml --ref "${{ github.ref_name }}" -f kind="$KIND" -f auto_continue=true
+        run: |
+          # GitHub keeps ONE pending run per concurrency group and a newer pending
+          # run cancels the older one. If a weekly bar refresh is already waiting
+          # behind this job, dispatching the next slice would cancel it -- let it
+          # run first; the 11th/15th schedule (or a manual dispatch) resumes the rest.
+          waiting=0
+          for wf in update_universe_bars_part1.yml update_universe_bars_part2.yml; do
+            for st in queued pending waiting; do
+              n=$(gh run list --workflow "$wf" --status "$st" --json databaseId --jq 'length')
+              waiting=$((waiting + n))
+            done
+          done
+          if [ "$waiting" -gt 0 ]; then
+            echo "::notice::週更日線 run 正在排隊（$waiting 個），不接力以免把它擠掉；剩餘項目由下一次排程接手"
+            exit 0
+          fi
+          gh workflow run update_fundamentals.yml --ref "${{ github.ref_name }}" -f kind="$KIND" -f auto_continue=true
       - name: report
         run: |
           echo "remaining=${{ steps.fund.outputs.remaining }} progress=${{ steps.fund.outputs.progress }}"

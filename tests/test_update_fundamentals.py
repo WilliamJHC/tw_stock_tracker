@@ -150,7 +150,9 @@ def test_refresh_revenue_target_not_published_marks_attempt_only():
     assert "revenue" not in fr and fr["revenue_attempt"] == "2026-10-11"
 
 
-def test_refresh_failure_keeps_series_and_records_attempt():
+def test_refresh_failure_writes_nothing_so_it_is_retried():
+    # A transient 429/timeout returns None just like "no data": it must not
+    # consume the once-per-day attempt, or it would wait for the next schedule.
     today = D("2026-10-11")
     old = [{"usable_date": "2026-01-10", "yoy_pct": 2.0}]
     _write("2330", {"bars": [{"date": "x"}], "revenue_series": old})
@@ -159,7 +161,55 @@ def test_refresh_failure_keeps_series_and_records_attempt():
     assert res["status"] == "failed"
     cached = _read("2330")
     assert cached["revenue_series"] == old
-    assert cached["fund_refresh"]["revenue_attempt"] == "2026-10-11"
+    assert "fund_refresh" not in cached
+    assert uf.is_due(cached, "revenue", "2026-09-01", today)
+
+
+def test_refresh_insufficient_history_is_terminal_for_the_period():
+    today = D("2026-10-11")
+    _write("6999", {"bars": [{"date": "x"}], "revenue_series": []})
+    rows = _revenue_rows(2026, 5, 5)  # 5 months: no YoY point possible
+    res = uf.refresh_code("6999", "revenue", "2026-09-01", today, False, NoLimit(),
+                          fetch_revenue=lambda code, days, cache: rows)
+    assert res["status"] == "insufficient"
+    cached = _read("6999")
+    assert cached["fund_refresh"]["revenue"] == "2026-09-01"
+    assert not uf.is_due(cached, "revenue", "2026-09-01", today)
+
+
+def test_refresh_financials_missing_cashflow_is_not_marked_done():
+    today = D("2026-10-11")
+    _write("2330", {"bars": [{"date": "x"}]})
+    qends = ["2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31", "2025-03-31", "2025-06-30",
+             "2025-09-30", "2025-12-31", "2026-03-31", "2026-06-30"]
+    rows = _fin_rows(qends)
+    rows[-1]["operating_cash_flow"] = None  # cash-flow request failed for the newest quarter
+    res = uf.refresh_code("2330", "financials", "2026-06-30", today, False, NoLimit(),
+                          fetch_financials=lambda code, days, cache: rows)
+    assert res["status"] == "stale"
+    assert "financials" not in _read("2330")["fund_refresh"]
+
+
+def test_revenue_merge_uses_fixed_lag_anchor_not_shifted_announce_date():
+    # Cached point for the first refetched month used the fixed lag (2025-10-10).
+    # The refetch carries a much later announce_date for that month; cutting by
+    # new[0] alone would keep the old point too and duplicate the period.
+    today = D("2026-10-11")
+    rows = _revenue_rows(2024, 9, 25)
+    rows[12]["announce_date"] = "2025-11-20"  # first YoY month (2025-09): restated, late
+    _write("2330", {"bars": [{"date": "x"}],
+                    "revenue_series": [{"usable_date": "2025-09-10", "yoy_pct": 1.0},
+                                       {"usable_date": "2025-10-10", "yoy_pct": 2.0}]})
+    uf.refresh_code("2330", "revenue", "2026-09-01", today, False, NoLimit(),
+                    fetch_revenue=lambda code, days, cache: rows)
+    series = _read("2330")["revenue_series"]
+    assert [p["usable_date"] for p in series if p["yoy_pct"] in (1.0, 2.0)] == ["2025-09-10"]
+    assert len(series) == 1 + 13  # the one kept old point + 13 fresh YoY points
+
+
+def test_first_yoy_lag_date():
+    assert uf.first_yoy_lag_date(_revenue_rows(2024, 9, 25)) == "2025-10-10"
+    assert uf.first_yoy_lag_date(_revenue_rows(2026, 1, 5)) is None
 
 
 def test_refresh_financials_updates_all_derived_series():
