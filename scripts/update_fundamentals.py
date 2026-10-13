@@ -25,8 +25,16 @@ How it works
     filer, FinMind lag) is attempted at most once per day, so the relay chain
     cannot loop on it; the next scheduled run retries it.
 
-Cost (FinMind limiter: 550 req/hr): revenue ~1 req/code -> ~1800 codes ~3.3h;
-financials 3 req/code -> ~10h, i.e. 2-3 relay slices of --budget-minutes.
+Cost (own limiter: 450 req/hr, below FinMind's 600 so other jobs sharing the
+token have head-room): revenue ~1 req/code -> ~1800 codes ~4h; financials
+3 req/code -> ~12h, i.e. 3-4 relay slices of --budget-minutes.
+
+Quota handling: get_monthly_revenue()/get_financials() swallow every error and
+return None, so a 402 (hourly quota used up) looks like "no data". The fetchers
+are therefore wrapped (_quota_watch) to notice it; the run then pauses and probes
+until the quota is back instead of burning through the todo list as failures, and
+if it is aborted anyway (bad token / outage) the work already written to the cache
+is still saved by the workflow (main() exits 0 and reports `aborted`).
 
 Usage:
     python scripts/update_fundamentals.py [--kind auto|revenue|financials]
@@ -34,10 +42,12 @@ Usage:
                                           [--dry-run]
 
 Reports through $GITHUB_OUTPUT (when set): `remaining` (items still due, not yet
-attempted today) and `progress` (items this run handled without a fetch
-failure); the workflow chains another slice only while both are > 0.
+attempted today), `progress` (items this run handled without a fetch failure)
+and `aborted` (true when the run gave up midway); the workflow chains another
+slice only while remaining and progress are > 0.
 """
 import argparse
+import contextlib
 import datetime as dt
 import json
 import os
@@ -58,6 +68,9 @@ FINANCIALS_DAYS = 900  # ~10 quarters: enough lookback for the YoY-style margin 
 MERGE_TOLERANCE_DAYS = 15  # same period's usable_date can differ (announce_date vs fixed lag)
 PROBE_CODE = "2330"
 MAX_CONSECUTIVE_FAILURES = 10
+RATE_LIMIT = 450           # req/hr; FinMind's real cap is 600, the rest is head-room for other jobs
+QUOTA_MARKERS = ("HTTP 402", "HTTP 429")   # what data_sources._finmind() puts in its SourceError
+QUOTA_WAIT_SECONDS = 600   # pause between probes while the hourly quota is used up
 REVENUE_DEADLINE_DAY = 10
 # (quarter-end month/day, filing-deadline month/day, deadline year offset)
 _QUARTERS = [((3, 31), (5, 15), 0), ((6, 30), (8, 14), 0), ((9, 30), (11, 14), 0), ((12, 31), (3, 31), 1)]
@@ -139,8 +152,67 @@ def is_due(cached, kind, target, today):
     return fr.get(kind) != target and fr.get(f"{kind}_attempt") != today.isoformat()
 
 
+class QuotaExceeded(Exception):
+    """A FinMind request hit the hourly quota (HTTP 402/429)."""
+
+
+class RunAborted(RuntimeError):
+    """run() gave up midway; carries what it had done so far so the caller can
+    still report it (the per-code cache writes are already on disk)."""
+
+    def __init__(self, message, counts, attempted, failures):
+        super().__init__(message)
+        self.counts, self.attempted, self.failures = counts, attempted, failures
+
+
+def _is_quota_error(exc):
+    return any(m in str(exc) for m in QUOTA_MARKERS)
+
+
+@contextlib.contextmanager
+def _quota_watch():
+    """get_monthly_revenue()/get_financials() swallow every SourceError and return
+    None (or, for the cash-flow request, a silently degraded result), so a quota
+    hit is indistinguishable from "no data". Wrap ds._finmind for the duration of
+    one fetch and yield a list that collects quota errors."""
+    hits = []
+    original = ds._finmind
+
+    def watched(*args, **kwargs):
+        try:
+            return original(*args, **kwargs)
+        except Exception as e:  # noqa: BLE001 -- only inspected, always re-raised
+            if _is_quota_error(e):
+                hits.append(str(e))
+            raise
+
+    ds._finmind = watched
+    try:
+        yield hits
+    finally:
+        ds._finmind = original
+
+
+def _fetch_guarded(fetch, code, days):
+    """Run a ds.get_*() fetch; raise QuotaExceeded when any request inside it hit
+    the quota, so its (empty or partial) result is never mistaken for data."""
+    with _quota_watch() as hits:
+        rows = fetch(code, days=days, cache=False)
+    if hits:
+        raise QuotaExceeded(hits[0])
+    return rows
+
+
+def _fetch_revenue(code, days, cache=False):
+    return _fetch_guarded(ds.get_monthly_revenue, code, days)
+
+
+def _fetch_financials(code, days, cache=False):
+    return _fetch_guarded(ds.get_financials, code, days)
+
+
 def refresh_code(code, kind, target, today, dry_run, limiter, fetch_revenue=None, fetch_financials=None):
-    """Returns {"status": "updated"|"stale"|"insufficient"|"failed"|"skipped",
+    """Returns {"status": "updated"|"stale"|"insufficient"|"failed"|"quota"|"skipped",
     "detail": str}.
       updated      rows reached the target period (marked done)
       stale        fetched and merged, but the target period is not published
@@ -152,9 +224,11 @@ def refresh_code(code, kind, target, today, dry_run, limiter, fetch_revenue=None
                    (get_*() return None for both), so nothing is written and
                    no marker is set -- a transient 429/timeout is retried by
                    the next slice/run rather than waiting a whole period
+      quota        a request hit FinMind's hourly quota; nothing is written and
+                   run() pauses until it recovers, then retries this item
     Never raises."""
-    fetch_revenue = fetch_revenue or ds.get_monthly_revenue
-    fetch_financials = fetch_financials or ds.get_financials
+    fetch_revenue = fetch_revenue or _fetch_revenue
+    fetch_financials = fetch_financials or _fetch_financials
     try:
         with open(rfb.code_cache_path(code), encoding="utf-8") as f:
             cached = json.load(f)
@@ -178,6 +252,8 @@ def refresh_code(code, kind, target, today, dry_run, limiter, fetch_revenue=None
             rows = fetch_financials(code, days=FINANCIALS_DAYS, cache=False)
             fresh = {key: fn(rows or []) for key, fn in FINANCIALS_SERIES.items()}
             ok = bool(fresh["roe_series"])
+    except QuotaExceeded as e:
+        return {"status": "quota", "detail": f"{kind}: {e}"}
     except Exception as e:  # noqa: BLE001 -- one bad code must not kill the run
         return {"status": "failed", "detail": f"{kind} fetch error: {e}"}
 
@@ -228,25 +304,42 @@ def build_todo(codes, kinds, today):
     return [item for kind in kinds for item in due[kind]]
 
 
-def probe_finmind():
-    """True when a real FinMind request succeeds. Deliberately NOT
+def probe_status():
+    """"ok" | "quota" | "error" for one real FinMind request. Deliberately NOT
     ds.get_daily(): that falls back to Fugle/TWSE/yfinance, so it would pass
     with a bad FINMIND_TOKEN while every revenue/financials request fails."""
     try:
         start = (dt.date.today() - dt.timedelta(days=30)).isoformat()
-        return bool(ds._finmind("TaiwanStockPrice", PROBE_CODE, start))
+        return "ok" if ds._finmind("TaiwanStockPrice", PROBE_CODE, start) else "error"
     except Exception as e:  # noqa: BLE001 -- any failure means "do not trust this run"
         print(f"probe {PROBE_CODE} failed: {e}")
-        return False
+        return "quota" if _is_quota_error(e) else "error"
+
+
+def probe_finmind():
+    """True when a real FinMind request succeeds."""
+    return probe_status() == "ok"
+
+
+def _wait_out_quota(probe, sleep, clock, deadline):
+    """Sleep in QUOTA_WAIT_SECONDS steps, probing after each, until a probe
+    succeeds (True) or the time budget runs out (False)."""
+    while clock() < deadline:
+        sleep(min(QUOTA_WAIT_SECONDS, max(deadline - clock(), 0)))
+        if probe():
+            return True
+    return False
 
 
 def run(todo, today, dry_run, budget_seconds, limiter, refresh=refresh_code, probe=probe_finmind,
-        clock=time.monotonic):
+        clock=time.monotonic, sleep=time.sleep):
     """Process `todo` until the budget is spent. Returns (counts, attempted,
-    failures). Raises RuntimeError after MAX_CONSECUTIVE_FAILURES failures in a
-    row when the probe request also fails (bad token / outage): the workflow then
-    discards this slice instead of saving it."""
-    counts = {"updated": 0, "stale": 0, "insufficient": 0, "failed": 0, "skipped": 0}
+    failures). A "quota" result pauses the loop (_wait_out_quota) and retries the
+    same item once the quota is back; if the budget runs out while waiting, the
+    loop just stops. Raises RunAborted (a RuntimeError) after
+    MAX_CONSECUTIVE_FAILURES failures in a row when the probe request also fails
+    (bad token / outage); the work done so far is already on disk."""
+    counts = {"updated": 0, "stale": 0, "insufficient": 0, "failed": 0, "skipped": 0, "quota_waits": 0}
     failures, attempted, streak = [], 0, 0
     deadline = clock() + budget_seconds
     for i, (kind, code, target) in enumerate(todo):
@@ -254,6 +347,18 @@ def run(todo, today, dry_run, budget_seconds, limiter, refresh=refresh_code, pro
             print(f"time budget used up after {i} of {len(todo)} items -- stopping")
             break
         result = refresh(code, kind, target, today, dry_run, limiter)
+        out_of_time = False
+        while result["status"] == "quota":
+            counts["quota_waits"] += 1
+            print(f"[{i + 1}/{len(todo)}] {kind} {code}: FinMind quota used up ({result['detail']}) "
+                  f"-- waiting {QUOTA_WAIT_SECONDS}s steps for it to recover")
+            if not _wait_out_quota(probe, sleep, clock, deadline):
+                out_of_time = True
+                break
+            result = refresh(code, kind, target, today, dry_run, limiter)
+        if out_of_time:
+            print(f"time budget used up while waiting for the FinMind quota after {i} of {len(todo)} items -- stopping")
+            break
         counts[result["status"]] = counts.get(result["status"], 0) + 1
         if result["status"] != "skipped":
             attempted += 1
@@ -263,20 +368,34 @@ def run(todo, today, dry_run, budget_seconds, limiter, refresh=refresh_code, pro
             streak += 1
             if streak >= MAX_CONSECUTIVE_FAILURES:
                 if not probe():
-                    raise RuntimeError(f"{streak} consecutive failures and the probe request failed "
-                                       "-- likely a bad FINMIND_TOKEN or an outage; aborting")
+                    raise RunAborted(f"{streak} consecutive failures and the probe request failed "
+                                     "-- likely a bad FINMIND_TOKEN or an outage; aborting",
+                                     counts, attempted, failures)
                 streak = 0
         else:
             streak = 0
     return counts, attempted, failures
 
 
-def write_outputs(remaining, progress):
+def write_outputs(remaining, progress, aborted=False):
     path = os.environ.get("GITHUB_OUTPUT")
     if not path:
         return
     with open(path, "a", encoding="utf-8") as f:
-        f.write(f"remaining={remaining}\nprogress={progress}\n")
+        f.write(f"remaining={remaining}\nprogress={progress}\naborted={str(aborted).lower()}\n")
+
+
+def summary_message(counts, attempted, remaining, failures, aborted=None):
+    msg = (f"[基本面增量更新] 本次處理 {attempted} 項：updated={counts['updated']} "
+           f"stale={counts['stale']}（目標期尚未公布）insufficient={counts['insufficient']}（歷史不足）"
+           f"failed={counts['failed']}（無資料或抓取錯誤，下次重試）；尚餘 {remaining} 項")
+    if counts.get("quota_waits"):
+        msg += f"；FinMind 額度用完而暫停等待 {counts['quota_waits']} 次"
+    if aborted:
+        msg += f"\n中止：{aborted}（已完成的部分已存進快取，需檢查 FINMIND_TOKEN／FinMind 狀態後重跑）"
+    if failures:
+        msg += "\n失敗清單（前 10）：" + "; ".join(failures[:10])
+    return msg
 
 
 def main():
@@ -311,22 +430,29 @@ def main():
         write_outputs(0, 0)
         print("nothing due -- already up to date")
         return
-    if not probe_finmind():
+    # "quota" is fine here: run() waits for it to recover. Only a dead token /
+    # outage ("error") makes the whole slice pointless.
+    if probe_status() == "error":
         print(f"probe request for {PROBE_CODE} failed -- check FINMIND_TOKEN / connectivity; nothing written")
         sys.exit(1)
 
-    counts, attempted, failures = run(todo, today, args.dry_run, args.budget_minutes * 60, rfb.RateLimiter())
+    aborted = None
+    try:
+        counts, attempted, failures = run(todo, today, args.dry_run, args.budget_minutes * 60,
+                                          rfb.RateLimiter(limit=RATE_LIMIT))
+    except RunAborted as e:
+        # Exit 0 on purpose: the workflow's cache-save step only runs after a
+        # successful step, and what was already refreshed must not be thrown away.
+        # `aborted=true` makes the workflow fail the job afterwards.
+        counts, attempted, failures, aborted = e.counts, e.attempted, e.failures, str(e)
     remaining = len(build_todo(codes, kinds, today)) if not args.dry_run else len(todo) - attempted
     # Failed items stay due (no marker), so they are not "progress": a slice that
-    # only re-tried failures reports 0 and ends the relay chain.
-    progress = attempted - counts["failed"]
-    msg = (f"[基本面增量更新] 本次處理 {attempted} 項：updated={counts['updated']} "
-           f"stale={counts['stale']}（目標期尚未公布）insufficient={counts['insufficient']}（歷史不足）"
-           f"failed={counts['failed']}（無資料或抓取錯誤，下次重試）；尚餘 {remaining} 項")
-    if failures:
-        msg += "\n失敗清單（前 10）：" + "; ".join(failures[:10])
+    # only re-tried failures reports 0 and ends the relay chain. An aborted slice
+    # never chains.
+    progress = 0 if aborted else attempted - counts["failed"]
+    msg = summary_message(counts, attempted, remaining, failures, aborted)
     print(msg)
-    write_outputs(remaining, progress)
+    write_outputs(remaining, progress, aborted=bool(aborted))
     if not args.dry_run:
         try:
             alerts.send_telegram(msg)

@@ -12,9 +12,11 @@ name: update-fundamentals
 #                            are picked up there too ("auto" does whatever is due).
 #   16 May                   Q1 deadline 5/15
 #   1 Apr                    Q4/annual deadline 3/31
-# Cost: revenue ~1 req/code (~3.3h for the universe at 550 req/hr), financials
-# 3 req/code (~10h) -> the job is time-boxed and re-dispatches itself while it
-# still makes progress, same pattern as seed_factor_run.yml.
+# Cost: revenue ~1 req/code (~4h for the universe at the script's 450 req/hr),
+# financials 3 req/code (~12h) -> the job is time-boxed and re-dispatches itself
+# while it still makes progress, same pattern as seed_factor_run.yml. If FinMind's
+# hourly quota (600) is used up anyway, the script pauses and probes every 10 min
+# instead of failing (see scripts/update_fundamentals.py).
 #
 # Shares the `update-universe-bars` concurrency group with the weekly bar refresh:
 # all of them read-modify-write the same cache/factor_run lineage, so they must
@@ -84,8 +86,12 @@ jobs:
           cache-dependency-path: requirements-actions.txt
       - run: pip install -r requirements-actions.txt
       # Same lineage as update_universe_bars_part1/2: restore the newest snapshot,
-      # save a new one on success (a failed run, e.g. bad token, saves nothing).
-      - uses: actions/cache@v4
+      # save a new one afterwards. The save is an explicit step (not actions/cache's
+      # post step, which only runs when the whole job succeeded) so that a run the
+      # script aborts midway (bad token / outage) still keeps what it refreshed:
+      # the script then exits 0 with aborted=true and the last step fails the job.
+      # A crash or a cache miss (script exits non-zero) still saves nothing.
+      - uses: actions/cache/restore@v4
         with:
           path: cache/factor_run
           key: update-universe-bars-state-${{ github.run_id }}
@@ -108,6 +114,13 @@ jobs:
             args+=(--limit "$LIMIT")
           fi
           python -u scripts/update_fundamentals.py "${args[@]}"
+      # Dry runs write nothing, so there is nothing to save.
+      - name: save cache
+        if: ${{ !inputs.dry_run }}
+        uses: actions/cache/save@v4
+        with:
+          path: cache/factor_run
+          key: update-universe-bars-state-${{ github.run_id }}
       # Scheduled runs have no `inputs` (null), and in expressions `null != false`
       # is false (both coerce to 0) -- so test the event name explicitly instead of
       # "auto_continue != false". A run with `limit` is a smoke test: never chain it
@@ -141,3 +154,9 @@ jobs:
           if [ "${{ steps.fund.outputs.remaining }}" != "0" ] && [ "${{ steps.fund.outputs.progress }}" = "0" ]; then
             echo "::warning::本輪沒有任何進展且尚未完成，不再自動接力，請檢查 log"
           fi
+      # After the cache save on purpose: see the comment above the restore step.
+      - name: fail if aborted
+        if: steps.fund.outputs.aborted == 'true'
+        run: |
+          echo "::error::腳本中途中止（FINMIND_TOKEN 失效或 FinMind 異常）；已完成的部分已存進快取，請檢查後重跑"
+          exit 1
