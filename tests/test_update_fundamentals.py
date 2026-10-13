@@ -280,12 +280,239 @@ def test_run_aborts_when_failures_streak_and_probe_fails():
     refresh = lambda *a: {"status": "failed", "detail": "boom"}  # noqa: E731
     todo = [("revenue", f"{i:04d}", "t") for i in range(20)]
     with pytest.raises(RuntimeError):
-        uf.run(todo, D("2026-10-11"), False, 1e9, NoLimit(), refresh=refresh, probe=lambda: False)
+        uf.run(todo, D("2026-10-11"), False, 1e9, NoLimit(), refresh=refresh, probe=lambda: "error")
 
 
 def test_run_continues_when_probe_ok_after_failure_streak():
     refresh = lambda *a: {"status": "failed", "detail": "no data"}  # noqa: E731
     todo = [("revenue", f"{i:04d}", "t") for i in range(25)]
     counts, attempted, failures = uf.run(todo, D("2026-10-11"), False, 1e9, NoLimit(),
-                                         refresh=refresh, probe=lambda: True)
+                                         refresh=refresh, probe=lambda: "ok")
     assert attempted == 25 and counts["failed"] == 25 and len(failures) == 25
+
+
+# ---- FinMind quota (HTTP 402) handling ----
+
+QUOTA_MSG = "FinMind TaiwanStockMonthRevenue: HTTP 402 / Requests reach the upper limit."
+
+
+def test_fetch_guarded_turns_swallowed_402_into_quota_exceeded(monkeypatch):
+    # get_monthly_revenue() swallows the SourceError and returns None -- the
+    # wrapper must still notice, and must restore ds._finmind afterwards.
+    original = uf.ds._finmind
+
+    def quota(*a, **kw):
+        raise uf.ds.SourceError(QUOTA_MSG)
+
+    monkeypatch.setattr(uf.ds, "_finmind", quota)
+    with pytest.raises(uf.QuotaExceeded):
+        uf._fetch_revenue("2330", 760)
+    assert uf.ds._finmind is quota
+    monkeypatch.setattr(uf.ds, "_finmind", original)
+
+
+def test_fetch_guarded_catches_cashflow_only_quota(monkeypatch):
+    # get_financials() swallows a cash-flow-only failure and degrades silently.
+    def finmind(dataset, *a, **kw):
+        if dataset == "TaiwanStockCashFlowsStatement":
+            raise uf.ds.SourceError("FinMind TaiwanStockCashFlowsStatement: HTTP 402 / quota")
+        return []
+
+    monkeypatch.setattr(uf.ds, "_finmind", finmind)
+    with pytest.raises(uf.QuotaExceeded):
+        uf._fetch_financials("2330", 900)
+
+
+def test_fetch_guarded_ignores_non_quota_errors(monkeypatch):
+    def finmind(*a, **kw):
+        raise uf.ds.SourceError("FinMind x: HTTP 500 / boom")
+
+    monkeypatch.setattr(uf.ds, "_finmind", finmind)
+    assert uf._fetch_revenue("2330", 760) is None
+
+
+def test_refresh_quota_writes_nothing_and_stays_due():
+    today = D("2026-10-11")
+    old = [{"usable_date": "2026-01-10", "yoy_pct": 2.0}]
+    _write("2330", {"bars": [{"date": "x"}], "revenue_series": old})
+
+    def fetch(code, days, cache):
+        raise uf.QuotaExceeded(QUOTA_MSG)
+
+    res = uf.refresh_code("2330", "revenue", "2026-09-01", today, False, NoLimit(), fetch_revenue=fetch)
+    assert res["status"] == "quota"
+    cached = _read("2330")
+    assert cached["revenue_series"] == old and "fund_refresh" not in cached
+    assert uf.is_due(cached, "revenue", "2026-09-01", today)
+
+
+def test_run_waits_for_quota_then_retries_the_same_item():
+    clock, sleeps, calls = FakeClock(), [], []
+
+    def sleep(s):
+        sleeps.append(s)
+        clock.t += s
+
+    def refresh(code, kind, target, today, dry_run, limiter):
+        calls.append(code)
+        if code == "0001" and calls.count("0001") == 1:
+            return {"status": "quota", "detail": QUOTA_MSG}
+        return {"status": "updated", "detail": ""}
+
+    todo = [("revenue", "0001", "t"), ("revenue", "0002", "t")]
+    counts, attempted, failures = uf.run(todo, D("2026-10-11"), False, 1e9, NoLimit(), refresh=refresh,
+                                         probe=lambda: "ok", clock=clock, sleep=sleep)
+    assert calls == ["0001", "0001", "0002"]
+    assert sleeps == [uf.QUOTA_WAIT_SECONDS]
+    assert counts["quota_waits"] == 1 and counts["updated"] == 2 and counts["failed"] == 0
+    assert attempted == 2 and failures == []
+
+
+def test_run_keeps_probing_until_quota_recovers():
+    clock, probes = FakeClock(), []
+
+    def sleep(s):
+        clock.t += s
+
+    def probe():
+        probes.append(clock.t)
+        return "ok" if len(probes) >= 3 else "quota"   # third probe succeeds
+
+    state = {"n": 0}
+
+    def refresh(*a):
+        state["n"] += 1
+        return {"status": "quota" if state["n"] == 1 else "updated", "detail": ""}
+
+    counts, attempted, _ = uf.run([("revenue", "0001", "t")], D("2026-10-11"), False, 1e9, NoLimit(),
+                                  refresh=refresh, probe=probe, clock=clock, sleep=sleep)
+    assert len(probes) == 3 and counts["updated"] == 1 and attempted == 1
+
+
+def test_run_stops_quietly_when_budget_ends_while_waiting_for_quota():
+    clock = FakeClock()
+
+    def sleep(s):
+        clock.t += s
+
+    refresh = lambda *a: {"status": "quota", "detail": QUOTA_MSG}  # noqa: E731
+    todo = [("revenue", f"{i:04d}", "t") for i in range(5)]
+    counts, attempted, failures = uf.run(todo, D("2026-10-11"), False, 1500, NoLimit(), refresh=refresh,
+                                         probe=lambda: "quota", clock=clock, sleep=sleep)
+    assert attempted == 0 and failures == [] and counts["failed"] == 0 and counts["quota_waits"] == 1
+
+
+def test_run_stops_when_one_quota_episode_exceeds_max_wait_even_with_budget_left():
+    # The sleeping job holds the shared concurrency group: don't idle for the whole budget.
+    clock = FakeClock()
+
+    def sleep(s):
+        clock.t += s
+
+    refresh = lambda *a: {"status": "quota", "detail": QUOTA_MSG}  # noqa: E731
+    counts, attempted, _ = uf.run([("revenue", "0001", "t")], D("2026-10-11"), False, 1e9, NoLimit(),
+                                  refresh=refresh, probe=lambda: "quota", clock=clock, sleep=sleep)
+    assert attempted == 0 and clock.t == uf.QUOTA_MAX_WAIT_SECONDS
+
+
+def test_run_aborts_when_probe_reports_error_while_waiting_for_quota():
+    clock = FakeClock()
+
+    def sleep(s):
+        clock.t += s
+
+    refresh = lambda *a: {"status": "quota", "detail": QUOTA_MSG}  # noqa: E731
+    with pytest.raises(uf.RunAborted, match="probe failed while waiting"):
+        uf.run([("revenue", "0001", "t")], D("2026-10-11"), False, 1e9, NoLimit(),
+               refresh=refresh, probe=lambda: "error", clock=clock, sleep=sleep)
+
+
+def test_run_aborts_when_item_keeps_hitting_quota_although_probe_is_ok():
+    # e.g. a 402 on one dataset only: the probe (TaiwanStockPrice) succeeds, the real request never does.
+    clock, calls = FakeClock(), []
+
+    def sleep(s):
+        clock.t += s
+
+    def refresh(*a):
+        calls.append(1)
+        return {"status": "quota", "detail": QUOTA_MSG}
+
+    with pytest.raises(uf.RunAborted, match="still hits the FinMind quota") as exc:
+        uf.run([("revenue", "0001", "t")], D("2026-10-11"), False, 1e9, NoLimit(),
+               refresh=refresh, probe=lambda: "ok", clock=clock, sleep=sleep)
+    assert len(calls) == uf.MAX_QUOTA_RETRIES_PER_ITEM + 1
+    assert exc.value.counts["quota_waits"] == uf.MAX_QUOTA_RETRIES_PER_ITEM
+
+
+def test_failure_streak_with_quota_probe_waits_instead_of_aborting():
+    clock, probes = FakeClock(), []
+
+    def sleep(s):
+        clock.t += s
+
+    def probe():
+        probes.append(clock.t)
+        return "quota" if len(probes) == 1 else "ok"   # the streak probe sees 402, then it recovers
+
+    refresh = lambda *a: {"status": "failed", "detail": "no data"}  # noqa: E731
+    todo = [("revenue", f"{i:04d}", "t") for i in range(10)]
+    counts, attempted, failures = uf.run(todo, D("2026-10-11"), False, 1e9, NoLimit(),
+                                         refresh=refresh, probe=probe, clock=clock, sleep=sleep)
+    assert attempted == 10 and counts["failed"] == 10 and len(probes) == 2
+
+
+def test_quota_markers_match_the_real_finmind_error_text():
+    # The exact message seen in the failed Actions run, built by data_sources._finmind().
+    err = uf.ds.SourceError("FinMind TaiwanStockPrice: HTTP 402 / Requests reach the upper limit. https://finmindtrade.com/")
+    assert uf._is_quota_error(err)
+    assert uf._is_quota_error(uf.ds.SourceError("FinMind x: HTTP 200 / Requests reach the upper limit"))
+    assert not uf._is_quota_error(uf.ds.SourceError("FinMind x: HTTP 500 / boom"))
+
+
+def test_run_abort_carries_partial_results():
+    results = iter([{"status": "updated", "detail": ""}] * 3 + [{"status": "failed", "detail": "boom"}] * 50)
+    refresh = lambda *a: next(results)  # noqa: E731
+    todo = [("revenue", f"{i:04d}", "t") for i in range(20)]
+    with pytest.raises(uf.RunAborted) as exc:
+        uf.run(todo, D("2026-10-11"), False, 1e9, NoLimit(), refresh=refresh, probe=lambda: "error")
+    assert exc.value.counts["updated"] == 3 and exc.value.counts["failed"] == 10
+    assert exc.value.attempted == 13 and len(exc.value.failures) == 10
+
+
+def test_summary_message_mentions_quota_waits_and_abort():
+    counts = {"updated": 5, "stale": 1, "insufficient": 0, "failed": 2, "skipped": 0, "quota_waits": 3}
+    msg = uf.summary_message(counts, 8, 100, ["revenue 1: x"], aborted="probe failed")
+    assert "3 次" in msg and "中止：probe failed" in msg and "尚餘 100 項" in msg and "revenue 1: x" in msg
+    assert "額度" not in uf.summary_message({**counts, "quota_waits": 0}, 8, 100, [])
+
+
+def test_main_exits_zero_and_flags_abort_so_progress_can_be_saved(monkeypatch, tmp_path):
+    out = tmp_path / "gh_output"
+    sent = []
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    monkeypatch.setattr(sys, "argv", ["update_fundamentals.py", "--kind", "revenue", "--limit", "5"])
+    monkeypatch.setattr(uf.uub, "_cached_codes", lambda: ["1101"])
+    monkeypatch.setattr(uf, "build_todo", lambda codes, kinds, today: [("revenue", "1101", "t")])
+    monkeypatch.setattr(uf, "probe_status", lambda: "ok")
+    monkeypatch.setattr(uf.alerts, "send_telegram", lambda msg: sent.append(msg))
+
+    def boom(*a, **kw):
+        raise uf.RunAborted("bad token", {"updated": 4, "stale": 0, "insufficient": 0, "failed": 10,
+                                          "skipped": 0, "quota_waits": 0}, 14, ["revenue 1: x"])
+
+    monkeypatch.setattr(uf, "run", boom)
+    uf.main()   # must not raise SystemExit
+    text = out.read_text(encoding="utf-8")
+    assert "aborted=true" in text and "progress=0" in text
+    assert sent and "中止：bad token" in sent[0]
+
+
+def test_main_dead_token_at_start_still_exits_nonzero(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["update_fundamentals.py", "--kind", "revenue", "--limit", "5"])
+    monkeypatch.setattr(uf.uub, "_cached_codes", lambda: ["1101"])
+    monkeypatch.setattr(uf, "build_todo", lambda codes, kinds, today: [("revenue", "1101", "t")])
+    monkeypatch.setattr(uf, "probe_status", lambda: "error")
+    with pytest.raises(SystemExit) as exc:
+        uf.main()
+    assert exc.value.code == 1
