@@ -737,7 +737,7 @@ def ticks_to_bars(prices, ts_list, minutes=5):
     return bars
 
 
-def intraday_trigger(mbars, zone_low, zone_high, params=None):
+def intraday_trigger(mbars, zone_low, zone_high, params=None, atr=None):
     """Step 2's minute-chart trigger on today's 1/5/15-minute bars
     (ascending, last one may still be forming):
 
@@ -752,7 +752,9 @@ def intraday_trigger(mbars, zone_low, zone_high, params=None):
     For "triggered": trigger_price = previous bar's high + 1 tick (the buy-stop
     level), stop = min(trigger bar low, previous bar low) - 1 tick
     (「突破 K 線或前一根 K 線的低點」), day_low_stop = session low - 1 tick
-    (「當天低點」, the wider alternative), plus stop_pct for both."""
+    (「當天低點」, the wider alternative), plus stop_pct for both. Pass the
+    daily `atr` (plan["atr14"]) to floor both stops at stop_atr_mult * ATR
+    below the trigger price -- see apply_atr_stop_floor()."""
     p = {**PULLBACK_PARAMS, **(params or {})}
     if not mbars:
         return {"state": "waiting"}
@@ -777,14 +779,40 @@ def intraday_trigger(mbars, zone_low, zone_high, params=None):
             stop = round_to_tick(raw_stop - tw_tick_size(raw_stop), "down")
             day_stop = round_to_tick(day_low - tw_tick_size(day_low), "down")
             entry = round(trig, 2)
-            return {
+            return apply_atr_stop_floor({
                 "state": "triggered", "bar_index": j, "trigger_price": entry,
                 "stop": stop, "stop_pct": round((entry - stop) / entry * 100, 2),
                 "day_low_stop": day_stop, "day_low_stop_pct": round((entry - day_stop) / entry * 100, 2),
                 "stop_ok": (entry - stop) / entry * 100 <= p["max_stop_pct"],
-            }
+            }, atr, p)
     return {"state": "dipped", "low": mbars[low_idx]["l"],
             "next_trigger": round(mbars[-1]["h"] + tw_tick_size(mbars[-1]["h"]), 2)}
+
+
+def apply_atr_stop_floor(trig, atr, params=None):
+    """Return a copy of a "triggered" result whose stops are no closer than
+    stop_atr_mult * ATR14 below the trigger price -- the same floor the daily
+    plan uses (evaluate_setup()). A 5-minute trigger bar is often only
+    0.2-0.5% tall, well inside a normal day's range, and the 0.585% round-trip
+    cost then eats most of the R. Applies to both `stop` and `day_low_stop`.
+    Idempotent (the floor can only move a stop down), so intraday_trigger()
+    and format_trigger_message() may both call it. No-op without an ATR or a
+    multiple of 0, or on a non-triggered result."""
+    p = {**PULLBACK_PARAMS, **(params or {})}
+    if trig.get("state") != "triggered" or not atr or not p["stop_atr_mult"]:
+        return trig
+    entry = trig["trigger_price"]
+    floor_stop = round_to_tick(entry - p["stop_atr_mult"] * atr, "down")
+    out = dict(trig)
+    out.setdefault("bar_stop", trig["stop"])
+    out.setdefault("bar_stop_pct", trig["stop_pct"])
+    out["stop"] = min(trig["stop"], floor_stop)
+    out["day_low_stop"] = min(trig["day_low_stop"], floor_stop)
+    out["stop_pct"] = round((entry - out["stop"]) / entry * 100, 2)
+    out["day_low_stop_pct"] = round((entry - out["day_low_stop"]) / entry * 100, 2)
+    out["stop_ok"] = (entry - out["stop"]) / entry * 100 <= p["max_stop_pct"]
+    out["stop_basis"] = "atr" if out["stop"] < out["bar_stop"] else "bar"
+    return out
 
 
 def format_trigger_message(code, name, setup, trig, account=None, params=None):
@@ -792,12 +820,17 @@ def format_trigger_message(code, name, setup, trig, account=None, params=None):
     count only when an account size is configured."""
     p = {**PULLBACK_PARAMS, **(params or {})}
     z = setup["zone"]
+    # monitor.py calls intraday_trigger() without the daily ATR, so floor here
+    # too (idempotent) -- the alert must never show a stop tighter than the plan's.
+    trig = apply_atr_stop_floor(trig, (setup.get("plan") or {}).get("atr14"), p)
     entry, stop = trig["trigger_price"], trig["stop"]
     rt = r_targets(entry, stop, params=p)
+    widened = (f"（觸發棒停損僅 {trig['bar_stop_pct']:.2f}%，已放寬到 {p['stop_atr_mult']:g}×ATR）"
+               if trig.get("stop_basis") == "atr" else "")
     lines = [
         f"[{code}{' ' + name if name else ''}] 強勢回調觸發：下探支撐區 {z['low']:g}–{z['high']:g} 後"
         f"突破前一根{p['intraday_bar_minutes']}分K高點",
-        f"買進參考 {entry:g}｜停損 {stop:g}（-{trig['stop_pct']:.2f}%）"
+        f"買進參考 {entry:g}｜停損 {stop:g}（-{trig['stop_pct']:.2f}%）{widened}"
         + ("" if trig["stop_ok"] else f" ⚠ 超過 {p['max_stop_pct']:g}%"),
     ]
     if rt:

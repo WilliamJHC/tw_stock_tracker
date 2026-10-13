@@ -336,6 +336,46 @@ def test_intraday_trigger_dip_then_break_of_previous_high():
     assert out["day_low_stop"] == pytest.approx(19.65)
 
 
+_TRIGGER_BARS = [(20.6, 20.7, 20.3, 20.35), (20.35, 20.4, 19.9, 19.95),
+                 (19.95, 19.95, 19.7, 19.8), (19.8, 20.2, 19.8, 20.15)]
+
+
+def test_intraday_trigger_atr_floor_widens_a_tight_bar_stop():
+    # bar stop 19.65 (1.75% below the 20.0 trigger); ATR 2.0 -> floor 20.0 - 0.5*2.0 = 19.0
+    out = ps.intraday_trigger(_mb(_TRIGGER_BARS), 19.6, 20.0, atr=2.0)
+    assert out["stop"] == pytest.approx(19.0) and out["stop_pct"] == pytest.approx(5.0)
+    assert out["day_low_stop"] == pytest.approx(19.0)
+    assert out["bar_stop"] == pytest.approx(19.65) and out["stop_basis"] == "atr"
+    assert out["stop_ok"] is False                       # 5% > 3%: flagged, not hidden
+
+
+def test_intraday_trigger_atr_floor_keeps_a_stop_that_is_already_farther():
+    out = ps.intraday_trigger(_mb(_TRIGGER_BARS), 19.6, 20.0, atr=0.5)    # floor 19.75 > bar stop 19.65
+    assert out["stop"] == pytest.approx(19.65) and out["stop_basis"] == "bar"
+
+
+def test_apply_atr_stop_floor_is_idempotent_and_ignores_missing_inputs():
+    raw = ps.intraday_trigger(_mb(_TRIGGER_BARS), 19.6, 20.0)
+    assert "stop_basis" not in raw                         # no ATR passed -> untouched
+    once = ps.apply_atr_stop_floor(raw, 2.0)
+    assert ps.apply_atr_stop_floor(once, 2.0) == once
+    assert ps.apply_atr_stop_floor(raw, None) == raw
+    assert ps.apply_atr_stop_floor(raw, 2.0, {"stop_atr_mult": 0}) == raw
+    waiting = {"state": "waiting"}
+    assert ps.apply_atr_stop_floor(waiting, 2.0) == waiting
+
+
+def test_format_trigger_message_floors_stop_from_setup_atr_without_monitor_help():
+    """monitor.py calls intraday_trigger() without the ATR; the alert text must still
+    carry the widened stop and the matching R targets / share count."""
+    raw = ps.intraday_trigger(_mb(_TRIGGER_BARS), 19.6, 20.0)
+    setup = {"zone": {"low": 19.6, "high": 20.0}, "plan": {"atr14": 2.0}}
+    msg = ps.format_trigger_message("2330", "台積電", setup, raw, account=100_000)
+    assert "停損 19" in msg and "-5.00%" in msg and "已放寬到 0.5×ATR" in msg and "⚠" in msg
+    assert "3R 23" in msg                                  # entry 20 + 3 * 1.0
+    assert "500 股" in msg                                 # 100k * 0.5% = 500 at risk / 1.0 per share
+
+
 def test_intraday_trigger_dipped_without_break_yet():
     bars = _mb([(20.6, 20.7, 20.3, 20.35), (20.35, 20.4, 19.9, 19.95), (19.95, 19.95, 19.7, 19.75)])
     out = ps.intraday_trigger(bars, 19.6, 20.0)
