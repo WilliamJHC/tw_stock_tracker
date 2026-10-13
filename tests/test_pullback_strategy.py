@@ -371,9 +371,33 @@ def test_format_trigger_message_floors_stop_from_setup_atr_without_monitor_help(
     raw = ps.intraday_trigger(_mb(_TRIGGER_BARS), 19.6, 20.0)
     setup = {"zone": {"low": 19.6, "high": 20.0}, "plan": {"atr14": 2.0}}
     msg = ps.format_trigger_message("2330", "台積電", setup, raw, account=100_000)
-    assert "停損 19" in msg and "-5.00%" in msg and "已放寬到 0.5×ATR" in msg and "⚠" in msg
-    assert "3R 23" in msg                                  # entry 20 + 3 * 1.0
+    assert "買進參考 20｜停損 19（-5.00%）（觸發棒停損僅 1.75%，已放寬到 0.5×ATR） ⚠ 超過 3%" in msg
+    assert "目標 3R 23／5R 25" in msg                      # entry 20 + 3 * 1.0, 20 + 5 * 1.0
     assert "500 股" in msg                                 # 100k * 0.5% = 500 at risk / 1.0 per share
+
+
+def test_apply_atr_stop_floor_second_call_with_larger_atr_keeps_original_bar_stop():
+    once = ps.apply_atr_stop_floor(ps.intraday_trigger(_mb(_TRIGGER_BARS), 19.6, 20.0), 2.0)   # stop 19.0
+    twice = ps.apply_atr_stop_floor(once, 4.0)                                                  # floor 18.0
+    assert twice["stop"] == pytest.approx(18.0) and twice["day_low_stop"] == pytest.approx(18.0)
+    assert twice["bar_stop"] == pytest.approx(19.65) and twice["stop_basis"] == "atr"
+    assert twice["day_low_stop_pct"] == pytest.approx(10.0)
+
+
+def test_intraday_atr_floor_matches_the_plan_stop_for_the_same_entry_and_atr():
+    """One definition (atr_floor_stop) behind both the daily plan and the alert."""
+    pl = ps.evaluate_setup(_setup_bars(), {"cluster_pct": 0.5})["plan"]
+    assert pl["stop_basis"] == "atr"
+    trig = {"state": "triggered", "trigger_price": pl["entry_ref"], "stop": pl["entry_ref"] - 0.05,
+            "stop_pct": 0.05, "day_low_stop": pl["entry_ref"] - 0.05, "day_low_stop_pct": 0.05, "stop_ok": True}
+    assert ps.apply_atr_stop_floor(trig, pl["atr14"])["stop"] == pl["stop_ref"] == ps.atr_floor_stop(pl["entry_ref"], pl["atr14"])
+
+
+def test_plan_reason_does_not_promise_a_narrower_intraday_stop_when_atr_binds():
+    atr_case = ps.evaluate_setup(_setup_bars(), {"stop_atr_mult": 2.0})["reasons"]
+    zone_case = ps.evaluate_setup(_setup_bars(), {"stop_atr_mult": 0, "max_stop_pct": 0.5})["reasons"]
+    assert any("盤中停損同樣不會更近" in r for r in atr_case) and not any("仍可做" in r for r in atr_case)
+    assert any("仍可做" in r for r in zone_case)
 
 
 def test_intraday_trigger_dipped_without_break_yet():

@@ -18,6 +18,10 @@ each rule below to the original four-step description):
      recovery = keep waiting.
   3. 先定停損再算股數：stop at the day's low / trigger-bar low / prior-bar low,
      ideally <= 2.5-3% away; shares = (account x 0.5%) / (entry - stop).
+     Taiwan adjustment: both the planned stop and the intraday stop are floored
+     at stop_atr_mult (0.5) x ATR14 below the entry -- a tight confluence zone
+     or a 5-minute bar is narrower than a normal day's range, and the 0.585%
+     round-trip cost would eat most of the R (see atr_floor_stop()).
   4. 分批出場：take partial profits near 3R/5R, trail the rest with EMA9; trim
      into a sharp spike far above the moving averages.
 
@@ -71,7 +75,7 @@ PULLBACK_PARAMS = {
     "break_tolerance_pct": 1.0,   # close more than this % below the zone bottom = 跌破
     "retest_lookback": 20,        # reclaim (close crossing above the zone) must be within N bars for 「第一次回測」
     # ---- 第三步：停損與部位 ----
-    "stop_buffer_ticks": 1,       # planned stop = zone bottom minus this many ticks
+    "stop_buffer_ticks": 1,       # zone stop = zone bottom minus this many ticks (the plan then takes the farther of this and the ATR floor)
     "stop_atr_mult": 0.5,         # planned stop is at least this many ATR14 below the entry reference (0 = zone stop only)
     "max_stop_pct": 3.0,          # 「多數交易停損距離在 2.5%-3% 以內」
     "risk_pct": 0.5,              # 「單筆計畫帳戶風險約 0.5%」
@@ -670,10 +674,9 @@ def evaluate_setup(bars, params=None):
     zone_stop = round_to_tick(zone_out["low"] - p["stop_buffer_ticks"] * tw_tick_size(zone_out["low"]), "down")
     atr14 = an.atr([b["h"] for b in bars], [b["l"] for b in bars], closes)
     stop, stop_basis = zone_stop, "zone"
-    if atr14 and p["stop_atr_mult"]:
-        atr_stop = round_to_tick(entry - p["stop_atr_mult"] * atr14, "down")
-        if atr_stop < zone_stop:
-            stop, stop_basis = atr_stop, "atr"
+    atr_stop = atr_floor_stop(entry, atr14, p)
+    if atr_stop is not None and atr_stop < zone_stop:
+        stop, stop_basis = atr_stop, "atr"
     stop_pct = (entry - stop) / entry * 100
     plan = {
         "entry_ref": entry, "stop_ref": stop, "stop_pct": round(stop_pct, 2),
@@ -686,11 +689,13 @@ def evaluate_setup(bars, params=None):
     out["plan"] = plan
     if not plan["stop_ok"]:
         if stop_basis == "atr":
+            # The intraday trigger stop is floored at the same ATR distance, so a
+            # narrower trigger bar can't rescue this setup -- don't suggest it.
             zone_pct = (entry - zone_stop) / entry * 100
-            basis_txt = f"支撐區停損僅 {zone_pct:.1f}%，已放寬到 {p['stop_atr_mult']:g}×ATR"
+            reasons.append(f"預估停損 {stop_pct:.1f}% > {p['max_stop_pct']:g}%"
+                           f"（支撐區停損僅 {zone_pct:.1f}%，已放寬到 {p['stop_atr_mult']:g}×ATR；盤中停損同樣不會更近）")
         else:
-            basis_txt = "支撐區太寬"
-        reasons.append(f"預估停損 {stop_pct:.1f}% > {p['max_stop_pct']:g}%（{basis_txt}；盤中觸發 K 線若更窄仍可做）")
+            reasons.append(f"預估停損 {stop_pct:.1f}% > {p['max_stop_pct']:g}%（支撐區太寬；盤中觸發 K 線若更窄仍可做）")
 
     hard_fail = checks["downtrend"] or not checks["passed"]
     out["passed"] = not hard_fail
@@ -789,20 +794,33 @@ def intraday_trigger(mbars, zone_low, zone_high, params=None, atr=None):
             "next_trigger": round(mbars[-1]["h"] + tw_tick_size(mbars[-1]["h"]), 2)}
 
 
+def atr_floor_stop(entry, atr, params=None):
+    """Lowest-risk-allowed stop: `entry - stop_atr_mult * atr`, snapped down to
+    the tick grid. None when there is no ATR or the multiple is 0. The single
+    definition used by both the daily plan (evaluate_setup()) and the intraday
+    trigger (apply_atr_stop_floor()), so the two can't drift apart."""
+    p = {**PULLBACK_PARAMS, **(params or {})}
+    if not atr or not p["stop_atr_mult"]:
+        return None
+    return round_to_tick(entry - p["stop_atr_mult"] * atr, "down")
+
+
 def apply_atr_stop_floor(trig, atr, params=None):
     """Return a copy of a "triggered" result whose stops are no closer than
     stop_atr_mult * ATR14 below the trigger price -- the same floor the daily
-    plan uses (evaluate_setup()). A 5-minute trigger bar is often only
+    plan uses (atr_floor_stop()). A 5-minute trigger bar is often only
     0.2-0.5% tall, well inside a normal day's range, and the 0.585% round-trip
-    cost then eats most of the R. Applies to both `stop` and `day_low_stop`.
-    Idempotent (the floor can only move a stop down), so intraday_trigger()
-    and format_trigger_message() may both call it. No-op without an ATR or a
-    multiple of 0, or on a non-triggered result."""
+    cost then eats most of the R. Applies to both `stop` and `day_low_stop`;
+    the first call records the bar-only stop in `bar_stop`/`bar_stop_pct`.
+    Idempotent for the same ATR (the floor can only move a stop down), so
+    intraday_trigger() and format_trigger_message() may both call it; a second
+    call with a LARGER ATR floors again and keeps the original bar_stop. No-op
+    without an ATR or a multiple of 0, or on a non-triggered result."""
     p = {**PULLBACK_PARAMS, **(params or {})}
-    if trig.get("state") != "triggered" or not atr or not p["stop_atr_mult"]:
+    entry = trig.get("trigger_price")
+    floor_stop = atr_floor_stop(entry, atr, p) if trig.get("state") == "triggered" else None
+    if floor_stop is None:
         return trig
-    entry = trig["trigger_price"]
-    floor_stop = round_to_tick(entry - p["stop_atr_mult"] * atr, "down")
     out = dict(trig)
     out.setdefault("bar_stop", trig["stop"])
     out.setdefault("bar_stop_pct", trig["stop_pct"])
