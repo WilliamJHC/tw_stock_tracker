@@ -685,8 +685,12 @@ def evaluate_setup(bars, params=None):
     }
     out["plan"] = plan
     if not plan["stop_ok"]:
-        reasons.append(f"預估停損 {stop_pct:.1f}% > {p['max_stop_pct']:g}%（以{'ATR' if stop_basis == 'atr' else '支撐區'}計；"
-                       "盤中觸發 K 線若更窄仍可做）")
+        if stop_basis == "atr":
+            zone_pct = (entry - zone_stop) / entry * 100
+            basis_txt = f"支撐區停損僅 {zone_pct:.1f}%，已放寬到 {p['stop_atr_mult']:g}×ATR"
+        else:
+            basis_txt = "支撐區太寬"
+        reasons.append(f"預估停損 {stop_pct:.1f}% > {p['max_stop_pct']:g}%（{basis_txt}；盤中觸發 K 線若更窄仍可做）")
 
     hard_fail = checks["downtrend"] or not checks["passed"]
     out["passed"] = not hard_fail

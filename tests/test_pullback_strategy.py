@@ -197,13 +197,25 @@ def test_plan_stop_is_farther_of_zone_stop_and_atr_stop():
     assert ps.round_to_tick(wide_atr["stop_ref"], "nearest") == wide_atr["stop_ref"]
 
 
-def test_plan_atr_stop_never_tighter_than_half_atr_and_drives_r_targets():
-    """Regression: a narrow confluence zone used to yield a 0.3% 'stop' (~0.1x ATR)."""
-    for mult in (0.5, 1.0, 2.0):
-        pl = ps.evaluate_setup(_setup_bars(), {"stop_atr_mult": mult})["plan"]
-        # tick rounding can only move the stop down, i.e. farther away
-        assert pl["entry_ref"] - pl["stop_ref"] >= mult * pl["atr14"] - 0.01 or pl["stop_basis"] == "zone"
-        assert abs(pl["r_targets"]["r"] - (pl["entry_ref"] - pl["stop_ref"])) < 0.01
+def test_plan_narrow_zone_gets_atr_stop_at_default_multiple():
+    """Regression: a narrow confluence zone used to yield a ~0.2% 'stop' (~0.1x ATR).
+    cluster_pct=0.5 shrinks the textbook zone to ~0.1% wide, so with the DEFAULT
+    stop_atr_mult the ATR stop must be the one chosen."""
+    out = ps.evaluate_setup(_setup_bars(), {"cluster_pct": 0.5})
+    pl, z = out["plan"], out["zone"]
+    assert (z["high"] - z["low"]) / z["high"] * 100 < 0.3
+    assert pl["stop_basis"] == "atr"
+    assert pl["stop_ref"] < pl["zone_stop_ref"]
+    assert pl["stop_ref"] == ps.round_to_tick(pl["entry_ref"] - ps.PULLBACK_PARAMS["stop_atr_mult"] * pl["atr14"], "down")
+    assert (pl["entry_ref"] - pl["stop_ref"]) >= 0.5 * pl["atr14"] - 1e-9
+    assert pl["r_targets"]["r"] == pytest.approx(pl["entry_ref"] - pl["stop_ref"], abs=1e-6)
+
+
+@pytest.mark.parametrize("mult", [0, 0.25, 0.5, 1.0, 2.0])
+def test_plan_stop_equals_the_farther_of_the_two_candidates(mult):
+    pl = ps.evaluate_setup(_setup_bars(), {"stop_atr_mult": mult})["plan"]
+    atr_stop = ps.round_to_tick(pl["entry_ref"] - mult * pl["atr14"], "down") if mult else pl["zone_stop_ref"]
+    assert pl["stop_ref"] == min(pl["zone_stop_ref"], atr_stop)
 
 
 def test_plan_wide_atr_stop_flags_stop_ok_false_with_atr_reason():
