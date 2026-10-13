@@ -171,11 +171,18 @@ def load_universe(name):
 
 
 def daily_to_bars(daily):
-    """data_sources.get_daily()'s {t,o,h,l,c,v} -> [{date,c,v}, ...] ascending.
+    """data_sources.get_daily()'s {t,o,h,l,c,v} -> [{date,o,h,l,c,v}, ...] ascending.
+    o/h/l are stored RAW, same price scale as "c" (back-adjust them with
+    c_adj / c when needed, as scripts/run_pullback_scan.py does). Cache
+    entries written before o/h/l were added simply lack those keys until
+    update_universe_bars.py --lookback-days re-pulls them, so readers must
+    tolerate a bar without "o"/"h"/"l".
     Public interface: also used directly by scripts/update_universe_bars.py."""
     import datetime as dt
     return [
-        {"date": dt.datetime.fromtimestamp(daily["t"][i]).date().isoformat(), "c": daily["c"][i], "v": daily["v"][i]}
+        {"date": dt.datetime.fromtimestamp(daily["t"][i]).date().isoformat(),
+         "o": daily["o"][i], "h": daily["h"][i], "l": daily["l"][i],
+         "c": daily["c"][i], "v": daily["v"][i]}
         for i in range(len(daily["t"]))
     ]
 

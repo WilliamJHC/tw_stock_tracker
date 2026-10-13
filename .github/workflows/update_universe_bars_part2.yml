@@ -16,6 +16,10 @@ on:
         type: string
         description: '只處理後半裡的前 N 檔（留空 = 整個後半），本機外的小樣本測試用'
         default: ''
+      lookback_days:
+        type: string
+        description: '每檔回抓天數（留空 = 預設 30）。一次性補開高低價歷史填 5300（涵蓋快取全部歷史，約 14 年）；該次每檔多抓長區間，耗時與週更新同量級'
+        default: ''
 
 concurrency:
   group: update-universe-bars
@@ -63,6 +67,8 @@ jobs:
           restore-keys: |
             update-universe-bars-state-
       - name: update_universe_bars（後半）
+        env:
+          LOOKBACK_DAYS: ${{ inputs.lookback_days }}
         run: |
           args="--half 2"
           if [ "${{ inputs.dry_run }}" = "true" ]; then
@@ -70,5 +76,8 @@ jobs:
           fi
           if [ -n "${{ inputs.limit }}" ]; then
             args="$args --limit ${{ inputs.limit }}"
+          fi
+          if [ -n "$LOOKBACK_DAYS" ]; then
+            args="$args --lookback-days $LOOKBACK_DAYS"
           fi
           python scripts/update_universe_bars.py $args

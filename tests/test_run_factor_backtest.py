@@ -12,6 +12,7 @@ one place augment_bars_with_adj_factor() reaches Yahoo/TWSE) and
 data_sources.get_daily() are both patched.
 """
 import datetime as dt
+import json
 import os
 import sys
 
@@ -38,12 +39,57 @@ def test_code_cache_path_joins_run_cache_dir():
 
 def test_daily_to_bars_converts_ascending():
     ts = [1755561600, 1755648000]
-    daily = {"t": ts, "o": [1, 2], "h": [1, 2], "l": [1, 2], "c": [100.0, 101.0], "v": [1000, 2000]}
+    daily = {"t": ts, "o": [99.0, 100.5], "h": [102.0, 103.0], "l": [98.0, 100.0], "c": [100.0, 101.0], "v": [1000, 2000]}
     bars = rfb.daily_to_bars(daily)
     expected_dates = [dt.datetime.fromtimestamp(t).date().isoformat() for t in ts]
     assert [b["date"] for b in bars] == expected_dates
     assert [b["c"] for b in bars] == [100.0, 101.0]
     assert [b["v"] for b in bars] == [1000, 2000]
+    # Raw o/h/l ride along with c so the pullback scan / future event study
+    # can see amplitude, gaps and AVWAP anchors from the cache alone.
+    assert [b["o"] for b in bars] == [99.0, 100.5]
+    assert [b["h"] for b in bars] == [102.0, 103.0]
+    assert [b["l"] for b in bars] == [98.0, 100.0]
+
+
+def test_merge_bars_new_fetch_brings_ohl_and_old_bars_stay_untouched():
+    old = [_bar("2026-08-01", 90.0), {**_bar("2026-08-02", 91.0), "c_adj": 91.0}]
+    new = [{"date": "2026-08-02", "o": 90.5, "h": 92.0, "l": 90.0, "c": 91.5, "v": 1100},
+           {"date": "2026-08-03", "o": 91.5, "h": 93.0, "l": 91.0, "c": 92.0, "v": 900}]
+    merged = uub._merge_bars(old, new)
+    assert [b["date"] for b in merged] == ["2026-08-01", "2026-08-02", "2026-08-03"]
+    assert "o" not in merged[0]                                      # outside the fetch window: still legacy
+    assert merged[1] == new[0]                                       # overlap: new wins, stale c_adj dropped
+    assert (merged[2]["o"], merged[2]["h"], merged[2]["l"]) == (91.5, 93.0, 91.0)
+    assert uub.ohl_coverage(merged) == (2, 3)
+
+
+def test_merge_bars_tolerates_new_bars_without_ohl():
+    merged = uub._merge_bars([], [{"date": "2026-08-03", "c": 92.0, "v": 900}])
+    assert merged == [{"date": "2026-08-03", "c": 92.0, "v": 900}]
+
+
+def test_update_code_lookback_days_is_passed_through_and_backfills_ohl(monkeypatch):
+    """--lookback-days 1800 is the one-off backfill: legacy bars inside the
+    fetched window gain o/h/l, and the detail line reports the coverage."""
+    rfb.save_code_cache("2330", {"bars": [_bar("2026-08-17", 99.0), _bar("2026-08-18", 100.0)], "days": 1800})
+    seen = {}
+
+    def fake_get_daily(code, days, cache):
+        seen["days"] = days
+        return {"t": [int(dt.datetime(2026, 8, 17).timestamp()), int(dt.datetime(2026, 8, 18).timestamp())],  # local tz, like daily_to_bars()
+                "o": [98.0, 99.5], "h": [100.0, 101.0], "l": [97.5, 99.0], "c": [99.0, 100.0], "v": [1000, 1000]}
+
+    monkeypatch.setattr(uub.ds, "get_daily", fake_get_daily)
+    monkeypatch.setattr(rfb.baf, "resolve_adjustment_actions",
+                        lambda code, market, bars, twse_events: ([], {"yahoo_ok": True}))
+    result = uub.update_code("2330", rfb.RateLimiter(), dry_run=False, market="twse", twse_events=[], lookback_days=1800)
+    assert seen["days"] == 1800
+    assert result["status"] == "updated"
+    with open(rfb.code_cache_path("2330"), encoding="utf-8") as f:
+        saved = json.load(f)["bars"]
+    assert all("o" in b and "h" in b and "l" in b and "c_adj" in b for b in saved)
+    assert "ohl=2/2" in result["detail"]
 
 
 def test_augment_bars_with_adj_factor_attaches_c_adj_when_no_actions(monkeypatch):

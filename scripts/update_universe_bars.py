@@ -47,6 +47,12 @@ rotation design (kept only in git history) that was a probabilistic
 mitigation (worst case ~2 weeks stale for a stranded code) rather than
 this deterministic full-coverage-per-week split.
 
+Bars carry raw o/h/l next to c/v (run_factor_backtest.daily_to_bars()), but
+only for dates fetched since that change: the 30-day weekly window fills them
+going forward, and a ONE-OFF `--lookback-days 5300` run (workflow_dispatch input
+`lookback_days`) backfills the whole cached history (1800 days only reaches
+~5 years of a ~14-year cache). Readers must tolerate bars without o/h/l.
+
 Other cache keys (revenue_series/roe_series/per_pbr_series/margin trend
 series/days) are left untouched -- this script only ever rewrites "bars".
 
@@ -134,17 +140,25 @@ def _twse_years_for(codes):
 
 
 def _merge_bars(existing_bars, new_bars):
-    """existing_bars/new_bars: ascending [{date,c,v}, ...]. New fetch wins
-    on a shared date (fresher pull, e.g. late settlement corrections).
-    Returns ascending merged list (ISO date strings sort chronologically
-    same as calendar order)."""
+    """existing_bars/new_bars: ascending [{date,o,h,l,c,v}, ...] (o/h/l absent
+    on bars cached before they were added). New fetch wins on a shared date
+    (fresher pull, e.g. late settlement corrections) and replaces the whole
+    bar, so a stale c_adj is dropped and o/h/l arrive with it. Returns
+    ascending merged list (ISO date strings sort chronologically same as
+    calendar order)."""
     by_date = {b["date"]: b for b in existing_bars}
     for b in new_bars:
-        by_date[b["date"]] = {"date": b["date"], "c": b["c"], "v": b["v"]}
+        by_date[b["date"]] = {k: b[k] for k in ("date", "o", "h", "l", "c", "v") if k in b}
     return [by_date[d] for d in sorted(by_date)]
 
 
-def update_code(code, limiter, dry_run, market, twse_events):
+def ohl_coverage(bars):
+    """(bars carrying o/h/l, total bars) -- how much of the history a
+    --lookback-days backfill still has to cover."""
+    return sum(1 for b in bars if "o" in b and "h" in b and "l" in b), len(bars)
+
+
+def update_code(code, limiter, dry_run, market, twse_events, lookback_days=LOOKBACK_DAYS):
     """Returns {"status": "updated"|"skipped"|"failed", "detail": str}.
     Never raises -- a per-code failure is best-effort, matching
     fetch_universe_data()'s pattern, so one bad code can't kill the run."""
@@ -163,7 +177,7 @@ def update_code(code, limiter, dry_run, market, twse_events):
 
     limiter.before_request()
     try:
-        daily = ds.get_daily(code, days=LOOKBACK_DAYS, cache=False)
+        daily = ds.get_daily(code, days=lookback_days, cache=False)
     except Exception as e:
         return {"status": "failed", "detail": f"get_daily error: {e}"}
     new_bars = rfb.daily_to_bars(daily)
@@ -181,9 +195,10 @@ def update_code(code, limiter, dry_run, market, twse_events):
     # reads (the newest ones) lack it.
     has_c_adj = bool(augmented) and "c_adj" in augmented[-1]
 
+    ohl, total = ohl_coverage(augmented)
     detail = (f"{len(existing_bars)}->{len(merged)} bars, "
               f"latest {existing_bars[-1]['date']}->{merged[-1]['date']}, "
-              f"c_adj={'yes' if has_c_adj else 'fallback(raw close)'}")
+              f"c_adj={'yes' if has_c_adj else 'fallback(raw close)'}, ohl={ohl}/{total}")
 
     if dry_run:
         return {"status": "updated", "detail": "[dry-run] " + detail}
@@ -199,7 +214,12 @@ def main():
                      help="只跑排序後的前半（1）或後半（2）；不給則跑全部")
     ap.add_argument("--dry-run", action="store_true", help="抓取/合併/還原因子照跑，但不寫回 cache/factor_run/*.json")
     ap.add_argument("--limit", type=int, default=None, help="只處理選定範圍的前 N 檔，本機小樣本測試用")
+    ap.add_argument("--lookback-days", type=int, default=LOOKBACK_DAYS,
+                    help=f"每檔回抓幾天（預設 {LOOKBACK_DAYS}）。一次性補開高低價歷史用 5300（涵蓋快取全部歷史；1800 天只到近 5 年）；"
+                         "成本與週更新相同量級（每檔 1 個 FinMind + 1 個 Yahoo request）")
     args = ap.parse_args()
+    if args.lookback_days < 1:
+        ap.error("--lookback-days 必須 >= 1")
 
     all_codes = _cached_codes()
     if len(all_codes) < MIN_CACHED_CODES:
@@ -214,7 +234,7 @@ def main():
     codes = _split_half(all_codes, args.half)
     if args.limit:
         codes = codes[: args.limit]
-    print(f"{len(codes)} cached codes to refresh (half={args.half}, lookback={LOOKBACK_DAYS} days, dry_run={args.dry_run})")
+    print(f"{len(codes)} cached codes to refresh (half={args.half}, lookback={args.lookback_days} days, dry_run={args.dry_run})")
 
     universe = ds.get_universe(cache=True) or []
     market_by_code = {u["code"]: u["market"] for u in universe}
@@ -228,7 +248,7 @@ def main():
     for i, code in enumerate(codes):
         market = market_by_code.get(code, "twse")
         twse_events = twse_by_code.get(code, [])
-        result = update_code(code, limiter, args.dry_run, market, twse_events)
+        result = update_code(code, limiter, args.dry_run, market, twse_events, args.lookback_days)
         counts[result["status"]] = counts.get(result["status"], 0) + 1
         print(f"[{i + 1}/{len(codes)}] {code}: {result['status']} -- {result['detail']}")
         if result["status"] == "failed":
