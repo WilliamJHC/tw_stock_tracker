@@ -57,8 +57,12 @@ Other cache keys (revenue_series/roe_series/per_pbr_series/margin trend
 series/days) are left untouched -- this script only ever rewrites "bars".
 
 Usage:
-    python scripts/update_universe_bars.py [--half {1,2}] [--dry-run] [--limit N]
+    python scripts/update_universe_bars.py [--half {1,2}] [--dry-run] [--limit N] [--lookback-days N]
 
+--lookback-days N (default 30, max 6000) sets the per-code re-pull window. A
+window longer than the default is a "backfill": it refuses yfinance (already
+split-adjusted) bars, never reaches before the cached bars[0], and does not
+write a code whose c_adj is missing afterwards. Run BOTH halves for full coverage.
 --half {1,2} restricts the run to that contiguous half of the sorted
 cached-code list (omit to process the whole universe -- e.g. for a local
 full-universe dry run, or a manual one-off catch-up).
@@ -82,6 +86,7 @@ import data_sources as ds  # noqa: E402
 import run_factor_backtest as rfb  # noqa: E402
 
 LOOKBACK_DAYS = 30
+MAX_LOOKBACK_DAYS = 6000   # > the ~5300-day full-history backfill; guards a mistyped dispatch input
 
 # Sanity floor for _cached_codes(): 2148 cached codes measured 2026-08-24 (see
 # module docstring). Set well below that to tolerate normal roster churn but
@@ -180,7 +185,17 @@ def update_code(code, limiter, dry_run, market, twse_events, lookback_days=LOOKB
         daily = ds.get_daily(code, days=lookback_days, cache=False)
     except Exception as e:
         return {"status": "failed", "detail": f"get_daily error: {e}"}
-    new_bars = rfb.daily_to_bars(daily)
+    backfill = lookback_days > LOOKBACK_DAYS
+    if backfill and daily.get("adjusted"):
+        # get_daily() fell through to yfinance (split-adjusted). Merging it over
+        # years of raw bars would make augment_bars_with_adj_factor() apply the
+        # splits a second time -- harmless-ish for 30 bars, corrupting for 14 years.
+        return {"status": "failed", "detail": f"backfill skipped: {daily.get('source')} bars are already split-adjusted"}
+    # Never extend the history backwards: bars older than the cached bars[0]
+    # have no matching fundamentals/"days" coverage, and _twse_years_for()
+    # sized the TWSE event table from the old bars[0].
+    first_date = existing_bars[0]["date"]
+    new_bars = [b for b in rfb.daily_to_bars(daily) if b["date"] >= first_date]
 
     merged = _merge_bars(existing_bars, new_bars)
     try:
@@ -200,6 +215,12 @@ def update_code(code, limiter, dry_run, market, twse_events, lookback_days=LOOKB
               f"latest {existing_bars[-1]['date']}->{merged[-1]['date']}, "
               f"c_adj={'yes' if has_c_adj else 'fallback(raw close)'}, ohl={ohl}/{total}")
 
+    if backfill and not has_c_adj:
+        # A backfill window can cover the whole history, and _merge_bars() drops
+        # c_adj from every re-fetched bar: if the Yahoo leg failed (augment hands
+        # the bars back unchanged) writing now would erase c_adj everywhere.
+        return {"status": "failed", "detail": "backfill not written: c_adj missing after augment (" + detail + ")"}
+
     if dry_run:
         return {"status": "updated", "detail": "[dry-run] " + detail}
 
@@ -218,8 +239,8 @@ def main():
                     help=f"每檔回抓幾天（預設 {LOOKBACK_DAYS}）。一次性補開高低價歷史用 5300（涵蓋快取全部歷史；1800 天只到近 5 年）；"
                          "成本與週更新相同量級（每檔 1 個 FinMind + 1 個 Yahoo request）")
     args = ap.parse_args()
-    if args.lookback_days < 1:
-        ap.error("--lookback-days 必須 >= 1")
+    if not 1 <= args.lookback_days <= MAX_LOOKBACK_DAYS:
+        ap.error(f"--lookback-days 必須介於 1 與 {MAX_LOOKBACK_DAYS} 之間")
 
     all_codes = _cached_codes()
     if len(all_codes) < MIN_CACHED_CODES:

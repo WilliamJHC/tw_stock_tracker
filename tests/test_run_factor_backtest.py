@@ -127,3 +127,77 @@ def test_update_code_matches_augment_bars_signature(monkeypatch):
 
     assert result["status"] == "updated"
     assert "c_adj=yes" in result["detail"]
+
+
+def _ts(y, m, d):
+    return int(dt.datetime(y, m, d).timestamp())  # local tz, like daily_to_bars()
+
+
+def _ohlc(dates, c=100.0, **extra):
+    return {"t": [_ts(*d) for d in dates], "o": [c] * len(dates), "h": [c + 1] * len(dates),
+            "l": [c - 1] * len(dates), "c": [c] * len(dates), "v": [1000] * len(dates), **extra}
+
+
+def _seed_two_bars():
+    rfb.save_code_cache("2330", {"bars": [_bar("2026-08-17", 100.0), _bar("2026-08-18", 100.0)], "days": 1800})
+
+
+def _read_bars(code="2330"):
+    with open(rfb.code_cache_path(code), encoding="utf-8") as f:
+        return json.load(f)["bars"]
+
+
+def _yahoo(monkeypatch, ok):
+    monkeypatch.setattr(rfb.baf, "resolve_adjustment_actions",
+                        lambda code, market, bars, twse_events: ([], {"yahoo_ok": ok}))
+
+
+def test_backfill_refuses_split_adjusted_source_and_leaves_cache_untouched(monkeypatch):
+    _seed_two_bars()
+    _yahoo(monkeypatch, True)
+    monkeypatch.setattr(uub.ds, "get_daily", lambda code, days, cache: _ohlc(
+        [(2026, 8, 17), (2026, 8, 18)], c=50.0, source="yfinance", adjusted=True))
+    r = uub.update_code("2330", rfb.RateLimiter(), False, "twse", [], lookback_days=5300)
+    assert r["status"] == "failed" and "split-adjusted" in r["detail"]
+    assert [b["c"] for b in _read_bars()] == [100.0, 100.0]
+
+
+def test_backfill_does_not_extend_history_before_cached_first_bar(monkeypatch):
+    _seed_two_bars()
+    _yahoo(monkeypatch, True)
+    monkeypatch.setattr(uub.ds, "get_daily", lambda code, days, cache: _ohlc(
+        [(2026, 8, 10), (2026, 8, 17), (2026, 8, 18)], source="finmind", adjusted=False))
+    r = uub.update_code("2330", rfb.RateLimiter(), False, "twse", [], lookback_days=5300)
+    assert r["status"] == "updated"
+    assert [b["date"] for b in _read_bars()] == ["2026-08-17", "2026-08-18"]
+
+
+def test_backfill_not_written_when_c_adj_missing_after_augment(monkeypatch):
+    """Yahoo blip on a TPEX code: augment returns the bars unchanged (no c_adj).
+    A backfill replaced every bar, so writing would erase c_adj for the whole history."""
+    rfb.save_code_cache("2330", {"bars": [{**_bar("2026-08-17", 100.0), "c_adj": 100.0},
+                                          {**_bar("2026-08-18", 100.0), "c_adj": 100.0}], "days": 1800})
+    _yahoo(monkeypatch, False)
+    monkeypatch.setattr(uub.ds, "get_daily", lambda code, days, cache: _ohlc(
+        [(2026, 8, 17), (2026, 8, 18)], source="finmind", adjusted=False))
+    r = uub.update_code("2330", rfb.RateLimiter(), False, "tpex", [], lookback_days=5300)
+    assert r["status"] == "failed" and "c_adj missing" in r["detail"]
+    assert all(b["c_adj"] == 100.0 and "o" not in b for b in _read_bars())
+
+
+def test_weekly_window_still_writes_when_c_adj_missing(monkeypatch):
+    """Guard is backfill-only: the default 30-day run keeps its old behaviour."""
+    _seed_two_bars()
+    _yahoo(monkeypatch, False)
+    monkeypatch.setattr(uub.ds, "get_daily", lambda code, days, cache: _ohlc(
+        [(2026, 8, 17), (2026, 8, 18)], source="finmind", adjusted=False))
+    r = uub.update_code("2330", rfb.RateLimiter(), False, "tpex", [])
+    assert r["status"] == "updated" and "fallback(raw close)" in r["detail"]
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", str(uub.MAX_LOOKBACK_DAYS + 1)])
+def test_lookback_days_argument_is_bounded(monkeypatch, bad):
+    monkeypatch.setattr(sys, "argv", ["update_universe_bars.py", "--lookback-days", bad])
+    with pytest.raises(SystemExit) as e:
+        uub.main()
+    assert e.value.code == 2

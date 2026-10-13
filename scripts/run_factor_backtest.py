@@ -212,7 +212,7 @@ def augment_bars_with_adj_factor(code, bars, limiter, market, twse_events):
     stay in sync with this signature, see that script's module docstring
     (commit 8a504f0: a prior 3-vs-5-arg drift crashed the weekly refresh).
 
-    bars (ascending [{date,c,v}]) -> same-length list with a "c_adj" key
+    bars (ascending [{date,c,v}], o/h/l optional and carried through) -> same-length list with a "c_adj" key
     added to every entry -- a TRUE total-return-style back-adjustment (both
     splits AND cash/stock dividends), combining `twse_events` (this code's
     rows from fetch_twse_table(), authoritative for TWSE-listed codes) with
