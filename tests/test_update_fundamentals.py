@@ -280,14 +280,14 @@ def test_run_aborts_when_failures_streak_and_probe_fails():
     refresh = lambda *a: {"status": "failed", "detail": "boom"}  # noqa: E731
     todo = [("revenue", f"{i:04d}", "t") for i in range(20)]
     with pytest.raises(RuntimeError):
-        uf.run(todo, D("2026-10-11"), False, 1e9, NoLimit(), refresh=refresh, probe=lambda: False)
+        uf.run(todo, D("2026-10-11"), False, 1e9, NoLimit(), refresh=refresh, probe=lambda: "error")
 
 
 def test_run_continues_when_probe_ok_after_failure_streak():
     refresh = lambda *a: {"status": "failed", "detail": "no data"}  # noqa: E731
     todo = [("revenue", f"{i:04d}", "t") for i in range(25)]
     counts, attempted, failures = uf.run(todo, D("2026-10-11"), False, 1e9, NoLimit(),
-                                         refresh=refresh, probe=lambda: True)
+                                         refresh=refresh, probe=lambda: "ok")
     assert attempted == 25 and counts["failed"] == 25 and len(failures) == 25
 
 
@@ -361,7 +361,7 @@ def test_run_waits_for_quota_then_retries_the_same_item():
 
     todo = [("revenue", "0001", "t"), ("revenue", "0002", "t")]
     counts, attempted, failures = uf.run(todo, D("2026-10-11"), False, 1e9, NoLimit(), refresh=refresh,
-                                         probe=lambda: True, clock=clock, sleep=sleep)
+                                         probe=lambda: "ok", clock=clock, sleep=sleep)
     assert calls == ["0001", "0001", "0002"]
     assert sleeps == [uf.QUOTA_WAIT_SECONDS]
     assert counts["quota_waits"] == 1 and counts["updated"] == 2 and counts["failed"] == 0
@@ -376,7 +376,7 @@ def test_run_keeps_probing_until_quota_recovers():
 
     def probe():
         probes.append(clock.t)
-        return len(probes) >= 3   # third probe succeeds
+        return "ok" if len(probes) >= 3 else "quota"   # third probe succeeds
 
     state = {"n": 0}
 
@@ -398,8 +398,76 @@ def test_run_stops_quietly_when_budget_ends_while_waiting_for_quota():
     refresh = lambda *a: {"status": "quota", "detail": QUOTA_MSG}  # noqa: E731
     todo = [("revenue", f"{i:04d}", "t") for i in range(5)]
     counts, attempted, failures = uf.run(todo, D("2026-10-11"), False, 1500, NoLimit(), refresh=refresh,
-                                         probe=lambda: False, clock=clock, sleep=sleep)
+                                         probe=lambda: "quota", clock=clock, sleep=sleep)
     assert attempted == 0 and failures == [] and counts["failed"] == 0 and counts["quota_waits"] == 1
+
+
+def test_run_stops_when_one_quota_episode_exceeds_max_wait_even_with_budget_left():
+    # The sleeping job holds the shared concurrency group: don't idle for the whole budget.
+    clock = FakeClock()
+
+    def sleep(s):
+        clock.t += s
+
+    refresh = lambda *a: {"status": "quota", "detail": QUOTA_MSG}  # noqa: E731
+    counts, attempted, _ = uf.run([("revenue", "0001", "t")], D("2026-10-11"), False, 1e9, NoLimit(),
+                                  refresh=refresh, probe=lambda: "quota", clock=clock, sleep=sleep)
+    assert attempted == 0 and clock.t == uf.QUOTA_MAX_WAIT_SECONDS
+
+
+def test_run_aborts_when_probe_reports_error_while_waiting_for_quota():
+    clock = FakeClock()
+
+    def sleep(s):
+        clock.t += s
+
+    refresh = lambda *a: {"status": "quota", "detail": QUOTA_MSG}  # noqa: E731
+    with pytest.raises(uf.RunAborted, match="probe failed while waiting"):
+        uf.run([("revenue", "0001", "t")], D("2026-10-11"), False, 1e9, NoLimit(),
+               refresh=refresh, probe=lambda: "error", clock=clock, sleep=sleep)
+
+
+def test_run_aborts_when_item_keeps_hitting_quota_although_probe_is_ok():
+    # e.g. a 402 on one dataset only: the probe (TaiwanStockPrice) succeeds, the real request never does.
+    clock, calls = FakeClock(), []
+
+    def sleep(s):
+        clock.t += s
+
+    def refresh(*a):
+        calls.append(1)
+        return {"status": "quota", "detail": QUOTA_MSG}
+
+    with pytest.raises(uf.RunAborted, match="still hits the FinMind quota") as exc:
+        uf.run([("revenue", "0001", "t")], D("2026-10-11"), False, 1e9, NoLimit(),
+               refresh=refresh, probe=lambda: "ok", clock=clock, sleep=sleep)
+    assert len(calls) == uf.MAX_QUOTA_RETRIES_PER_ITEM + 1
+    assert exc.value.counts["quota_waits"] == uf.MAX_QUOTA_RETRIES_PER_ITEM
+
+
+def test_failure_streak_with_quota_probe_waits_instead_of_aborting():
+    clock, probes = FakeClock(), []
+
+    def sleep(s):
+        clock.t += s
+
+    def probe():
+        probes.append(clock.t)
+        return "quota" if len(probes) == 1 else "ok"   # the streak probe sees 402, then it recovers
+
+    refresh = lambda *a: {"status": "failed", "detail": "no data"}  # noqa: E731
+    todo = [("revenue", f"{i:04d}", "t") for i in range(10)]
+    counts, attempted, failures = uf.run(todo, D("2026-10-11"), False, 1e9, NoLimit(),
+                                         refresh=refresh, probe=probe, clock=clock, sleep=sleep)
+    assert attempted == 10 and counts["failed"] == 10 and len(probes) == 2
+
+
+def test_quota_markers_match_the_real_finmind_error_text():
+    # The exact message seen in the failed Actions run, built by data_sources._finmind().
+    err = uf.ds.SourceError("FinMind TaiwanStockPrice: HTTP 402 / Requests reach the upper limit. https://finmindtrade.com/")
+    assert uf._is_quota_error(err)
+    assert uf._is_quota_error(uf.ds.SourceError("FinMind x: HTTP 200 / Requests reach the upper limit"))
+    assert not uf._is_quota_error(uf.ds.SourceError("FinMind x: HTTP 500 / boom"))
 
 
 def test_run_abort_carries_partial_results():
@@ -407,7 +475,7 @@ def test_run_abort_carries_partial_results():
     refresh = lambda *a: next(results)  # noqa: E731
     todo = [("revenue", f"{i:04d}", "t") for i in range(20)]
     with pytest.raises(uf.RunAborted) as exc:
-        uf.run(todo, D("2026-10-11"), False, 1e9, NoLimit(), refresh=refresh, probe=lambda: False)
+        uf.run(todo, D("2026-10-11"), False, 1e9, NoLimit(), refresh=refresh, probe=lambda: "error")
     assert exc.value.counts["updated"] == 3 and exc.value.counts["failed"] == 10
     assert exc.value.attempted == 13 and len(exc.value.failures) == 10
 

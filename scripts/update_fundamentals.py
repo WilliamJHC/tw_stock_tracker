@@ -32,9 +32,11 @@ token have head-room): revenue ~1 req/code -> ~1800 codes ~4h; financials
 Quota handling: get_monthly_revenue()/get_financials() swallow every error and
 return None, so a 402 (hourly quota used up) looks like "no data". The fetchers
 are therefore wrapped (_quota_watch) to notice it; the run then pauses and probes
-until the quota is back instead of burning through the todo list as failures, and
-if it is aborted anyway (bad token / outage) the work already written to the cache
-is still saved by the workflow (main() exits 0 and reports `aborted`).
+every 10 min (at most 60 min per episode -- the sleeping job holds the shared
+concurrency group) instead of burning through the todo list as failures. A quota
+error that outlives a successful probe (a dataset-level 402), or a probe that fails
+for another reason (bad token / outage), aborts the run; the work already written
+to the cache is still saved by the workflow (main() exits 0 and reports `aborted`).
 
 Usage:
     python scripts/update_fundamentals.py [--kind auto|revenue|financials]
@@ -69,8 +71,12 @@ MERGE_TOLERANCE_DAYS = 15  # same period's usable_date can differ (announce_date
 PROBE_CODE = "2330"
 MAX_CONSECUTIVE_FAILURES = 10
 RATE_LIMIT = 450           # req/hr; FinMind's real cap is 600, the rest is head-room for other jobs
-QUOTA_MARKERS = ("HTTP 402", "HTTP 429")   # what data_sources._finmind() puts in its SourceError
+# What data_sources._finmind() puts in its SourceError: the HTTP status, plus FinMind's
+# own message text in case the quota is ever reported inside a 200 response.
+QUOTA_MARKERS = ("HTTP 402", "HTTP 429", "upper limit")
 QUOTA_WAIT_SECONDS = 600   # pause between probes while the hourly quota is used up
+QUOTA_MAX_WAIT_SECONDS = 3600   # one quota episode: the hourly quota must be back within this
+MAX_QUOTA_RETRIES_PER_ITEM = 3  # quota errors that persist although the probe succeeds => abort
 REVENUE_DEADLINE_DAY = 10
 # (quarter-end month/day, filing-deadline month/day, deadline year offset)
 _QUARTERS = [((3, 31), (5, 15), 0), ((6, 30), (8, 14), 0), ((9, 30), (11, 14), 0), ((12, 31), (3, 31), 1)]
@@ -193,22 +199,20 @@ def _quota_watch():
         ds._finmind = original
 
 
-def _fetch_guarded(fetch, code, days):
-    """Run a ds.get_*() fetch; raise QuotaExceeded when any request inside it hit
+def _guarded(fetch):
+    """Wrap a ds.get_*() fetch: raise QuotaExceeded when any request inside it hit
     the quota, so its (empty or partial) result is never mistaken for data."""
-    with _quota_watch() as hits:
-        rows = fetch(code, days=days, cache=False)
-    if hits:
-        raise QuotaExceeded(hits[0])
-    return rows
+    def wrapper(code, days, cache=False):
+        with _quota_watch() as hits:
+            rows = fetch(code, days=days, cache=cache)
+        if hits:
+            raise QuotaExceeded(hits[0])
+        return rows
+    return wrapper
 
 
-def _fetch_revenue(code, days, cache=False):
-    return _fetch_guarded(ds.get_monthly_revenue, code, days)
-
-
-def _fetch_financials(code, days, cache=False):
-    return _fetch_guarded(ds.get_financials, code, days)
+_fetch_revenue = _guarded(ds.get_monthly_revenue)
+_fetch_financials = _guarded(ds.get_financials)
 
 
 def refresh_code(code, kind, target, today, dry_run, limiter, fetch_revenue=None, fetch_financials=None):
@@ -316,48 +320,63 @@ def probe_status():
         return "quota" if _is_quota_error(e) else "error"
 
 
-def probe_finmind():
-    """True when a real FinMind request succeeds."""
-    return probe_status() == "ok"
+def _wait_out_quota(probe, sleep, clock, deadline, max_wait=QUOTA_MAX_WAIT_SECONDS):
+    """Sleep in QUOTA_WAIT_SECONDS steps, probing after each. Returns "ok" once a
+    probe succeeds, "error" if one fails for a non-quota reason (token / outage),
+    "timeout" when `max_wait` or the run's `deadline` is reached first. Bounded on
+    purpose: the sleeping job holds the shared concurrency group."""
+    give_up = min(deadline, clock() + max_wait)
+    while clock() < give_up:
+        sleep(min(QUOTA_WAIT_SECONDS, max(give_up - clock(), 0)))
+        status = probe()
+        if status in ("ok", "error"):
+            return status
+    return "timeout"
 
 
-def _wait_out_quota(probe, sleep, clock, deadline):
-    """Sleep in QUOTA_WAIT_SECONDS steps, probing after each, until a probe
-    succeeds (True) or the time budget runs out (False)."""
-    while clock() < deadline:
-        sleep(min(QUOTA_WAIT_SECONDS, max(deadline - clock(), 0)))
-        if probe():
-            return True
-    return False
-
-
-def run(todo, today, dry_run, budget_seconds, limiter, refresh=refresh_code, probe=probe_finmind,
+def run(todo, today, dry_run, budget_seconds, limiter, refresh=refresh_code, probe=probe_status,
         clock=time.monotonic, sleep=time.sleep):
     """Process `todo` until the budget is spent. Returns (counts, attempted,
-    failures). A "quota" result pauses the loop (_wait_out_quota) and retries the
-    same item once the quota is back; if the budget runs out while waiting, the
-    loop just stops. Raises RunAborted (a RuntimeError) after
-    MAX_CONSECUTIVE_FAILURES failures in a row when the probe request also fails
-    (bad token / outage); the work done so far is already on disk."""
+    failures). `probe()` returns "ok" | "quota" | "error" (probe_status).
+      * A "quota" result pauses the loop (_wait_out_quota) and retries the same
+        item once the quota is back. If it does not come back within
+        QUOTA_MAX_WAIT_SECONDS (or the budget), the loop just stops.
+      * RunAborted (a RuntimeError) when the probe says "error" (bad token /
+        outage) -- after MAX_CONSECUTIVE_FAILURES failures in a row or while
+        waiting for the quota -- or when an item keeps answering "quota"
+        MAX_QUOTA_RETRIES_PER_ITEM times although the probe succeeds (a
+        dataset-level 402 the probe does not cover: waiting cannot fix that).
+    The work done so far is already on disk either way."""
     counts = {"updated": 0, "stale": 0, "insufficient": 0, "failed": 0, "skipped": 0, "quota_waits": 0}
     failures, attempted, streak = [], 0, 0
     deadline = clock() + budget_seconds
+
+    def abort(reason):
+        return RunAborted(reason, counts, attempted, failures)
+
     for i, (kind, code, target) in enumerate(todo):
         if clock() >= deadline:
             print(f"time budget used up after {i} of {len(todo)} items -- stopping")
             break
         result = refresh(code, kind, target, today, dry_run, limiter)
-        out_of_time = False
+        retries, stopped = 0, False
         while result["status"] == "quota":
+            if retries >= MAX_QUOTA_RETRIES_PER_ITEM:
+                raise abort(f"{kind} {code} still hits the FinMind quota after {retries} waits although the probe "
+                            f"request succeeds ({result['detail']}) -- a dataset-level limit or token tier issue")
+            retries += 1
             counts["quota_waits"] += 1
             print(f"[{i + 1}/{len(todo)}] {kind} {code}: FinMind quota used up ({result['detail']}) "
-                  f"-- waiting {QUOTA_WAIT_SECONDS}s steps for it to recover")
-            if not _wait_out_quota(probe, sleep, clock, deadline):
-                out_of_time = True
+                  f"-- probing every {QUOTA_WAIT_SECONDS}s for up to {QUOTA_MAX_WAIT_SECONDS}s")
+            waited = _wait_out_quota(probe, sleep, clock, deadline)
+            if waited == "error":
+                raise abort("probe failed while waiting for the FinMind quota -- likely a bad FINMIND_TOKEN or an outage")
+            if waited == "timeout":
+                stopped = True
                 break
             result = refresh(code, kind, target, today, dry_run, limiter)
-        if out_of_time:
-            print(f"time budget used up while waiting for the FinMind quota after {i} of {len(todo)} items -- stopping")
+        if stopped:
+            print(f"FinMind quota did not recover in time after {i} of {len(todo)} items -- stopping")
             break
         counts[result["status"]] = counts.get(result["status"], 0) + 1
         if result["status"] != "skipped":
@@ -367,10 +386,15 @@ def run(todo, today, dry_run, budget_seconds, limiter, refresh=refresh_code, pro
             failures.append(f"{kind} {code}: {result['detail']}")
             streak += 1
             if streak >= MAX_CONSECUTIVE_FAILURES:
-                if not probe():
-                    raise RunAborted(f"{streak} consecutive failures and the probe request failed "
-                                     "-- likely a bad FINMIND_TOKEN or an outage; aborting",
-                                     counts, attempted, failures)
+                status = probe()
+                if status == "quota":
+                    status = _wait_out_quota(probe, sleep, clock, deadline)
+                    if status == "timeout":
+                        print(f"FinMind quota did not recover in time after {i + 1} of {len(todo)} items -- stopping")
+                        break
+                if status == "error":
+                    raise abort(f"{streak} consecutive failures and the probe request failed "
+                                "-- likely a bad FINMIND_TOKEN or an outage; aborting")
                 streak = 0
         else:
             streak = 0

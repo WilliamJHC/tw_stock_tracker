@@ -147,8 +147,13 @@ def load_code_cache(code, days):
 def save_code_cache(code, data):
     """Public interface: also used directly by scripts/update_universe_bars.py."""
     os.makedirs(RUN_CACHE_DIR, exist_ok=True)
-    with open(code_cache_path(code), "w", encoding="utf-8") as f:
+    # Write-then-rename: a job killed mid-write (timeout / cancel) must never leave
+    # a truncated JSON that a later workflow step then saves into the cache.
+    path = code_cache_path(code)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f)
+    os.replace(tmp, path)
 
 
 def load_universe(name):

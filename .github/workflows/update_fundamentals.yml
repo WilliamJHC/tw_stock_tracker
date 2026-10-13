@@ -61,7 +61,10 @@ permissions:
 jobs:
   update-fundamentals:
     runs-on: ubuntu-latest
-    timeout-minutes: 350   # under the 360 hard cap; the script stops starting codes at 300
+    # Under the 360 hard cap. The script stops starting codes at 270; the 80 min of slack
+    # covers one in-flight code that first sleeps in the rate limiter (up to ~1h) and the
+    # cache save, so the timeout is not what ends a normal slice.
+    timeout-minutes: 350
     environment: Cloudflare
     env:
       FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
@@ -87,10 +90,13 @@ jobs:
       - run: pip install -r requirements-actions.txt
       # Same lineage as update_universe_bars_part1/2: restore the newest snapshot,
       # save a new one afterwards. The save is an explicit step (not actions/cache's
-      # post step, which only runs when the whole job succeeded) so that a run the
-      # script aborts midway (bad token / outage) still keeps what it refreshed:
-      # the script then exits 0 with aborted=true and the last step fails the job.
-      # A crash or a cache miss (script exits non-zero) still saves nothing.
+      # post step, which only runs when the whole job succeeded) so that a run that
+      # dies midway (script abort, timeout, manual cancel) still keeps what it
+      # refreshed. It runs under always(), guarded by a completeness check so that
+      # a cache miss (empty/partial cache/factor_run) is never saved as the newest
+      # snapshot -- that would shadow the older good ones. Per-code writes are
+      # atomic (rfb.save_code_cache), so a kill cannot leave a truncated file.
+      # A script abort exits 0 with aborted=true; the last step then fails the job.
       - uses: actions/cache/restore@v4
         with:
           path: cache/factor_run
@@ -104,7 +110,7 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           LIMIT: ${{ inputs.limit }}
         run: |
-          args=(--kind "$KIND" --budget-minutes 300)
+          args=(--kind "$KIND" --budget-minutes 270)
           [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
           if [ -n "$LIMIT" ]; then
             if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then
@@ -115,8 +121,22 @@ jobs:
           fi
           python -u scripts/update_fundamentals.py "${args[@]}"
       # Dry runs write nothing, so there is nothing to save.
+      - name: check cache before save
+        id: cachecheck
+        if: ${{ always() && !inputs.dry_run }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          sys.path.insert(0, "scripts")
+          import update_universe_bars as uub
+          n = len(uub._cached_codes())
+          print(f"cache codes: {n} (need >= {uub.MIN_CACHED_CODES} to save)")
+          if n >= uub.MIN_CACHED_CODES:
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write("ok=true\n")
+          PY
       - name: save cache
-        if: ${{ !inputs.dry_run }}
+        if: ${{ always() && !inputs.dry_run && steps.cachecheck.outputs.ok == 'true' }}
         uses: actions/cache/save@v4
         with:
           path: cache/factor_run
