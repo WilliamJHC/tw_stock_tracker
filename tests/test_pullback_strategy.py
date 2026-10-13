@@ -183,6 +183,36 @@ def test_evaluate_setup_textbook_case_end_to_end():
         assert ps.round_to_tick(price, "nearest") == price
 
 
+def test_plan_stop_is_farther_of_zone_stop_and_atr_stop():
+    zone_only = ps.evaluate_setup(_setup_bars(), {"stop_atr_mult": 0})["plan"]
+    default = ps.evaluate_setup(_setup_bars())["plan"]
+    wide_atr = ps.evaluate_setup(_setup_bars(), {"stop_atr_mult": 2.0})["plan"]
+    assert zone_only["stop_basis"] == "zone" and zone_only["stop_ref"] == zone_only["zone_stop_ref"]
+    # textbook zone is wider than 0.5 ATR, so the default keeps the zone stop
+    assert default["stop_basis"] == "zone" and default["stop_ref"] == zone_only["stop_ref"]
+    # a big multiple makes the ATR stop the farther one
+    assert wide_atr["stop_basis"] == "atr"
+    assert wide_atr["stop_ref"] < wide_atr["zone_stop_ref"]
+    assert wide_atr["stop_ref"] <= ps.round_to_tick(wide_atr["entry_ref"] - 2.0 * wide_atr["atr14"], "down") + 1e-9
+    assert ps.round_to_tick(wide_atr["stop_ref"], "nearest") == wide_atr["stop_ref"]
+
+
+def test_plan_atr_stop_never_tighter_than_half_atr_and_drives_r_targets():
+    """Regression: a narrow confluence zone used to yield a 0.3% 'stop' (~0.1x ATR)."""
+    for mult in (0.5, 1.0, 2.0):
+        pl = ps.evaluate_setup(_setup_bars(), {"stop_atr_mult": mult})["plan"]
+        # tick rounding can only move the stop down, i.e. farther away
+        assert pl["entry_ref"] - pl["stop_ref"] >= mult * pl["atr14"] - 0.01 or pl["stop_basis"] == "zone"
+        assert abs(pl["r_targets"]["r"] - (pl["entry_ref"] - pl["stop_ref"])) < 0.01
+
+
+def test_plan_wide_atr_stop_flags_stop_ok_false_with_atr_reason():
+    out = ps.evaluate_setup(_setup_bars(), {"stop_atr_mult": 2.0})
+    assert out["plan"]["stop_ok"] is False
+    assert out["passed"] is True                       # advisory only, not a hard failure
+    assert any("ATR" in r for r in out["reasons"])
+
+
 # --------------------------------------------------- step 2: the zone ----
 
 def test_build_zone_prefers_avwap_ema21_prior_high_confluence():

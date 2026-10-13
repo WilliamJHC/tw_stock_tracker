@@ -72,6 +72,7 @@ PULLBACK_PARAMS = {
     "retest_lookback": 20,        # reclaim (close crossing above the zone) must be within N bars for 「第一次回測」
     # ---- 第三步：停損與部位 ----
     "stop_buffer_ticks": 1,       # planned stop = zone bottom minus this many ticks
+    "stop_atr_mult": 0.5,         # planned stop is at least this many ATR14 below the entry reference (0 = zone stop only)
     "max_stop_pct": 3.0,          # 「多數交易停損距離在 2.5%-3% 以內」
     "risk_pct": 0.5,              # 「單筆計畫帳戶風險約 0.5%」
     "lot_size": 1000,             # TW board lot; odd lots (零股) allowed via position_size(odd_lot=True)
@@ -659,19 +660,33 @@ def evaluate_setup(bars, params=None):
     # Planning estimate only -- the real stop comes from the intraday trigger
     # bar (intraday_trigger()). Entry reference = zone top: the trigger fires
     # just above a prior minute-bar high that formed in/near the zone.
+    #
+    # The zone-based stop only measures how wide the confluence zone is -- the
+    # tighter the AVWAP/EMA21/prior-high overlap, the smaller it gets (a 0.2%
+    # zone -> 0.3% "stop", ~0.1x daily ATR). That sits inside normal noise and
+    # lets the 0.585% round-trip cost eat most of the R, so the planned stop is
+    # the farther of the zone stop and entry - stop_atr_mult * ATR14.
     entry = zone_out["high"]
-    stop = round_to_tick(zone_out["low"] - p["stop_buffer_ticks"] * tw_tick_size(zone_out["low"]), "down")
+    zone_stop = round_to_tick(zone_out["low"] - p["stop_buffer_ticks"] * tw_tick_size(zone_out["low"]), "down")
+    atr14 = an.atr([b["h"] for b in bars], [b["l"] for b in bars], closes)
+    stop, stop_basis = zone_stop, "zone"
+    if atr14 and p["stop_atr_mult"]:
+        atr_stop = round_to_tick(entry - p["stop_atr_mult"] * atr14, "down")
+        if atr_stop < zone_stop:
+            stop, stop_basis = atr_stop, "atr"
     stop_pct = (entry - stop) / entry * 100
     plan = {
         "entry_ref": entry, "stop_ref": stop, "stop_pct": round(stop_pct, 2),
+        "stop_basis": stop_basis, "zone_stop_ref": zone_stop,
         "stop_ok": stop_pct <= p["max_stop_pct"],
         "risk_pct": p["risk_pct"],
         "r_targets": r_targets(entry, stop, params=p),
-        "atr14": _round_or_none(an.atr([b["h"] for b in bars], [b["l"] for b in bars], closes)),
+        "atr14": _round_or_none(atr14),
     }
     out["plan"] = plan
     if not plan["stop_ok"]:
-        reasons.append(f"支撐區太寬，預估停損 {stop_pct:.1f}% > {p['max_stop_pct']:g}%（盤中觸發 K 線若更窄仍可做）")
+        reasons.append(f"預估停損 {stop_pct:.1f}% > {p['max_stop_pct']:g}%（以{'ATR' if stop_basis == 'atr' else '支撐區'}計；"
+                       "盤中觸發 K 線若更窄仍可做）")
 
     hard_fail = checks["downtrend"] or not checks["passed"]
     out["passed"] = not hard_fail
