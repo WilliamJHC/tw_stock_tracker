@@ -8,10 +8,13 @@ across cache/factor_run/'s full rebalance-date history -- NOT the whole
 section for why the bound exists and how big it turned out to be, ~616
 codes as of 2026-09-24).
 
-Why this is a separate fetch from cache/factor_run/: that cache's `bars`
-are close+volume only ({date,c,v,c_adj}, see scripts/run_factor_backtest.py's
-daily_to_bars(), which deliberately drops o/h/l -- it was only ever built
-for momentum/liquidity factors). technical_signal() needs full OHLC
+Why this is a separate fetch from cache/factor_run/: when this was written
+that cache's `bars` were close+volume only ({date,c,v,c_adj}; daily_to_bars()
+dropped o/h/l -- it was only ever built for momentum/liquidity factors).
+Since then daily_to_bars() stores raw o/h/l too, but only for dates fetched
+after that change plus whatever `update_universe_bars.py --lookback-days`
+backfilled, so coverage can be partial; the chip data below is still absent
+from it either way. technical_signal() needs full OHLC
 (Donchian breakout needs highs/lows, big_candle_signal() needs opens), and
 chip_signal() needs raw per-investor-type daily net buy/sell (inst_window),
 not the aggregated inst_net_5d docs/institutional_and_accrual_factor_plan.md

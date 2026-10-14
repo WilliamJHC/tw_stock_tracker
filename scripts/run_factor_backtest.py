@@ -171,11 +171,18 @@ def load_universe(name):
 
 
 def daily_to_bars(daily):
-    """data_sources.get_daily()'s {t,o,h,l,c,v} -> [{date,c,v}, ...] ascending.
+    """data_sources.get_daily()'s {t,o,h,l,c,v} -> [{date,o,h,l,c,v}, ...] ascending.
+    o/h/l are stored RAW, same price scale as "c" (back-adjust them with
+    c_adj / c when needed, as scripts/run_pullback_scan.py does). Cache
+    entries written before o/h/l were added simply lack those keys until
+    update_universe_bars.py --lookback-days re-pulls them, so readers must
+    tolerate a bar without "o"/"h"/"l".
     Public interface: also used directly by scripts/update_universe_bars.py."""
     import datetime as dt
     return [
-        {"date": dt.datetime.fromtimestamp(daily["t"][i]).date().isoformat(), "c": daily["c"][i], "v": daily["v"][i]}
+        {"date": dt.datetime.fromtimestamp(daily["t"][i]).date().isoformat(),
+         "o": daily["o"][i], "h": daily["h"][i], "l": daily["l"][i],
+         "c": daily["c"][i], "v": daily["v"][i]}
         for i in range(len(daily["t"]))
     ]
 
@@ -205,7 +212,7 @@ def augment_bars_with_adj_factor(code, bars, limiter, market, twse_events):
     stay in sync with this signature, see that script's module docstring
     (commit 8a504f0: a prior 3-vs-5-arg drift crashed the weekly refresh).
 
-    bars (ascending [{date,c,v}]) -> same-length list with a "c_adj" key
+    bars (ascending [{date,c,v}], o/h/l optional and carried through) -> same-length list with a "c_adj" key
     added to every entry -- a TRUE total-return-style back-adjustment (both
     splits AND cash/stock dividends), combining `twse_events` (this code's
     rows from fetch_twse_table(), authoritative for TWSE-listed codes) with
