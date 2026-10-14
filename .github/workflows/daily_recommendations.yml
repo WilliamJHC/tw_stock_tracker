@@ -94,20 +94,32 @@ jobs:
       # 放在多因子那一步之後、同一個 job：共用上面 restore 的 factor_run 與
       # backtest.db，結果寫進 meta.pullback_watchlist，job 結束時由
       # backtest-db-cache 一併存回。continue-on-error：掃描失敗（FinMind 額度、
-      # 快取為空）不能讓多因子那一步已寫入的 meta 存不回去。
+      # 快取為空）不能讓多因子那一步已寫入的 meta 存不回去。失敗不再靜默：
+      # 缺 token、腳本 crash、或日線抓取失敗過半（腳本 exit 1、不覆寫 meta）
+      # 都會讓這個 step 失敗，由下一個 step 發 Telegram 通知。
       # 與前一步不同，這一步會對最多 120 檔各打一次 FinMind，所以需要
       # FINMIND_TOKEN；只設在這個 step，前一步仍然不碰網路。
       - name: run_pullback_scan
+        id: pullback_scan
         continue-on-error: true
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: |
           if [ -z "$FINMIND_TOKEN" ]; then
-            echo "::warning::缺少 FINMIND_TOKEN（Settings → Environments → Cloudflare），略過強勢回調掃描"
-            exit 0
+            echo "::error::缺少 FINMIND_TOKEN（Settings → Environments → Cloudflare），無法執行強勢回調掃描"
+            exit 1
           fi
           args=""
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             args="$args --dry-run"
           fi
           python scripts/run_pullback_scan.py $args
+      - name: notify_pullback_scan_failure
+        if: steps.pullback_scan.outcome == 'failure'
+        run: |
+          msg="[強勢回調] 每日掃描失敗，watchlist 未更新：${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          curl -sS --max-time 20 \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${msg}" \
+            > /dev/null || echo "::warning::Telegram 通知失敗"

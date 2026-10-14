@@ -125,3 +125,13 @@ def test_build_scan_skips_code_with_unadjusted_split():
     payload = rps.build_scan({}, 5, 5, codes=["6669"], fetch_fn=lambda c: _bars_to_daily(bars),
                              industries={}, names={}, sleep=0)
     assert payload["counts"]["unadjusted"] == 1 and payload["setups"] == []
+
+
+def test_fetch_failure_too_high_flags_outage_not_quiet_market():
+    assert rps.fetch_failure_too_high({"candidates": 10, "failed": 6}, max_fetch=120)
+    assert not rps.fetch_failure_too_high({"candidates": 10, "failed": 5}, max_fetch=120)
+    # max_fetch caps the denominator: 60 of the first 100 attempted failed
+    assert rps.fetch_failure_too_high({"candidates": 500, "failed": 60}, max_fetch=100)
+    # nothing attempted / no failures is never an outage
+    assert not rps.fetch_failure_too_high({"candidates": 0, "failed": 0}, max_fetch=120)
+    assert not rps.fetch_failure_too_high({"candidates": 10, "failed": 0}, max_fetch=120)

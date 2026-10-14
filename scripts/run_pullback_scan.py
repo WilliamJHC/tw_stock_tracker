@@ -49,6 +49,7 @@ import report_factor_ic as rfi  # noqa: E402
 
 META_KEY = "pullback_watchlist"
 FETCH_SLEEP_SECONDS = 0.2
+MAX_FETCH_FAIL_RATIO = 0.5   # more failed fetches than this => data source is down, don't publish
 
 
 def adjustment_factors(cached_bars):
@@ -211,6 +212,14 @@ def build_scan(universe_data, top_n, max_fetch, codes=None, fetch_fn=None, indus
     }
 
 
+def fetch_failure_too_high(counts, max_fetch, max_ratio=MAX_FETCH_FAIL_RATIO):
+    """True when so many stage-2 fetches failed that the result reflects an
+    outage (FinMind quota/down), not the market -- publishing it would
+    replace a good watchlist with an empty one."""
+    attempted = min(counts.get("candidates", 0), max_fetch)
+    return attempted > 0 and counts.get("failed", 0) > attempted * max_ratio
+
+
 def summary_text(payload):
     near = [s for s in payload["setups"] if s["status"] == "near_support"]
     scope = "強勢" if payload.get("mode") == "screen" else "指定"
@@ -262,6 +271,11 @@ def main():
     if payload is None:
         print("沒有可掃描的股票，未寫入 meta")
         return
+    if codes is None and fetch_failure_too_high(payload["counts"], args.max_fetch):
+        c = payload["counts"]
+        print(f"日線抓取失敗 {c['failed']}/{min(c['candidates'], args.max_fetch)} 檔，疑似資料源異常，"
+              "未寫入 meta、未發 Telegram", file=sys.stderr)
+        sys.exit(1)
     payload = {"generated_at": dt.datetime.now().isoformat(timespec="seconds"), **payload}
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     summary = summary_text(payload)
