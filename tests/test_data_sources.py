@@ -570,3 +570,23 @@ def test_get_index_daily_caches_result():
         ds.get_index_daily("TAIEX", cache=True)
         ds.get_index_daily("TAIEX", cache=True)
     mock_finmind.assert_called_once()  # 2nd call served from cache, no 2nd FinMind hit
+
+
+# --------------------------------------------------------- get_industries --
+
+def test_get_industries_groups_multiple_categories_per_code():
+    rows = [
+        {"stock_id": "2330", "stock_name": "台積電", "type": "twse", "industry_category": "半導體業"},
+        {"stock_id": "2330", "stock_name": "台積電", "type": "twse", "industry_category": "電子工業"},
+        {"stock_id": "5481", "stock_name": "先豐", "type": "tpex", "industry_category": "電子零組件業"},
+        {"stock_id": "00631L", "stock_name": "正2", "type": "twse", "industry_category": "ETF"},
+        {"stock_id": "1101", "stock_name": "台泥", "type": "twse", "industry_category": ""},
+    ]
+    with patch("data_sources.requests.get", return_value=_fake_response(data=rows)):
+        result = ds.get_industries()
+    assert result == {"2330": ["半導體業", "電子工業"], "5481": ["電子零組件業"]}
+
+
+def test_get_industries_failure_returns_empty():
+    with patch("data_sources.requests.get", return_value=_fake_response(data=[])):
+        assert ds.get_industries() == {}

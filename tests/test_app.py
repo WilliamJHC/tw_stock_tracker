@@ -14,3 +14,9 @@ def test_api_recommendations_delegates_to_pipeline(monkeypatch):
     sentinel = {"recommendations": [{"code": "2330"}], "as_of": "2026-08-20"}
     monkeypatch.setattr(pl, "build_recommendations", lambda: sentinel)
     assert app_module.api_recommendations() is sentinel
+
+
+def test_api_pullback_delegates_to_pipeline(monkeypatch):
+    sentinel = {"setups": [{"code": "2330"}], "as_of": "2026-10-12"}
+    monkeypatch.setattr(pl, "build_pullback_watchlist", lambda: sentinel)
+    assert app_module.api_pullback() is sentinel

@@ -50,7 +50,9 @@ import os
 
 import data_sources as ds
 import pipeline
+import pullback_strategy as ps
 from alerts import dedupe_and_cooldown, evaluate_alerts, send_telegram
+from env_utils import load_env_value
 from intraday import depth_imbalance, opening_range, realtime_cvd, vwap_bands
 from realtime.binance_source import BinanceSource
 from realtime.mis_source import MISSource
@@ -77,7 +79,7 @@ def is_market_open(market, now=None):
 # ---------------------------------------------------------------- state ----
 
 def new_state():
-    return {"history": {}, "cooldown": {}}
+    return {"history": {}, "cooldown": {}, "pullback_fired": {}}
 
 
 def _ensure_history(state, code):
@@ -244,7 +246,8 @@ def _persist_snapshot(code, market, now, indicators):
 
 # ---------------------------------------------------------- main loop ----
 
-def run_once(codes, market, state, source=None, send_fn=send_telegram, now=None, cooldown_minutes=5):
+def run_once(codes, market, state, source=None, send_fn=send_telegram, now=None, cooldown_minutes=5,
+             pullback_plans=None, pullback_account=None):
     """One evaluation round for `codes` in `market`.
 
     If `source` exposes poll_once() (MISSource-style), it is called once
@@ -258,6 +261,12 @@ def run_once(codes, market, state, source=None, send_fn=send_telegram, now=None,
     processing one code is caught, logged, and does not stop the loop from
     processing the remaining codes.
 
+    pullback_plans: optional {code: setup} (pipeline.load_pullback_plans())
+    -- these codes are recorded from the same poll and checked by
+    pullback_alerts() for the 強勢回調 intraday trigger only; the generic
+    VWAP/ORB/CVD/depth rules stay scoped to `codes`. None (default) keeps
+    the original behavior exactly.
+
     Returns the list of {"alert": ..., "send_result": ...} that were
     actually sent this round (post dedupe/cooldown).
     """
@@ -269,8 +278,9 @@ def run_once(codes, market, state, source=None, send_fn=send_telegram, now=None,
         except Exception as exc:  # noqa: BLE001 -- must not kill the loop
             print(f"[monitor] source.poll_once() failed for market={market}: {exc}")
             quotes = []
+        wanted = set(codes) | set(pullback_plans or {})
         for q in quotes:
-            if q.code in codes:
+            if q.code in wanted:
                 record_quote(state, q)
 
     sent = []
@@ -289,11 +299,99 @@ def run_once(codes, market, state, source=None, send_fn=send_telegram, now=None,
         except Exception as exc:  # noqa: BLE001 -- one bad code must not kill the round
             print(f"[monitor] run_once failed for code={code}: {exc}")
             continue
+
+    if market == "tw" and pullback_plans:
+        for code, setup in pullback_plans.items():
+            try:
+                for alert in pullback_alerts(state, code, setup, now, account=pullback_account):
+                    result = send_fn(alert["message"])
+                    sent.append({"alert": alert, "send_result": result})
+            except Exception as exc:  # noqa: BLE001 -- same isolation as above
+                print(f"[monitor] pullback check failed for code={code}: {exc}")
     return sent
 
 
+# ------------------------------------------------- 強勢回調盤中觸發 ----
+
+def pullback_alerts(state, code, setup, now, account=None, bar_minutes=None):
+    """強勢股回調買法 step 2's minute-chart trigger for one planned setup
+    (meta.pullback_watchlist entry, see pipeline.load_pullback_plans()).
+    Builds `bar_minutes`-minute bars from today's MIS session ticks and runs
+    pullback_strategy.intraday_trigger(). Each of three events fires at most
+    once per code per day (state["pullback_fired"]), not on a cooldown --
+    a trigger is a once-a-day decision, re-sending it every 5 minutes would
+    just be noise:
+      pullback_touch     -- price came down into the support zone: watch the
+                            minute chart now
+      pullback_trigger   -- dip + break of the previous bar's high: entry,
+                            stop, R targets (and share count if
+                            PULLBACK_ACCOUNT_SIZE is set)
+      pullback_broken    -- slid through the zone without recovering: stand
+                            aside (「跌穿支撐，沒有回升時，繼續等待」)
+    Only ticks from `now`'s date are used, so a monitor left running
+    overnight doesn't mix yesterday's session into today's bars."""
+    zone = setup.get("zone") or {}
+    if zone.get("low") is None or zone.get("high") is None:
+        return []
+    hist = state["history"].get(code)
+    if not hist or not hist["ticks"]:
+        return []
+    today = now.date()
+    session = [t for t in hist["ticks"] if not t["is_pretrade"] and t["ts"]
+               and dt.datetime.fromtimestamp(t["ts"]).date() == today]
+    if not session:
+        return []
+    minutes = bar_minutes or ps.PULLBACK_PARAMS["intraday_bar_minutes"]
+    mbars = ps.ticks_to_bars([t["price"] for t in session], [t["ts"] for t in session], minutes)
+    trig = ps.intraday_trigger(mbars, zone["low"], zone["high"])
+
+    fired = state.setdefault("pullback_fired", {}).setdefault((code, today.isoformat()), set())
+    name = setup.get("name") or ""
+    label = f"{code}{' ' + name if name and name != code else ''}"
+    out = []
+    if trig["state"] in ("dipped", "triggered") and "touch" not in fired:
+        fired.add("touch")
+        out.append({
+            "code": code, "event_type": "pullback_touch", "priority": 20,
+            "message": (f"[{label}] 回到強勢回調支撐區 {zone['low']:g}–{zone['high']:g}（現價 {session[-1]['price']:g}），"
+                        f"盯 {minutes} 分 K：下探後回升、突破前一根高點才進場"),
+        })
+    if trig["state"] == "triggered" and "trigger" not in fired:
+        fired.add("trigger")
+        out.append({
+            "code": code, "event_type": "pullback_trigger", "priority": 30,
+            "message": ps.format_trigger_message(code, name if name != code else "", setup, trig, account=account),
+        })
+    if trig["state"] == "broken" and "broken" not in fired and "trigger" not in fired:
+        fired.add("broken")
+        out.append({
+            "code": code, "event_type": "pullback_broken", "priority": 10,
+            "message": f"[{label}] 跌穿支撐區 {zone['low']:g}–{zone['high']:g} 未回升（{trig['last']:g}），今天不進場、繼續等待",
+        })
+    return out
+
+
+def _pullback_account_size():
+    """PULLBACK_ACCOUNT_SIZE (NTD) from env/.env, or None -- only used to put
+    a share count into trigger alerts; absent = alert without sizing."""
+    raw = load_env_value("PULLBACK_ACCOUNT_SIZE", pipeline.BASE_DIR)
+    try:
+        return float(raw.replace(",", "")) if raw else None
+    except ValueError:
+        return None
+
+
+def _load_default_pullback_plans():
+    try:
+        return pipeline.load_pullback_plans()
+    except Exception as exc:  # noqa: BLE001 -- optional feature, never blocks the monitor
+        print(f"[monitor] 讀取強勢回調清單失敗（{exc}），本次不啟用盤中觸發")
+        return {}
+
+
 def main(codes=None, crypto_codes=None, max_iterations=None, sleep_seconds=30,
-         mis_source=None, binance_source=None, send_fn=send_telegram, state=None):
+         mis_source=None, binance_source=None, send_fn=send_telegram, state=None,
+         pullback_plans=None):
     """Standing loop: watchlist.json drives the TW/MIS track (via
     pipeline.load_watchlist(), same convention as app.py/snapshot.py);
     crypto_codes is an explicit opt-in list (empty by default) that, when
@@ -302,23 +400,35 @@ def main(codes=None, crypto_codes=None, max_iterations=None, sleep_seconds=30,
     lets callers/tests inject a fake adapter instead of a real BinanceSource
     (mirrors the existing `mis_source` injection point). `max_iterations`
     bounds the loop for tests/manual runs; None (default) means run forever.
+
+    pullback_plans: {code: setup} for the 強勢回調 intraday trigger. None +
+    codes=None (the plain `python src/monitor.py` run) loads the latest
+    meta.pullback_watchlist; None with explicit codes means off, so
+    scripted/test runs aren't affected by whatever the DB holds.
     """
+    if pullback_plans is None:
+        pullback_plans = _load_default_pullback_plans() if codes is None else {}
     if codes is None:
         codes = [w["code"] for w in pipeline.load_watchlist()]
     if crypto_codes is None:
         crypto_codes = []
     state = state if state is not None else new_state()
+    if pullback_plans:
+        print(f"[monitor] 強勢回調盤中觸發：{', '.join(pullback_plans)}")
     return asyncio.run(_main_loop(
         codes, crypto_codes, max_iterations, sleep_seconds,
-        mis_source, binance_source, send_fn, state,
+        mis_source, binance_source, send_fn, state, pullback_plans,
     ))
 
 
 async def _main_loop(codes, crypto_codes, max_iterations, sleep_seconds,
-                      mis_source, binance_source, send_fn, state):
+                      mis_source, binance_source, send_fn, state, pullback_plans=None):
     source = mis_source or MISSource()
-    if codes:
-        source.subscribe(codes)
+    pullback_plans = pullback_plans or {}
+    tw_codes = list(codes) + [c for c in pullback_plans if c not in codes]
+    if tw_codes:
+        source.subscribe(tw_codes)
+    pullback_account = _pullback_account_size() if pullback_plans else None
 
     binance_task = None
     if crypto_codes:
@@ -332,12 +442,13 @@ async def _main_loop(codes, crypto_codes, max_iterations, sleep_seconds,
         iteration = 0
         while True:
             now = dt.datetime.now()
-            if codes and is_market_open("tw", now):
+            if tw_codes and is_market_open("tw", now):
                 # Worker thread: source.poll_once() is a blocking `requests`
                 # call (up to 15s timeout) and must not stall the event loop
                 # the Binance task depends on to process incoming frames.
                 await asyncio.to_thread(
                     run_once, codes, "tw", state, source=source, send_fn=send_fn, now=now,
+                    pullback_plans=pullback_plans, pullback_account=pullback_account,
                 )
             if crypto_codes and is_market_open("crypto", now):
                 # No polling network I/O here (source=None): just evaluates

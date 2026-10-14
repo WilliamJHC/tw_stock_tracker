@@ -316,3 +316,46 @@ def test_build_recommendations_no_prefetched_stocks_fetches_all_codes(monkeypatc
 
     pl.build_recommendations()
     assert calls == [["2330"]]
+
+
+# ------------------------------------------------ 強勢股回調買法 watchlist --
+
+def test_build_pullback_watchlist_before_scan_is_empty(monkeypatch):
+    monkeypatch.setattr(pl, "_read_pullback_payload", lambda: None)
+    out = pl.build_pullback_watchlist()
+    assert out["setups"] == [] and out["as_of"] is None
+
+
+def test_build_pullback_watchlist_adds_quote_and_tracked(monkeypatch):
+    payload = {"as_of": "2026-10-12", "generated_at": "g", "counts": {"setups": 2}, "params": {},
+               "setups": [{"code": "2330", "status": "near_support"}, {"code": "3017", "status": "extended"}]}
+    monkeypatch.setattr(pl, "_read_pullback_payload", lambda: payload)
+    quote_calls = []
+
+    def fake_quote(code):
+        quote_calls.append(code)
+        return {"price": 100.0}
+
+    out = pl.build_pullback_watchlist(prefetched_quotes={"2330": {"price": 1000.0}},
+                                      tracked_codes=["2330"], quote_fn=fake_quote)
+    assert quote_calls == ["3017"]  # prefetched quote reused
+    assert [(s["code"], s["quote"]["price"], s["tracked"]) for s in out["setups"]] == [
+        ("2330", 1000.0, True), ("3017", 100.0, False)]
+    assert out["as_of"] == "2026-10-12"
+
+
+def test_build_pullback_watchlist_survives_quote_failure(monkeypatch):
+    monkeypatch.setattr(pl, "_read_pullback_payload", lambda: {"setups": [{"code": "2330"}]})
+
+    def boom(code):
+        raise RuntimeError("down")
+
+    out = pl.build_pullback_watchlist(tracked_codes=[], quote_fn=boom)
+    assert out["setups"][0]["quote"] is None
+
+
+def test_load_pullback_plans_excludes_broken(monkeypatch):
+    monkeypatch.setattr(pl, "_read_pullback_payload", lambda: {"setups": [
+        {"code": "2330", "status": "near_support"}, {"code": "2454", "status": "broken"},
+        {"code": "3017", "status": "extended"}]})
+    assert set(pl.load_pullback_plans()) == {"2330", "3017"}

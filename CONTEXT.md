@@ -55,3 +55,13 @@ stock_tracker 專案的詞彙表。只收「這個詞在這個專案裡精確指
 **`_Avoid_`：不要跟「均線多頭/空頭排列」搞混——那是 `src/analysis.py`/`src/breakout_strategy.py` 既有的**個股**層級判斷（`ma5 > ma20 > ma60`），跟這裡的「盤勢」是完全不同層級的概念：一支個股可以在大盤「空頭」盤勢裡仍然呈現「均線多頭排列」，兩者不互相蘊含。
 
 `effective_regime_series()` 是「防抖」後的版本（連續 N 天同一原始分類才算切換），純函式、不持久化狀態，每次呼叫都對同一段歷史重算；`current_regime()` 是給只要「現在是什麼盤勢」的呼叫端用的便利函式。目前接了兩處：`finlab_factors.RANKING_WEIGHTS`（分盤勢版本走人工審核，`meta.active_ranking_weights_by_regime`）、`backtest.STRATEGY_PARAMS`（分盤勢版本 `STRATEGY_PARAMS_BY_REGIME`，寫死進 code，不建審核流程）。
+
+## 支撐區（強勢回調）／ R
+
+`src/pullback_strategy.py` 的兩個詞（第二種選股法，`docs/pullback_strategy.md`）：
+
+- **支撐區**（`setup["zone"]`，`{"low", "high", "score", "kinds", "levels"}`）：EMA9/21/50、以整理區階段高點為錨的 AVWAP、前高、前低、未補缺口中，彼此相距 1.5% 內聚在一起的那一段價格；`score` 是聚在一起的價位種類數（AVWAP/EMA21/前高至少兩個重疊再 +1）。價位都在「今天的價格尺度」上（`c_adj` 還原後），可以直接當下單價。
+- **R**：一筆計畫的每股風險＝進場價 − 停損價。3R、5R 是分批出場的目標價；`net_r` 是扣掉台股手續費＋證交稅後實際值多少 R。
+
+`_Avoid_`：不要把「支撐區」跟 `target_price`（VAH/VAL，量價分佈）或 `alerts.py` 的 VWAP/ORB「支撐/壓力」混用——三者是不同演算法、不同用途。多因子推薦卡的「目標」是 VAH/VAL，強勢回調卡的「目標」是 3R/5R，刻意不共用欄位。
+

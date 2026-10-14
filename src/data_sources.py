@@ -869,6 +869,33 @@ def get_universe(cache=True):
     return result
 
 
+def get_industries(cache=True):
+    """{code: [industry_category, ...]} for 4-digit TWSE/TPEX stocks, from
+    the same TaiwanStockInfo dataset get_universe() reads (one request,
+    cached under its own key so get_universe()'s shape/cache stay untouched).
+    A stock can appear under several categories (e.g. 半導體業 and a
+    concept group), so values are sorted lists. {} on failure -- callers
+    treat sector info as optional (src/pullback_strategy.theme_strength())."""
+    cached = _cache_get("industries") if cache else None
+    if cached is not None:
+        return cached
+    result = {}
+    try:
+        rows = _finmind("TaiwanStockInfo")
+        by_code = {}
+        for r in rows:
+            code = r.get("stock_id") or ""
+            cat = (r.get("industry_category") or "").strip()
+            if len(code) == 4 and code.isdigit() and r.get("type") in ("twse", "tpex") and cat:
+                by_code.setdefault(code, set()).add(cat)
+        result = {c: sorted(cats) for c, cats in by_code.items()}
+    except (SourceError, requests.RequestException, ValueError, KeyError):
+        result = {}
+    if cache and result:
+        _cache_put("industries", result)
+    return result
+
+
 def get_monthly_revenue(code, days=760, cache=True):
     """Monthly revenue history (>=24mo so callers can derive YoY growth).
     Returns [{date, revenue, announce_date}] ascending, date = 1st of the

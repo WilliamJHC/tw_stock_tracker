@@ -11,6 +11,7 @@
   - 免費級 token → 自動降級為 yfinance 分鐘 K 的 tick-rule 推估（UI 會標示）
 - 量價四象限、20 日趨勢推估區間、綜合技術評分、訊號回測勝率
 - **籌碼面子分**：法人買賣超／融資融券／外資持股比／借券賣出餘額，與技術分並列顯示，不揉進同一個數字
+- **兩種選股方式**：全市場多因子排名（推薦股票）＋強勢股回調買法（強勢回調面板，見下方同名一節）
 - 資料來源優先度：**FinMind → yfinance → TWSE**（每檔股票顯示實際來源）
 
 ## 安裝與啟動
@@ -218,6 +219,20 @@ Secrets 沿用「手機雲端版」同一個 Environment「Cloudflare」底下�
 ### 手機加入主畫面
 
 手機瀏覽器開部署網址 → 選單「加入主畫面」→ 以獨立視窗（standalone）開啟，manifest 沿用本機版的 `static/manifest.json`。
+
+## 強勢股回調買法（第二種選股法，`scripts/run_pullback_scan.py`）
+
+和多因子排名並列、互不影響的另一種方式：篩近 1/3/6 月漲幅 >30% 且排名前 30% 的強勢股 →
+要求整理中低點抬高、波動收窄、重新站上走平的 9/21 日 EMA → 把 EMA9/21/50、整理區高點起算的
+AVWAP、前高、前低、未補缺口合成「支撐區」→ 盤中回到支撐區、下探後回升、突破前一根分 K 高點才進場；
+停損放觸發 K／前一根 K 低點，股數＝帳戶 × 0.5% ÷ 每股風險，3R、5R 分批，剩餘看 EMA9。
+**這套方法尚未回測驗證**，畫面與 Telegram 都有標示。完整對照表、台股化調整與已知限制見
+`docs/pullback_strategy.md`，為什麼獨立成一條見 `docs/adr/0007-pullback-as-second-selection-method.md`。
+
+- **排程**：`daily_recommendations.yml` 的第二個 step（台北週一～五 07:00），結果寫進 `meta.pullback_watchlist`，發一則 Telegram 摘要。
+- **網頁**：首頁「強勢回調」面板（即時模式 `GET /api/pullback`；雲端版在 `data.json` 的 `pullback`）。右上角填帳戶規模就會算股數，數字只存在你的瀏覽器。
+- **盤中觸發**：`.venv\Scripts\python src\monitor.py` 會自動把清單上的股票一起輪詢，用 5 分 K 判斷「回到支撐區／觸發／跌穿」，每檔每天各最多一則。`.env` 設 `PULLBACK_ACCOUNT_SIZE` 會在觸發警報附上股數。注意本機 monitor 讀本機的 `backtest.db`，雲端排程的清單不會同步下來——開盤前先在本機跑一次 `run_pullback_scan.py`。
+- **手動**：`.venv\Scripts\python scripts\run_pullback_scan.py --universe watchlist`（或 `--codes 2344,3081`）只看不寫；全市場加 `--dry-run`。
 
 ## 決策面板與籌碼分
 

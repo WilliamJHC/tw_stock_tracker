@@ -402,3 +402,89 @@ def test_main_without_crypto_codes_never_starts_binance_task():
         binance_source=fake_binance, send_fn=_SendRecorder(),
     )
     assert fake_binance.subscribed is None  # subscribe() never called -> task never started
+
+
+# ------------------------------------------- 強勢回調盤中觸發 (pullback) --
+
+_PB_SETUP = {"code": "3017", "name": "奇鋐", "zone": {"low": 19.6, "high": 20.0}}
+
+
+def _feed_ticks(state, code, prices, start):
+    for i, p in enumerate(prices):
+        monitor.record_quote(state, _tw_quote(code, p, 100 + i, start + i * 60))
+
+
+def test_pullback_alerts_touch_then_trigger_once_per_day():
+    state = monitor.new_state()
+    now = dt.datetime(2026, 10, 13, 9, 30)
+    t0 = dt.datetime(2026, 10, 13, 9, 0).timestamp()
+    # 5-min bars: 20.6 -> dip to 19.7 -> recover above previous bar high
+    _feed_ticks(state, "3017", [20.6, 20.3, 20.35, 20.4, 20.3,      # bar 1
+                                20.0, 19.9, 19.95, 19.9, 19.95,     # bar 2 (touch)
+                                19.8, 19.7, 19.75, 19.8, 19.8,      # bar 3 (low)
+                                19.85, 20.1, 20.15], t0)            # bar 4 breaks 19.95
+    alerts = monitor.pullback_alerts(state, "3017", _PB_SETUP, now, account=1_000_000)
+    kinds = [a["event_type"] for a in alerts]
+    assert kinds == ["pullback_touch", "pullback_trigger"]
+    assert "停損" in alerts[1]["message"] and "股（" in alerts[1]["message"]
+    # same day again: nothing new
+    assert monitor.pullback_alerts(state, "3017", _PB_SETUP, now) == []
+
+
+def test_pullback_alerts_broken_when_sliding_through():
+    state = monitor.new_state()
+    now = dt.datetime(2026, 10, 13, 9, 30)
+    t0 = dt.datetime(2026, 10, 13, 9, 0).timestamp()
+    _feed_ticks(state, "3017", [20.2, 20.0, 19.8, 19.5, 19.3, 19.2], t0)
+    kinds = [a["event_type"] for a in monitor.pullback_alerts(state, "3017", _PB_SETUP, now)]
+    assert "pullback_broken" in kinds
+
+
+def test_pullback_alerts_ignores_yesterdays_ticks():
+    state = monitor.new_state()
+    t_yday = dt.datetime(2026, 10, 12, 9, 0).timestamp()
+    _feed_ticks(state, "3017", [20.6, 19.9, 19.7, 20.2], t_yday)
+    assert monitor.pullback_alerts(state, "3017", _PB_SETUP, dt.datetime(2026, 10, 13, 9, 1)) == []
+
+
+def test_run_once_records_and_checks_pullback_codes_without_generic_rules():
+    state = monitor.new_state()
+    t0 = dt.datetime(2026, 10, 13, 9, 0).timestamp()
+    quotes = [_tw_quote("3017", p, 100 + i, t0 + i * 60) for i, p in enumerate(
+        [20.6, 20.3, 20.35, 20.4, 20.3, 20.0, 19.9, 19.95, 19.9, 19.95, 19.8, 19.7, 19.75, 19.8, 19.8, 19.85, 20.1])]
+    source = _FakeSource([quotes])
+    sender = _SendRecorder()
+    sent = monitor.run_once([], "tw", state, source=source, send_fn=sender,
+                            now=dt.datetime(2026, 10, 13, 9, 20), pullback_plans={"3017": _PB_SETUP})
+    assert [s["alert"]["event_type"] for s in sent] == ["pullback_touch", "pullback_trigger"]
+    assert "3017" in state["history"]
+
+
+def test_main_with_explicit_codes_does_not_load_pullback_plans(monkeypatch):
+    def boom():
+        raise AssertionError("should not read meta when codes are explicit")
+    monkeypatch.setattr(monitor.pipeline, "load_pullback_plans", boom)
+
+    class Src:
+        def subscribe(self, codes):
+            self.codes = codes
+
+        def poll_once(self):
+            return []
+    src = Src()
+    monitor.main(codes=["2330"], crypto_codes=[], max_iterations=1, sleep_seconds=0,
+                 mis_source=src, send_fn=_SendRecorder())
+    assert src.codes == ["2330"]
+
+
+def test_main_subscribes_pullback_codes_too():
+    class Src:
+        def subscribe(self, codes):
+            self.codes = codes
+
+        def poll_once(self):
+            return []
+    src = Src()
+    monitor.main(codes=["2330"], crypto_codes=[], max_iterations=1, sleep_seconds=0,
+                 mis_source=src, send_fn=_SendRecorder(), pullback_plans={"3017": _PB_SETUP})
+    assert src.codes == ["2330", "3017"]

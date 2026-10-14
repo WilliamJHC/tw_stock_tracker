@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Unit tests for snapshot.py's pure merge_light function."""
 import json
+import os
 import sys
 
 import pipeline as pl
@@ -179,11 +180,20 @@ def test_run_full_batches_tracked_and_recommended_codes_in_one_call(monkeypatch,
         return {"recommendations": [], "as_of": None}
     monkeypatch.setattr(pl, "build_recommendations", fake_build_recommendations)
 
+    pullback_calls = []
+
+    def fake_build_pullback_watchlist(prefetched_quotes=None, tracked_codes=None):
+        pullback_calls.append((set(prefetched_quotes), set(tracked_codes)))
+        return {"setups": [], "as_of": None}
+    monkeypatch.setattr(pl, "build_pullback_watchlist", fake_build_pullback_watchlist)
+
     monkeypatch.setattr(snap.ds, "tick_tier_available", lambda: False)
     monkeypatch.setattr(snap.ds, "data_tier", lambda: "free")
 
     out_dir = tmp_path / "dist"
     ok, fail, total = snap.run_full(str(out_dir))
+    # 強勢回調 cards reuse every quote the batched fetch already has
+    assert pullback_calls == [({"2330", "2454"}, {"2330"})]
 
     assert batch_calls == [["2330", "2454"]]  # one batched call, union of tracked+recommended
     assert reco_calls == [({"2330", "2454"}, {"2330"})]
@@ -191,3 +201,29 @@ def test_run_full_batches_tracked_and_recommended_codes_in_one_call(monkeypatch,
 
     data = json.loads((out_dir / "data.json").read_text(encoding="utf-8"))
     assert set(data["stocks"].keys()) == {"2330"}  # payload["stocks"] stays watchlist-scoped
+
+
+# ------------------------------- merge_light: 強勢回調 cards (pullback) --
+
+def test_merge_light_refreshes_pullback_quote_only():
+    base = _base()
+    base["pullback"] = {"as_of": "2026-10-12", "setups": [
+        {"code": "3017", "zone": {"low": 600, "high": 610}, "quote": {"price": 650}}]}
+    out = snap.merge_light(base, {"3017": {"price": 612}}, "2026-10-13T09:07:00+08:00")
+    s = out["pullback"]["setups"][0]
+    assert s["quote"]["price"] == 612
+    assert s["zone"] == {"low": 600, "high": 610}
+
+
+def test_run_light_includes_pullback_codes_in_quote_refresh(monkeypatch, tmp_path):
+    base = _base()
+    base["pullback"] = {"as_of": "2026-10-12", "setups": [{"code": "3017", "quote": None}]}
+    asked = []
+
+    def fake_quote(code):
+        asked.append(code)
+        return {"price": 1.0}
+    monkeypatch.setattr(snap.ds, "get_quote", fake_quote)
+    monkeypatch.setattr(snap, "assemble_site", lambda out_dir: os.makedirs(out_dir, exist_ok=True))
+    snap.run_light(str(tmp_path / "dist"), base)
+    assert "3017" in asked

@@ -87,6 +87,20 @@ body.static-mode #backtestStatus, body.static-mode #backtestDisclaimerLines { di
 .reco-add-btn { padding: 4px 10px; font-size: 12px; border: 1px solid var(--color-border-tertiary); border-radius: 6px; background: white; cursor: pointer; white-space: nowrap; }
 .reco-add-btn:hover { background: var(--color-background-secondary); }
 body.static-mode .reco-add-btn { display: none; }
+/* 強勢股回調買法（第二種選股法，docs/pullback_strategy.md） */
+.pb-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.pb-method { font-size: 12px; color: var(--color-text-secondary); margin-bottom: 10px; line-height: 1.6; }
+.pb-acct { font-size: 12px; color: var(--color-text-secondary); display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.pb-acct input { width: 110px; padding: 3px 6px; font-size: 12px; border: 1px solid var(--color-border-tertiary); border-radius: 6px; }
+.pb-acct input.pb-risk { width: 52px; }
+.pb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.pb-card { border: 1px solid var(--color-border-tertiary); border-radius: var(--border-radius-md); padding: 12px 14px; font-size: 13px; }
+.pb-row { margin-top: 5px; line-height: 1.55; }
+.pb-k { color: var(--color-text-secondary); margin-right: 4px; }
+.pb-warn { color: #993C1D; font-size: 12px; margin-top: 6px; }
+.tag-near { background: #FCEBD5; color: #8A4B08; }
+.tag-ext { background: #eaeaea; color: #666; }
+.tag-first { background: #E8E4F8; color: #4B3A99; }
 .detail-row > td { background: #fafafa !important; padding: 16px !important; }
 .detail-grid { display: grid; grid-template-columns: minmax(0, 2.3fr) minmax(280px, 1fr); gap: 20px; }
 @media (max-width: 980px) { .detail-grid { grid-template-columns: 1fr; } }
@@ -194,6 +208,17 @@ body.static-mode .add-bar, body.static-mode .del-btn { display: none; }
     <div id="recoPanel"><div class="empty" style="padding:1.5rem;">載入中...</div></div>
   </div>
 
+  <div class="reco-panel">
+    <div class="pb-head">
+      <div class="detail-section-title" style="margin:0;">強勢回調（第二種選股法）<span id="pbAsOf" class="subtitle" style="display:inline; margin-left:8px; font-weight:400;"></span></div>
+      <div class="pb-acct">帳戶 <input id="pbAccount" type="number" min="0" step="10000" placeholder="例 1000000" oninput="savePbSizing(); renderPullback()" />
+        風險 <input id="pbRisk" class="pb-risk" type="number" min="0.1" max="5" step="0.1" value="0.5" oninput="savePbSizing(); renderPullback()" />%</div>
+    </div>
+    <div class="pb-method">篩近 1/3/6 月漲幅 &gt;30% 且前 30% 的強勢股 → 整理中低點抬高、波動收窄、站回走平的 9/21 EMA → 標出 EMA/AVWAP/前高/缺口的支撐區。
+      <b>盤中</b>：回到支撐區、下探後回升、突破前一根 1/5/15 分 K 高點才進場；跌穿不回升就等。停損放觸發 K／前一根 K 低點，股數＝帳戶×風險÷每股風險；3R、5R 分批，剩餘看 EMA9。<i>此法尚未回測驗證。</i></div>
+    <div id="pbPanel"><div class="empty" style="padding:1.5rem;">載入中...</div></div>
+  </div>
+
   <div class="detail-section-title" style="margin:0 0 10px;">追蹤清單</div>
 
   <div class="search-filter">
@@ -258,6 +283,8 @@ let backtestDetail = {}; // code -> /api/backtest/{code} payload, lazy-loaded wh
 let backtestLoading = new Set();
 let recoList = [];       // /api/recommendations (or snap.recommendations) .recommendations -- Phase 2/3
 let recoAsOf = null;     // .as_of from the same payload (Phase 0's cache freshness date, not "today")
+let pbList = [];         // /api/pullback (or snap.pullback) .setups -- 強勢股回調買法
+let pbAsOf = null;
 let CFG = { score_bands: [60, 20, -20, -60], score_labels: ["強多", "偏多", "中性", "偏空", "強空"],
             action_thresholds: { composite: 40, priority_act: 50, priority_watch: 25 },
             chip_weights: { institutional: 40, margin: 20, shareholding: 20, sbl: 20 } };
@@ -349,8 +376,11 @@ function applyStaticSnapshot(snap) {
   const reco = snap.recommendations || { recommendations: [], as_of: null };
   recoList = reco.recommendations || [];
   recoAsOf = reco.as_of;
+  const pb = snap.pullback || { setups: [], as_of: null };
+  pbList = pb.setups || [];
+  pbAsOf = pb.as_of;
   document.getElementById('statOfMode').textContent = tickTier ? '逐筆內外盤（精確）' : '分鐘K推估';
-  updateStats(); renderTable(); renderRecommendations();
+  updateStats(); renderTable(); renderRecommendations(); renderPullback();
   document.getElementById('lastUpdate').textContent =
     `分析 ${fmtDT(snap.full_generated_at)}・報價 ${fmtT(snap.quotes_updated_at)}`;
 }
@@ -367,6 +397,7 @@ function hideLoadError() {
 }
 
 async function init() {
+  loadPbSizing();
   let snapFetched = false;
   try {
     const dr = await fetch('data.json', { cache: 'no-store' });
@@ -444,6 +475,7 @@ async function initLive() {
   document.getElementById('statOfMode').textContent = tickTier ? '逐筆內外盤（精確）' : '分鐘K推估';
   updateStats(); renderTable();
   await loadRecommendations();   // 全市場推薦跟追蹤清單無關，不用等下面逐檔跑完
+  await loadPullback();
   for (const s of watchlist) await loadStock(s.code);   // sequential: gentle on rate limits
   document.getElementById('lastUpdate').textContent = '最後更新：' + new Date().toLocaleTimeString('zh-TW');
   await loadSuggestions();
@@ -459,6 +491,7 @@ async function refreshAll() {
   }
   data = {}; failed = {};
   await loadRecommendations();
+  await loadPullback();
   for (const s of watchlist) await loadStock(s.code);
   document.getElementById('lastUpdate').textContent = '最後更新：' + new Date().toLocaleTimeString('zh-TW');
   await loadSuggestions();
@@ -577,6 +610,100 @@ async function loadRecommendations() {
   renderRecommendations();
 }
 
+// 強勢股回調買法（docs/pullback_strategy.md）：meta.pullback_watchlist 的
+// setups，由 loadPullback()（即時）或 applyStaticSnapshot()（靜態）填入。
+// 股數在前端算：帳戶規模只存在這台瀏覽器（localStorage），不進 data.json。
+function loadPbSizing() {
+  try {
+    const a = localStorage.getItem('pbAccount'), r = localStorage.getItem('pbRisk');
+    if (a) document.getElementById('pbAccount').value = a;
+    if (r) document.getElementById('pbRisk').value = r;
+  } catch (e) { /* storage unavailable -- inputs just start empty */ }
+}
+function savePbSizing() {
+  try {
+    localStorage.setItem('pbAccount', document.getElementById('pbAccount').value || '');
+    localStorage.setItem('pbRisk', document.getElementById('pbRisk').value || '');
+  } catch (e) { /* ignore */ }
+}
+// 先定買點和停損，再用允許虧損金額 ÷ 每股風險 = 股數（上限：不超過帳戶）
+function pbSize(entry, stop) {
+  const acct = parseFloat(document.getElementById('pbAccount').value);
+  const risk = parseFloat(document.getElementById('pbRisk').value);
+  if (!(acct > 0) || !(risk > 0) || !(entry > stop)) return null;
+  let shares = Math.floor(acct * risk / 100 / (entry - stop));
+  shares = Math.min(shares, Math.floor(acct / entry));
+  return { shares, lots: shares / 1000, pct: shares * entry / acct * 100, loss: shares * (entry - stop) };
+}
+function renderPullback() {
+  const panel = document.getElementById('pbPanel');
+  const asOfEl = document.getElementById('pbAsOf');
+  if (!panel) return;
+  if (asOfEl) asOfEl.textContent = pbAsOf ? `（資料至 ${pbAsOf}）` : '';
+  if (!pbList.length) {
+    panel.innerHTML = `<div class="empty" style="padding:1.5rem;">${pbAsOf ? '今日沒有符合條件的整理形態' : '尚無資料（排程 run_pullback_scan 還沒跑過）'}</div>`;
+    return;
+  }
+  const retCell = (label, v, q) => `<span style="${q ? 'font-weight:600;' : ''}color:${v == null ? '#999' : v >= 0 ? '#B03A2E' : '#1E7A5E'};">${label} ${fmtPct(v)}</span>`;
+  const card = s => {
+    const z = s.zone || {}, pl = s.plan || {}, rt = (pl.r_targets || {}).targets || [];
+    const price = s.quote ? s.quote.price : null;
+    const dist = price != null && z.high ? (price - z.high) / z.high * 100 : s.distance_pct;
+    const statusTag = s.status === 'near_support' ? '<span class="tag tag-near">接近支撐</span>'
+      : s.status === 'broken' ? '<span class="tag tag-below">跌破・等待</span>' : '<span class="tag tag-ext">等回測</span>';
+    const first = (s.retest || {}).first_retest ? ' <span class="tag tag-first">首次回測</span>' : '';
+    const labels = [...new Set((z.levels || []).map(l => l.label))].join('・');
+    const q = s.qualifying || [];
+    const r = s.returns || {};
+    const theme = s.theme ? `<div class="pb-row"><span class="pb-k">族群</span>${s.theme}${s.theme_peers > 1 ? `（${s.theme_peers} 檔同強）` : ''}</div>` : '';
+    const size = pbSize(pl.entry_ref, pl.stop_ref);
+    const sizeRow = size ? `<div class="pb-row"><span class="pb-k">部位</span>${size.shares.toLocaleString()} 股（${size.lots.toFixed(2)} 張，${size.pct.toFixed(0)}%，停損虧 ${Math.round(size.loss).toLocaleString()}）</div>` : '';
+    const warn = (s.reasons || []).length ? `<div class="pb-warn">${s.reasons.join('；')}</div>` : '';
+    const trackedOrAdd = s.tracked ? '<span class="tag tag-above">已追蹤</span>'
+      : `<button class="reco-add-btn" onclick="addFromPullback('${s.code}', '${(s.name || '').replace(/'/g, "\\'")}')">+ 加入追蹤</button>`;
+    return `<div class="pb-card">
+      <div class="reco-card-head">
+        <span><span class="reco-code">${s.code}</span> <span class="reco-name">${s.name || ''}</span> ${statusTag}${first}</span>
+        ${trackedOrAdd}
+      </div>
+      <div class="pb-row"><span class="pb-k">現價</span><b>${price != null ? fmtP(price) : fmtP(s.close)}</b>${dist != null ? `（距支撐上緣 ${fmtPct(dist)}）` : ''}</div>
+      <div class="pb-row"><span class="pb-k">支撐區</span><b>${fmtP(z.low)}–${fmtP(z.high)}</b>　${labels}</div>
+      ${['1m', '3m', '6m'].some(k => r[k] != null) ? `<div class="pb-row"><span class="pb-k">強勢</span>${retCell('1M', r['1m'], q.includes('1m'))}　${retCell('3M', r['3m'], q.includes('3m'))}　${retCell('6M', r['6m'], q.includes('6m'))}</div>` : ''}
+      ${theme}
+      <div class="pb-row"><span class="pb-k">計畫</span>觸發參考 ${fmtP(pl.entry_ref)}｜停損 ${fmtP(pl.stop_ref)}（-${pl.stop_pct != null ? pl.stop_pct.toFixed(1) : '—'}%）${pl.stop_ok === false ? ' ⚠' : ''}</div>
+      <div class="pb-row"><span class="pb-k">目標</span>${rt.map(t => `${t.r_mult}R ${fmtP(t.price)}`).join('｜') || '—'}</div>
+      ${sizeRow}
+      ${warn}
+    </div>`;
+  };
+  panel.innerHTML = `<div class="pb-grid">${pbList.map(card).join('')}</div>`;
+}
+
+async function loadPullback() {
+  try {
+    const r = await fetch('/api/pullback');
+    if (r.ok) {
+      const j = await r.json();
+      pbList = j.setups || [];
+      pbAsOf = j.as_of;
+    }
+  } catch (e) { /* 排程還沒跑過或本次請求失敗 */ }
+  renderPullback();
+}
+
+async function addFromPullback(code, name) {
+  if (watchlist.some(s => s.code === code)) return;
+  const r = await fetch(`/api/watchlist/${code}?name=${encodeURIComponent(name)}`, { method: 'POST' });
+  if (!r.ok) { alert((await r.json()).detail || '新增失敗'); return; }
+  watchlist.push({ code, name });
+  const rec = pbList.find(x => x.code === code);
+  if (rec) rec.tracked = true;
+  const reco = recoList.find(x => x.code === code);
+  if (reco) reco.tracked = true;
+  updateStats(); renderTable(); renderRecommendations(); renderPullback();
+  await loadStock(code);
+}
+
 async function addFromReco(code, name) {
   if (watchlist.some(s => s.code === code)) return;   // 按鈕已依 tracked 隱藏，這裡是防呆
   const r = await fetch(`/api/watchlist/${code}?name=${encodeURIComponent(name)}`, { method: 'POST' });
@@ -584,7 +711,9 @@ async function addFromReco(code, name) {
   watchlist.push({ code, name });
   const rec = recoList.find(x => x.code === code);
   if (rec) rec.tracked = true;
-  updateStats(); renderTable(); renderRecommendations();
+  const pbRec = pbList.find(x => x.code === code);
+  if (pbRec) pbRec.tracked = true;
+  updateStats(); renderTable(); renderRecommendations(); renderPullback();
   await loadStock(code);
 }
 

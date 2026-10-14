@@ -107,6 +107,15 @@ def api_recommendations():
     return pl.build_recommendations()
 
 
+@app.get("/api/pullback")
+def api_pullback():
+    """強勢股回調買法 watchlist (the second selection method, see
+    docs/pullback_strategy.md): meta.pullback_watchlist from
+    scripts/run_pullback_scan.py plus live quotes. Degrades to an empty list
+    before the scan has run, same stance as /api/recommendations."""
+    return pl.build_pullback_watchlist()
+
+
 @app.get("/api/config")
 def api_config():
     return {

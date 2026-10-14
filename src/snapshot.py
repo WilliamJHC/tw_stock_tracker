@@ -104,6 +104,15 @@ def run_full(out_dir):
         # batched fetch above) and `tracked_codes` so nothing is fetched or
         # read from disk twice.
         "recommendations": pl.build_recommendations(prefetched_stocks=all_stocks, tracked_codes=tracked_codes),
+        # 強勢股回調買法（docs/pullback_strategy.md）：same shape as app.py's
+        # /api/pullback. Quotes already fetched above are reused; the rest
+        # cost one get_quote() each (no full analysis -- see
+        # pl.build_pullback_watchlist()).
+        "pullback": pl.build_pullback_watchlist(
+            prefetched_quotes={c: s.get("quote") for c, s in all_stocks.items()
+                               if isinstance(s, dict) and s.get("quote")},
+            tracked_codes=tracked_codes,
+        ),
     }
 
     assemble_site(out_dir)
@@ -156,13 +165,20 @@ def merge_light(base, quotes, now_iso):
         q = quotes.get(r.get("code"))
         if q:
             r["quote"] = q
+    # 強勢回調 cards: same rule -- only the live quote changes between full runs.
+    for r in (out.get("pullback") or {}).get("setups") or []:
+        q = quotes.get(r.get("code"))
+        if q:
+            r["quote"] = q
     return out
 
 
 def run_light(out_dir, base):
     watchlist = base.get("watchlist", [])
     reco_entries = (base.get("recommendations") or {}).get("recommendations") or []
-    codes = sorted({s["code"] for s in watchlist} | {r["code"] for r in reco_entries})
+    pullback_entries = (base.get("pullback") or {}).get("setups") or []
+    codes = sorted({s["code"] for s in watchlist} | {r["code"] for r in reco_entries}
+                   | {r["code"] for r in pullback_entries})
     quotes = {}
     ok, fail = 0, 0
     for code in codes:

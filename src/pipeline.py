@@ -335,3 +335,63 @@ def build_recommendations(prefetched_stocks=None, tracked_codes=None):
             "tracked": code in tracked_codes,
         })
     return {"recommendations": recommendations, "as_of": payload.get("as_of")}
+
+
+# ------------------------------------------------ 強勢股回調買法（第二種選股法） ----
+
+PULLBACK_META_KEY = "pullback_watchlist"
+
+
+def _read_pullback_payload():
+    """Raw meta.pullback_watchlist (scripts/run_pullback_scan.py) or None
+    before the scan has ever run."""
+    conn = db.connect()
+    db.init_db(conn)
+    db.migrate(conn)
+    raw = db.get_meta(conn, PULLBACK_META_KEY)
+    conn.close()
+    return json.loads(raw) if raw else None
+
+
+def load_pullback_plans():
+    """{code: setup} for monitor.py's intraday trigger -- every listed setup
+    except "broken" ones (跌破支撐 = keep waiting, not watching for a
+    trigger). {} before the scan has ever run."""
+    payload = _read_pullback_payload() or {}
+    return {s["code"]: s for s in payload.get("setups") or [] if s.get("status") != "broken"}
+
+
+def build_pullback_watchlist(prefetched_quotes=None, tracked_codes=None, quote_fn=None):
+    """強勢回調 cards: meta.pullback_watchlist's setups plus a live quote and
+    the "tracked" flag. Only a quote per code (not a full
+    build_watchlist_payloads() analysis) -- the setup itself is already
+    computed by the scan, and up to 20 extra full analyses per page load
+    would multiply FinMind calls for nothing the card shows.
+
+    prefetched_quotes: {code: quote} to reuse (snapshot.py passes the quotes
+    it already has for watchlist/recommendation codes). Shared by app.py's
+    /api/pullback and snapshot.py so both modes have the same shape.
+    Degrades to {"setups": [], "as_of": None} before the scan has run."""
+    payload = _read_pullback_payload()
+    if payload is None:
+        return {"setups": [], "as_of": None, "generated_at": None, "counts": None, "params": None}
+    quote_fn = quote_fn or ds.get_quote
+    prefetched_quotes = prefetched_quotes or {}
+    tracked = set(tracked_codes) if tracked_codes is not None else {s["code"] for s in load_watchlist()}
+    setups = []
+    for s in payload.get("setups") or []:
+        code = s["code"]
+        q = prefetched_quotes.get(code)
+        if q is None:
+            try:
+                q = quote_fn(code)
+            except Exception:  # noqa: BLE001 -- a missing quote just leaves the card without a live price
+                q = None
+        setups.append({**s, "quote": q, "tracked": code in tracked})
+    return {
+        "setups": setups,
+        "as_of": payload.get("as_of"),
+        "generated_at": payload.get("generated_at"),
+        "counts": payload.get("counts"),
+        "params": payload.get("params"),
+    }
