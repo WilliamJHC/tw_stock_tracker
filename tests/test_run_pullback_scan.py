@@ -135,3 +135,16 @@ def test_fetch_failure_too_high_flags_outage_not_quiet_market():
     # nothing attempted / no failures is never an outage
     assert not rps.fetch_failure_too_high({"candidates": 0, "failed": 0}, max_fetch=120)
     assert not rps.fetch_failure_too_high({"candidates": 10, "failed": 0}, max_fetch=120)
+
+
+def test_build_scan_skips_yfinance_sourced_code_as_off_scale():
+    bars = _setup_bars()
+    daily = {**_bars_to_daily(bars), "adjusted": True, "source": "yfinance"}
+    payload = rps.build_scan({}, 5, 5, codes=["6669"], fetch_fn=lambda c: daily,
+                             industries={}, names={}, sleep=0)
+    assert payload["counts"]["off_scale"] == 1 and payload["setups"] == []
+
+
+def test_fetch_failure_too_high_counts_off_scale_as_failure():
+    assert rps.fetch_failure_too_high({"candidates": 10, "failed": 2, "off_scale": 4}, max_fetch=120)
+    assert not rps.fetch_failure_too_high({"candidates": 10, "failed": 2, "off_scale": 3}, max_fetch=120)

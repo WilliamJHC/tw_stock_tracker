@@ -590,3 +590,11 @@ def test_get_industries_groups_multiple_categories_per_code():
 def test_get_industries_failure_returns_empty():
     with patch("data_sources.requests.get", return_value=_fake_response(data=[])):
         assert ds.get_industries() == {}
+
+
+def test_universe_and_industries_share_one_stock_info_request():
+    rows = [{"stock_id": "2330", "stock_name": "台積電", "type": "twse", "industry_category": "半導體業"}]
+    with patch("data_sources._finmind", return_value=rows) as mock_finmind:
+        assert ds.get_universe() == [{"code": "2330", "name": "台積電", "market": "twse"}]
+        assert ds.get_industries() == {"2330": ["半導體業"]}
+    mock_finmind.assert_called_once()

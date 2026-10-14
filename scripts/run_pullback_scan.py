@@ -67,7 +67,8 @@ def daily_to_ohlc_bars(daily, factor_dates=None, factors=None):
     of the first cached date on/after each bar (a bar between two cached
     dates shares the later one's factor; a bar newer than the cache gets 1.0).
     Volume stays raw. A yfinance-sourced series (adjusted=True, already
-    split-adjusted upstream) is left as-is to avoid double-counting splits.
+    split-adjusted upstream) is left as-is to avoid double-counting splits
+    (evaluate_codes() skips such codes anyway -- different price scale).
     Known gap: an ex-dividend date AFTER the cache's last bar isn't in
     `factors` yet, so the few bars before it stay unadjusted until the next
     weekly cache refresh (docs/pullback_strategy.md 已知限制)."""
@@ -131,7 +132,7 @@ def evaluate_codes(codes, universe_data, screen, themes, names, max_fetch, fetch
     (setups, stats) where setups = passing setups only, each enriched with
     the stage-1 strength info, theme and name."""
     fetch_fn = fetch_fn or ds.get_daily
-    setups, fetched, failed, rejected, unadjusted = [], 0, 0, 0, 0
+    setups, fetched, failed, rejected, unadjusted, off_scale = [], 0, 0, 0, 0, 0
     for code in codes[:max_fetch]:
         try:
             daily = fetch_fn(code)
@@ -145,9 +146,17 @@ def evaluate_codes(codes, universe_data, screen, themes, names, max_fetch, fetch
         if not daily or not daily.get("c"):
             failed += 1
             continue
+        if daily.get("adjusted"):
+            # yfinance fallback: split-adjusted only (no dividend factor) and
+            # exempt from unadjusted_jump(), so its levels sit on a different
+            # price scale than the FinMind-based rest of the list. Skip rather
+            # than publish a mixed-scale watchlist.
+            print(f"  {code}: 日線來源 {daily.get('source')} 價格尺度與因子快取不同，略過")
+            off_scale += 1
+            continue
         fd, fs = adjustment_factors((universe_data.get(code) or {}).get("bars"))
         bars = daily_to_ohlc_bars(daily, fd, fs)
-        jump = None if daily.get("adjusted") else unadjusted_jump(bars, fd[-1] if fd else None)
+        jump = unadjusted_jump(bars, fd[-1] if fd else None)
         if jump:
             print(f"  {code}: {jump} 疑似除權/分割尚未還原（因子快取只到 {fd[-1] if fd else '無'}），略過")
             unadjusted += 1
@@ -171,7 +180,7 @@ def evaluate_codes(codes, universe_data, screen, themes, names, max_fetch, fetch
             **_slim(setup),
         })
     setups.sort(key=ps.setup_sort_key)
-    return setups, {"fetched": fetched, "failed": failed, "rejected": rejected, "unadjusted": unadjusted}
+    return setups, {"fetched": fetched, "failed": failed, "rejected": rejected, "unadjusted": unadjusted, "off_scale": off_scale}
 
 
 def build_scan(universe_data, top_n, max_fetch, codes=None, fetch_fn=None, industries=None, names=None, sleep=FETCH_SLEEP_SECONDS):
@@ -215,9 +224,11 @@ def build_scan(universe_data, top_n, max_fetch, codes=None, fetch_fn=None, indus
 def fetch_failure_too_high(counts, max_fetch, max_ratio=MAX_FETCH_FAIL_RATIO):
     """True when so many stage-2 fetches failed that the result reflects an
     outage (FinMind quota/down), not the market -- publishing it would
-    replace a good watchlist with an empty one."""
+    replace a good watchlist with an empty one. Off-scale (yfinance-fallback)
+    codes count as failures: they only show up when FinMind is limited."""
     attempted = min(counts.get("candidates", 0), max_fetch)
-    return attempted > 0 and counts.get("failed", 0) > attempted * max_ratio
+    bad = counts.get("failed", 0) + counts.get("off_scale", 0)
+    return attempted > 0 and bad > attempted * max_ratio
 
 
 def summary_text(payload):

@@ -102,6 +102,10 @@ jobs:
       - name: run_pullback_scan
         id: pullback_scan
         continue-on-error: true
+        # 最多 120 檔循序抓取，卻佔著共用的 backtest-db-state concurrency
+        # group；FinMind 卡住時不能讓它一路拖到 6 小時預設上限、擋住後面
+        # 要寫 DB 的 job。逾時算失敗，會走下面的 Telegram 通知。
+        timeout-minutes: 20
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: |

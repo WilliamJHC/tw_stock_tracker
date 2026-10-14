@@ -843,6 +843,19 @@ def get_sbl(code, days=40, cache=True):
 # instead of a FinLab subscription (see src/finlab_strategy.py for the
 # FinLab-backed original this was ported from).
 
+def _stock_info_rows(cache=True):
+    """TaiwanStockInfo rows, shared by get_universe() and get_industries()
+    through one same-day cache entry so a cold cache costs one FinMind
+    request instead of two. Raises like _finmind(); failures aren't cached."""
+    cached = _cache_get("stock_info") if cache else None
+    if cached is not None:
+        return cached
+    rows = _finmind("TaiwanStockInfo")
+    if cache and rows:
+        _cache_put("stock_info", rows)
+    return rows
+
+
 def get_universe(cache=True):
     """All TWSE/TPEX-listed 4-digit common stocks: [{code, name, market}]
     sorted by code, or None on failure. TaiwanStockInfo returns one row per
@@ -853,7 +866,7 @@ def get_universe(cache=True):
         return cached or None
     result = None
     try:
-        rows = _finmind("TaiwanStockInfo")
+        rows = _stock_info_rows(cache)
         by_code = {}
         for r in rows:
             code = r.get("stock_id") or ""
@@ -881,7 +894,7 @@ def get_industries(cache=True):
         return cached
     result = {}
     try:
-        rows = _finmind("TaiwanStockInfo")
+        rows = _stock_info_rows(cache)
         by_code = {}
         for r in rows:
             code = r.get("stock_id") or ""
