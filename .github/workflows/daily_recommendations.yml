@@ -6,7 +6,8 @@ name: daily-recommendations
 # Phase 0) and meta.active_ranking_weights (kept current by optimize.yml,
 # Phase 6d/ADR 0002). This job never fetches from FinMind/Yahoo itself --
 # composite_scores() is stdlib-only and cheap, safe to run daily even
-# though its inputs only refresh weekly/monthly.
+# though its inputs only refresh weekly/monthly. (Exception: the second step,
+# run_pullback_scan, does fetch FinMind -- see its own comment below.)
 #
 # Cache wiring: cache/factor_run is restore-only, from the SAME
 # update-universe-bars-state- lineage Phase 0's workflows write to (NOT
@@ -89,3 +90,24 @@ jobs:
             args="$args --top-n ${{ inputs.top_n }}"
           fi
           python scripts/run_daily_recommendations.py $args
+      # 強勢股回調買法（第二種選股法，docs/pullback_strategy.md / ADR 0007）。
+      # 放在多因子那一步之後、同一個 job：共用上面 restore 的 factor_run 與
+      # backtest.db，結果寫進 meta.pullback_watchlist，job 結束時由
+      # backtest-db-cache 一併存回。continue-on-error：掃描失敗（FinMind 額度、
+      # 快取為空）不能讓多因子那一步已寫入的 meta 存不回去。
+      # 與前一步不同，這一步會對最多 120 檔各打一次 FinMind，所以需要
+      # FINMIND_TOKEN；只設在這個 step，前一步仍然不碰網路。
+      - name: run_pullback_scan
+        continue-on-error: true
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: |
+          if [ -z "$FINMIND_TOKEN" ]; then
+            echo "::warning::缺少 FINMIND_TOKEN（Settings → Environments → Cloudflare），略過強勢回調掃描"
+            exit 0
+          fi
+          args=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            args="$args --dry-run"
+          fi
+          python scripts/run_pullback_scan.py $args
