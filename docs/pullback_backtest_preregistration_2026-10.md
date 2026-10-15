@@ -116,7 +116,7 @@
 ## 7. 執行
 
 ```powershell
-# 從專案根目錄；回測腳本待寫（scripts/run_pullback_backtest.py），寫完不得改 §2 的規則
+# 從專案根目錄；腳本 scripts/run_pullback_backtest.py 已寫好（commit 2b808a4，只用合成資料測過）。§8 未鎖定前它會拒絕跑；不得改 §2 的規則
 .venv\Scripts\python scripts\run_pullback_backtest.py --prereg docs\pullback_backtest_preregistration_2026-10.md
 ```
 
