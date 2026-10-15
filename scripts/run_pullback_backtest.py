@@ -44,7 +44,8 @@ def read_lock(prereg_path):
     if "______" in sec or re.search(r"^- \[ \]", sec, flags=re.M):
         raise SystemExit("§8 尚未鎖定（仍有空白或未勾選項目）。依 §8：回補完成 → 鎖定 → 才能跑回測。")
     commit = re.search(r"commit：\s*`?([0-9a-f]{7,40})`?", sec)
-    codes = re.search(r"排除清單已補齊：\s*([0-9A-Za-z、,，\s]+)", sec)
+    codes = re.search(r"排除清單[^：
+]*：\s*([0-9A-Za-z、,，]+)", sec)
     if not commit or not codes:
         raise SystemExit("§8 讀不到鎖定 commit 或排除清單，不跑。")
     excluded = [c for c in re.split(r"[、,，\s]+", codes.group(1).strip()) if c]
