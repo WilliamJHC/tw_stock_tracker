@@ -244,6 +244,9 @@ def test_adjust_cache_bars_scales_ohl_and_excludes_incomplete_codes():
     raw[1]["o"] = 11
     raw[0].pop("c_adj")
     assert bt.adjust_cache_bars(raw) is None
+    raw[0]["c_adj"] = 5.5
+    raw[0]["l"] = 0  # explicit zero low must exclude the code, not pass as a price
+    assert bt.adjust_cache_bars(raw) is None
 
 
 def test_view_behaves_like_a_prefix_list():

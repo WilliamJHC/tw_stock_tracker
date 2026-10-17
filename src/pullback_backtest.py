@@ -57,13 +57,13 @@ def params_diff(current=None, locked=None):
 
 def adjust_cache_bars(raw_bars):
     """Factor-cache bars (c, c_adj, o, h, l, v) -> adjusted OHLCV bars, or
-    None when ANY bar lacks o/h/l/c_adj (section 2.1: the whole code is
+    None when ANY bar lacks (missing or zero) o/h/l/c_adj (section 2.1: the whole code is
     excluded, no filling, no interpolation). Factor = c_adj / c per bar
     (latest segment == 1.0), applied to o/h/l/c; volume stays raw."""
     out = []
     for b in raw_bars:
         c, ca = b.get("c"), b.get("c_adj")
-        if not c or ca is None or b.get("o") is None or b.get("h") is None or b.get("l") is None:
+        if not c or ca is None or not b.get("o") or not b.get("h") or not b.get("l"):
             return None
         f = ca / c
         out.append({"date": b["date"], "o": b["o"] * f, "h": b["h"] * f, "l": b["l"] * f,
