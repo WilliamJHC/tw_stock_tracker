@@ -45,7 +45,7 @@ permissions:
 
 jobs:
   seed:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 350   # under the 360 hard cap; the script stops starting batches at 300
     # FINMIND_TOKEN / TELEGRAM_* live in Environment「Cloudflare」(see snapshot.yml).
     environment: Cloudflare

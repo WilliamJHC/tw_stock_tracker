@@ -6,7 +6,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # secrets 沿用 snapshot.yml 的 Environment「Cloudflare」；少了這行
     # secrets.* 會全部解析成空字串（見 README 故障排查）
     environment: Cloudflare

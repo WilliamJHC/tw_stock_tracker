@@ -41,7 +41,7 @@ concurrency:
 
 jobs:
   apply_strategy_candidate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

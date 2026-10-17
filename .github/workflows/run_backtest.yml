@@ -29,7 +29,7 @@ concurrency:
 
 jobs:
   run-backtest:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # FINMIND_TOKEN 建在 Environment「Cloudflare」底下（沿用 snapshot.yml 的
     # 既有 secret）；沒有這行 secrets.* 會全部解析成空字串。
     environment: Cloudflare

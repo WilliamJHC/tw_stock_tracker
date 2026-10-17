@@ -60,7 +60,7 @@ permissions:
 
 jobs:
   update-fundamentals:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Under the 360 hard cap. The script stops starting codes at 270; the 80 min of slack
     # covers one in-flight code that first sleeps in the rate limiter (up to ~1h) and the
     # cache save, so the timeout is not what ends a normal slice.

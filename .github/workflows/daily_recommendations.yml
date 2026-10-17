@@ -40,7 +40,7 @@ concurrency:
 
 jobs:
   daily-recommendations:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID 建在 Environment「Cloudflare」底下
     # （沿用 optimize.yml/update_universe_bars_part1.yml 的既有 secrets，同一組
     # Telegram bot）；沒有這行 secrets.* 會全部解析成空字串。
