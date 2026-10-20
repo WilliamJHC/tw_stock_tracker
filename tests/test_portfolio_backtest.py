@@ -461,3 +461,48 @@ def test_rebalance_dates_month_interval_only_applies_to_monthly_freq():
     with pytest.raises(ValueError):
         pb._rebalance_dates(calendar, offset_months=1, freq="biweekly")
     assert pb._rebalance_dates(calendar, 1, freq="weekly") == pb._rebalance_dates(calendar, freq="weekly")
+
+
+# ---- delisting handling (terminal_exit_days / max_stale_days) ----
+
+_DELIST_PARAMS = {"top_n": 1, "slippage_pct": 0.0, "fee_pct": 0.0}
+
+
+def _delisting_universe():
+    # B outranks A on every factor but stops printing after 200 days; A keeps going.
+    return {"A": _entry(50, 0.1, days=400), "B": _entry(100, 0.3, days=200)}
+
+
+def test_simulate_default_keeps_delisted_position_frozen_and_never_redeploys():
+    result = pb.simulate(_delisting_universe(), params=_DELIST_PARAMS)
+    assert {t["code"] for t in result["trades"]} == {"B"}
+    assert [t for t in result["trades"] if t["side"] == "sell"] == []
+
+
+def test_simulate_terminal_exit_sells_on_day_after_last_bar_then_redeploys():
+    universe = _delisting_universe()
+    last_bar = universe["B"]["bar_dates"][-1]
+    result = pb.simulate(universe, params={**_DELIST_PARAMS, "terminal_exit_days": 30, "max_stale_days": 10})
+    terminal = [t for t in result["trades"] if t.get("terminal")]
+    assert len(terminal) == 1
+    assert terminal[0]["code"] == "B" and terminal[0]["side"] == "sell"
+    assert terminal[0]["date"] == (dt.date.fromisoformat(last_bar) + dt.timedelta(days=1)).isoformat()
+    later_buys = [t for t in result["trades"] if t["side"] == "buy" and t["date"] > terminal[0]["date"]]
+    assert later_buys and {t["code"] for t in later_buys} == {"A"}
+
+
+def test_simulate_terminal_exit_applies_haircut_slippage_and_fee():
+    universe = _delisting_universe()
+    last_px = universe["B"]["bars"][-1]["c"]
+    result = pb.simulate(universe, params={
+        **_DELIST_PARAMS, "terminal_exit_days": 30, "max_stale_days": 10,
+        "terminal_haircut_pct": 50.0, "slippage_pct": 1.0, "fee_pct": 0.6,
+    })
+    terminal = [t for t in result["trades"] if t.get("terminal")][0]
+    assert abs(terminal["price"] - last_px * 0.5 * 0.99) < 1e-9
+
+
+def test_simulate_terminal_exit_ignores_code_that_is_still_printing():
+    universe = {"A": _entry(50, 0.1, days=400), "B": _entry(100, 0.3, days=400)}
+    result = pb.simulate(universe, params={**_DELIST_PARAMS, "terminal_exit_days": 30, "max_stale_days": 10})
+    assert [t for t in result["trades"] if t.get("terminal")] == []

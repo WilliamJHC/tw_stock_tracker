@@ -46,6 +46,12 @@ product-judgment default):
     convention: 0.1425% commission x2 + 0.3% tax ~= 0.6%), split evenly
     across the buy leg and the sell leg (0.3% each) rather than modeled as
     separate commission/tax lines.
+  - terminal_exit_days: a code whose last bar is more than this many days
+    before the calendar's last date is treated as delisted. If still held,
+    it is sold on the first calendar date after its last bar at that last
+    price (less terminal_haircut_pct, slippage and the leg fee); the cash
+    sits idle until the next rebalance. The last price is a stand-in for
+    the merger/liquidation value, which FinMind does not provide.
   - Rebalance date = the trading calendar's first date in each new calendar
     month, matching finlab.backtest.sim(resample="M")'s month-boundary
     convention. params["rebalance_every_months"] (default 1 = every month)
@@ -53,6 +59,7 @@ product-judgment default):
     (k=3 -> Jan/Apr/Jul/Oct), not to the run's first month, so a walk-forward
     fold's start date doesn't shift which months it rebalances in.
 """
+import bisect
 import datetime as dt
 import math
 
@@ -80,6 +87,15 @@ PORTFOLIO_PARAMS = {
     # meant for phase-sensitivity checks -- see _rebalance_dates().
     "rebalance_every_months": 1,
     "rebalance_offset_months": 0,
+    # Delisting handling (survivorship studies, see
+    # docs/delisted_survivorship_preregistration_2026-10.md). All three are
+    # off by default, which keeps the original behavior: a code whose bars
+    # stop printing stays rankable, and a held one stays marked at its last
+    # price forever (never sold, its capital never redeployed).
+    "max_stale_days": None,          # forwarded to ff.factor_ranks(): skip codes whose last bar is older
+    "dark_rank": None,               # forwarded to ff.factor_ranks(): rank for price-only ("dark") codes
+    "terminal_exit_days": None,      # a code whose last bar is >N days before the calendar's end is terminal
+    "terminal_haircut_pct": 0.0,     # extra loss on a terminal exit, on top of slippage and fee
 }
 
 # Regime-conditional overrides on top of PORTFOLIO_PARAMS, same layering
@@ -266,18 +282,41 @@ def simulate(universe_data, params=None, ranks_cache=None, regime_by_date=None, 
     }
     bar_dates = {code: d["bar_dates"] for code, d in universe_data.items()}
 
+    # {exit date: [codes]} -- the first calendar date after a terminal code's last bar.
+    terminal_exits = {}
+    if p.get("terminal_exit_days") is not None:
+        end = dt.date.fromisoformat(calendar[-1])
+        for code, dates in bar_dates.items():
+            if dates and (end - dt.date.fromisoformat(dates[-1])).days > p["terminal_exit_days"]:
+                nxt = bisect.bisect_right(calendar, dates[-1])
+                if nxt < len(calendar):
+                    terminal_exits.setdefault(calendar[nxt], []).append(code)
+    haircut = 1 - p.get("terminal_haircut_pct", 0.0) / 100
+
     cash = p["initial_capital"]
     holdings = {}  # code -> shares, whole-lot multiples once lot_size>0 (see module docstring)
     equity_curve, trades = [], []
 
+    rank_kwargs = {"max_stale_days": p.get("max_stale_days"), "dark_rank": p.get("dark_rank")}
+
     for date in calendar:
+        for code in sorted(terminal_exits.get(date, [])):
+            shares = holdings.pop(code, 0)
+            if shares:
+                last_px = prices[code][bar_dates[code][-1]]
+                sell_fill = last_px * haircut * (1 - slip)
+                cash += shares * sell_fill * (1 - leg_fee)
+                trades.append({"date": date, "code": code, "side": "sell", "price": sell_fill,
+                               "shares": shares, "terminal": True})
         if date in rebalance_dates:
             ranks = None
             if ranks_cache is not None:
                 ranks = ranks_cache.get(date)
                 if ranks is None:
-                    ranks = ff.factor_ranks(universe_data, date, extra_factors=p.get("extra_factors"))
+                    ranks = ff.factor_ranks(universe_data, date, extra_factors=p.get("extra_factors"), **rank_kwargs)
                     ranks_cache[date] = ranks
+            elif any(v is not None for v in rank_kwargs.values()):
+                ranks = ff.factor_ranks(universe_data, date, extra_factors=p.get("extra_factors"), **rank_kwargs)
             scores = ff.composite_scores(
                 universe_data, date, weights=p["ranking_weights"], ranks=ranks, extra_factors=p.get("extra_factors")
             )

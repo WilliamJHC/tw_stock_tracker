@@ -640,7 +640,7 @@ def _pct_rank(values):
     return ranks
 
 
-def factor_ranks(universe_data, date, extra_factors=None):
+def factor_ranks(universe_data, date, extra_factors=None, max_stale_days=None, dark_rank=None):
     """universe_data/date: same shape as composite_scores() below. Returns
     {code: {"revenue": pct, "roe": pct, "momentum": pct, ...}} -- the
     per-factor percentile ranks (see _pct_rank()) for every code that
@@ -662,17 +662,40 @@ def factor_ranks(universe_data, date, extra_factors=None):
     extra_factors value to be non-None to survive the filter -- same "all
     required factors present" rule the existing three already follow --
     and each extra factor gets its own independent percentile rank, merged
-    into the per-code dict under its own key."""
+    into the per-code dict under its own key.
+
+    max_stale_days: when set, a code whose latest bar on or before `date` is
+    more than this many calendar days old is skipped (halted or delisted --
+    liquidity_ok() only looks at the bars it is handed, so without this a
+    code that stopped printing months ago keeps passing the filter and can
+    occupy a top-N slot it can never be bought in). None (default) keeps the
+    old behavior.
+
+    dark_rank: stress-test hook for survivorship studies. When set, a code
+    flagged entry["dark"] (price history but no usable revenue/ROE series,
+    see scripts/fetch_delisted_factor_run.py) is not skipped for missing
+    fundamentals: it joins the momentum ranking normally and gets this fixed
+    percentile (0-1) for revenue and ROE. Only dark-flagged codes are
+    treated this way (extra_factors values must still be non-None). None
+    (default) leaves dark codes unrankable, like any code missing a factor."""
     extra_factors = extra_factors or {}
     raw = {}
+    dark = set()
     for code, d in universe_data.items():
         bars, bar_dates = d["bars"], d["bar_dates"]
         idx = _bar_index_on_or_before(bar_dates, date)
         if idx is None or not liquidity_ok(bars, idx):
             continue
+        if max_stale_days is not None and (
+            dt.date.fromisoformat(date) - dt.date.fromisoformat(bar_dates[idx])
+        ).days > max_stale_days:
+            continue
         mom = momentum_pct(bars, idx)
         yoy = _as_of(d["revenue_series"], date, "yoy_pct")
         roe = _as_of(d["roe_series"], date, "roe_pct")
+        if dark_rank is not None and d.get("dark") and (yoy is None or roe is None):
+            dark.add(code)
+            yoy = roe = 0.0  # placeholder, replaced by dark_rank below
         if mom is None or yoy is None or roe is None:
             continue
         extras = {
@@ -687,8 +710,12 @@ def factor_ranks(universe_data, date, extra_factors=None):
         return {}
 
     mom_rank = _pct_rank({c: v["momentum"] for c, v in raw.items()})
-    yoy_rank = _pct_rank({c: v["yoy"] for c, v in raw.items()})
-    roe_rank = _pct_rank({c: v["roe"] for c, v in raw.items()})
+    # Dark codes are ranked out of the revenue/ROE percentile pools: their
+    # placeholder values must not shift anyone else's rank.
+    yoy_rank = _pct_rank({c: v["yoy"] for c, v in raw.items() if c not in dark})
+    roe_rank = _pct_rank({c: v["roe"] for c, v in raw.items() if c not in dark})
+    for code in dark:
+        yoy_rank[code] = roe_rank[code] = dark_rank
     extra_ranks = {name: _pct_rank({c: v[name] for c, v in raw.items()}) for name in extra_factors}
     return {
         code: {

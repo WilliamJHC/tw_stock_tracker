@@ -694,3 +694,45 @@ def test_extra_factor_lookback_days_widens_for_high250_in_any_candidate():
     assert ff.extra_factor_lookback_days([base, with_high], 120) == 400
     # 400 calendar days comfortably covers 250 trading bars.
     assert 400 > ff.HIGH_PROXIMITY_DAYS * 7 / 5
+
+
+# ---- factor_ranks: max_stale_days / dark_rank ----
+
+def _rank_entry(start, n, yoy, roe, closes_step=0.1):
+    bars = _bars([100 + i * closes_step for i in range(n)], start=start)
+    return {
+        "bars": bars, "bar_dates": [b["date"] for b in bars],
+        "revenue_series": [{"usable_date": start, "yoy_pct": yoy}] if yoy is not None else [],
+        "roe_series": [{"usable_date": start, "roe_pct": roe}] if roe is not None else [],
+    }
+
+
+def test_factor_ranks_max_stale_days_skips_code_that_stopped_printing():
+    live = _rank_entry("2023-01-01", 200, 10, 10)
+    gone = _rank_entry("2023-01-01", 100, 20, 20)  # last bar 2023-04-10
+    universe = {"live": live, "gone": gone}
+    date = live["bar_dates"][-1]
+    assert set(ff.factor_ranks(universe, date)) == {"live", "gone"}
+    assert set(ff.factor_ranks(universe, date, max_stale_days=10)) == {"live"}
+
+
+def test_factor_ranks_dark_rank_admits_price_only_code_without_shifting_others():
+    a = _rank_entry("2023-01-01", 200, 10, 10)
+    b = _rank_entry("2023-01-01", 200, 20, 20, closes_step=0.2)
+    dark = {**_rank_entry("2023-01-01", 200, None, None, closes_step=0.3), "dark": True}
+    date = a["bar_dates"][-1]
+    base = ff.factor_ranks({"a": a, "b": b}, date)
+    assert "dark" not in ff.factor_ranks({"a": a, "b": b, "dark": dark}, date)  # off by default
+    with_dark = ff.factor_ranks({"a": a, "b": b, "dark": dark}, date, dark_rank=0.9)
+    assert with_dark["dark"]["revenue"] == 0.9 and with_dark["dark"]["roe"] == 0.9
+    assert with_dark["dark"]["momentum"] == 1.0  # steepest price slope of the three
+    # revenue/ROE ranks of the real codes are computed without the dark code in the pool
+    assert with_dark["a"]["revenue"] == base["a"]["revenue"]
+    assert with_dark["b"]["roe"] == base["b"]["roe"]
+
+
+def test_factor_ranks_dark_rank_ignores_unflagged_code_missing_fundamentals():
+    a = _rank_entry("2023-01-01", 200, 10, 10)
+    plain = _rank_entry("2023-01-01", 200, None, None)  # no "dark" flag
+    ranks = ff.factor_ranks({"a": a, "plain": plain}, a["bar_dates"][-1], dark_rank=0.9)
+    assert set(ranks) == {"a"}
