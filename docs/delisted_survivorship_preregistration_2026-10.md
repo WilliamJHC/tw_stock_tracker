@@ -101,12 +101,14 @@ V2 在 §2.3 的整段窗口：
 
 鎖定 ＝ 下列都完成，並在一個 commit 內補上本節空白處：
 
-- [ ] 下市股票補抓完成，覆蓋率貼在下方（`ok`／`dark`／`illiquid`／`no_price`／`code_reused` 檔數，依下市年度）
-- [ ] `dark` 狀態可信：第一次抓取遇到 FinMind 配額 402 時，`get_monthly_revenue`／`get_financials` 會吞掉錯誤，被誤記為 dark 的已全數丟棄重抓；現行腳本偵測任何 FinMind 失敗就不落檔、遇 402 睡眠重試
-- [ ] `_manifest.json` 的候選清單全數已抓或在主快取內（`load_delisted()` 通過）
+- [x] 下市股票補抓完成，覆蓋率貼在下方（2026-10-20 13:38 完成，111 檔補抓、無失敗）
+- [x] `dark` 狀態可信：第一次抓取遇到 FinMind 配額 402 時，`get_monthly_revenue`／`get_financials` 會吞掉錯誤，被誤記為 dark 的 68 筆已全數丟棄重抓；現行腳本偵測任何 FinMind 失敗就不落檔、遇 402 睡眠重試。補抓前對 8079、3658、5505、6250 等直接查詢，確認 FinMind 對較早下市的股票財報本來就是空的
+- [x] `_manifest.json` 的候選清單全數已抓或在主快取內（`load_delisted()` 通過，149 個補抓檔 ＋ 17 檔主快取 ＝ 166）
 - [x] 使用者已確認 §4 判定口徑與 §5 比例選擇／驗證口徑：2026-10-20 使用者選了「年化報酬 ≥ 0050 且 Sharpe ≥ 0050」與「2013–2019 選 Sharpe 最高的比例；2020 起混合 Sharpe 與年化報酬都 > 純 0050」；「只用 FinMind、報告覆蓋率、做敏感度分析」
-- [ ] 鎖定時 `src/portfolio_backtest.py`、`src/finlab_factors.py`、`scripts/run_survivorship_study.py` 的 commit hash：（待填）
+- [x] 鎖定時 `src/portfolio_backtest.py`、`src/finlab_factors.py`、`scripts/run_survivorship_study.py`、`scripts/run_mf_0050_blend.py` 所在 commit：`21f739531e79b1202ccd6367179141c092c110e4`（工作樹乾淨；跑之前先 `git diff 21f7395 -- src scripts` 應無差異）
 
-覆蓋率：（待填）　　data_digest：（待填）
+覆蓋率（候選 166 檔 ＝ 補抓 149 ＋ 主快取完整 17）：補抓檔 `ok` 53、`dark` 89、`illiquid` 7、`no_price` 0、`code_reused` 0。依下市年度（ok／dark／illiquid）：2013 0/3/1；2014 0/7/0；2015 2/4/1；2016 0/19/1；2017 1/13/1；2018 3/15/1；2019 0/13/0；2020 5/11/1；2021 12/0/0；2022 15/2/0；2023 4/0/1；2024 5/0/0；2025 4/2/0；2026 2/0/0。**89 檔 `dark` 全部缺 ROE（財報）**，其中 76 檔有月營收；也就是 2020 年（含）以前下市的股票幾乎都無法排名，V2 實際補回的主要是 2021 年之後的下市股。這使 V2 對存活者偏誤的修正偏向近年，且是下限（見 §7）。補抓檔 `adj_ok=False`：0 檔。
 
-鎖定日期：（待填）　　鎖定時間序：補抓完成 → 鎖定 → 才能跑 `scripts/run_survivorship_study.py`（腳本在鎖定日期欄位為空時拒絕執行）。
+data_digest：`89556465a98c9d21`
+
+鎖定日期：2026-10-20　　鎖定時間序：補抓完成 → 鎖定 → 才能跑 `scripts/run_survivorship_study.py`（腳本在鎖定日期欄位為空時拒絕執行）。
