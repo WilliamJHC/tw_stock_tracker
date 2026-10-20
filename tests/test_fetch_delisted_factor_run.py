@@ -79,3 +79,17 @@ def test_dark_when_fundamentals_missing():
     assert e["status"] == "dark"
     assert e["bars"] and "c_adj" in e["bars"][0]
     assert e["revenue_series"] == [] and e["roe_series"] == []
+
+
+def test_error_trap_records_and_reraises_source_errors():
+    import pytest
+    import data_sources as ds
+
+    def boom(*a, **k):
+        raise ds.SourceError("HTTP 402 / Requests reach the upper limit")
+
+    trap = fd.ErrorTrap(boom)
+    with pytest.raises(ds.SourceError):
+        trap("TaiwanStockMonthRevenue", "1234", "2010-01-01")
+    assert trap.errors == ["HTTP 402 / Requests reach the upper limit"]
+    assert fd.ErrorTrap(lambda *a, **k: [1])("x") == [1]

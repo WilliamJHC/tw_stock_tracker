@@ -34,6 +34,7 @@ import json
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
@@ -47,6 +48,8 @@ DELISTED_DIR = os.path.join(BASE_DIR, "cache", "factor_run_delisted")
 
 MIN_DELIST_DATE = "2013-06-01"
 HISTORY_START = "2010-01-01"  # revenue YoY and ROE TTM need lead-in before the 2013-12 backtest start
+MAIN_HISTORY_START = "2013-06-01"  # a main-cache entry must start by here to count as complete
+MANIFEST_NAME = "_manifest.json"
 REUSE_TOLERANCE_DAYS = 10     # bars this far past the delisting date mean the code was reissued
 _CODE_RE = re.compile(r"^[1-9]\d{3}$")
 
@@ -124,14 +127,55 @@ def build_entry(cand, fetch_prices, fetch_dividends, fetch_revenue, fetch_financ
     }
 
 
+class ErrorTrap:
+    """Wraps data_sources._finmind so a failure that data_sources.get_monthly_revenue()
+    / get_financials() swallow (they return None for "request failed" and for
+    "no rows" alike) is still visible here. Without this, a quota error (HTTP 402)
+    mid-run would be recorded as a "dark" code -- missing fundamentals -- and look
+    like a data gap. `errors` collects the messages raised since the last reset."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.errors = []
+
+    def __call__(self, *args, **kwargs):
+        try:
+            return self.inner(*args, **kwargs)
+        except ds.SourceError as e:
+            self.errors.append(str(e))
+            raise
+
+
+class FetchFailed(Exception):
+    """A FinMind request failed while building a code's entry; nothing is cached for it."""
+
+
+QUOTA_SLEEP_SECONDS = 300
+QUOTA_MAX_WAITS = 30  # ~2.5h of waiting for the hourly quota to reopen, then give up
+
+
 def _already_in_factor_run(code):
-    """True when cache/factor_run/ already holds usable (non-skip) bars for `code`."""
+    """True when cache/factor_run/ already holds a usable entry for `code`: not a
+    skip marker, and its bars reach back to MAIN_HISTORY_START. A delisted code
+    that entered the main cache late (only a short tail of bars, e.g. starting
+    2021-09) does not count -- it is re-fetched here and the entry in
+    cache/factor_run_delisted/ takes precedence over it in the research scripts."""
     try:
         with open(rfb.code_cache_path(code), encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError):
         return False
-    return not data.get("skip") and bool(data.get("bars"))
+    bars = data.get("bars")
+    return not data.get("skip") and bool(bars) and bars[0]["date"] <= MAIN_HISTORY_START
+
+
+def write_manifest(cands, in_main):
+    """The full candidate list, so research scripts can verify nothing was silently
+    left unfetched (a FETCH FAILED code leaves no cache file at all)."""
+    os.makedirs(DELISTED_DIR, exist_ok=True)
+    with open(os.path.join(DELISTED_DIR, MANIFEST_NAME), "w", encoding="utf-8") as f:
+        json.dump({"min_delist_date": MIN_DELIST_DATE, "candidates": [c["code"] for c in cands],
+                   "in_main_cache": sorted(in_main)}, f)
 
 
 def _save(code, entry):
@@ -148,21 +192,37 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="list what would be fetched, no per-code requests")
     args = ap.parse_args()
 
-    cands = candidates(ds._finmind("TaiwanStockDelisting"))
-    todo, in_main = [], 0
+    for _ in range(QUOTA_MAX_WAITS):
+        try:
+            delisting_rows = ds._finmind("TaiwanStockDelisting")
+            break
+        except ds.SourceError as e:
+            if "402" not in str(e) and "upper limit" not in str(e):
+                raise
+            print(f"quota exhausted ({e}); sleeping {QUOTA_SLEEP_SECONDS}s", flush=True)
+            time.sleep(QUOTA_SLEEP_SECONDS)
+    else:
+        sys.exit("FinMind quota did not reopen; try again later")
+    cands = candidates(delisting_rows)
+    todo, in_main = [], set()
     for c in cands:
         if _already_in_factor_run(c["code"]):
-            in_main += 1
+            in_main.add(c["code"])
         elif not os.path.exists(delisted_path(c["code"])):
             todo.append(c)
-    print(f"delisted candidates (>= {MIN_DELIST_DATE}): {len(cands)}; already usable in factor_run: {in_main}; "
-          f"cached here: {len(cands) - in_main - len(todo)}; to fetch: {len(todo)}")
+    print(f"delisted candidates (>= {MIN_DELIST_DATE}): {len(cands)}; already usable in factor_run: {len(in_main)}; "
+          f"cached here: {len(cands) - len(in_main) - len(todo)}; to fetch: {len(todo)}")
+    write_manifest(cands, in_main)
     if args.dry_run:
         return
     if args.limit:
         todo = todo[: args.limit]
 
-    limiter = rfb.RateLimiter()
+    # FinMind's quota is shared with everything else using this token (the app,
+    # other scripts, manual probes), so stay well under the 600/h cap.
+    limiter = rfb.RateLimiter(limit=400)
+    trap = ErrorTrap(ds._finmind)
+    ds._finmind = trap
     days = (dt.date.today() - dt.date.fromisoformat(HISTORY_START)).days
 
     def prices(code):
@@ -184,14 +244,27 @@ def main():
 
     counts = collections.Counter()
     for i, cand in enumerate(todo, 1):
-        try:
-            entry = build_entry(cand, prices, dividends, revenue, financials)
-        except (ds.SourceError, OSError) as e:
-            print(f"[{i}/{len(todo)}] {cand['code']} {cand['name']}: FETCH FAILED ({e}); will retry next run")
+        entry = None
+        for _ in range(QUOTA_MAX_WAITS):
+            trap.errors.clear()
+            try:
+                entry = build_entry(cand, prices, dividends, revenue, financials)
+                if trap.errors:
+                    raise FetchFailed(trap.errors[0])
+                break
+            except (ds.SourceError, FetchFailed) as e:
+                entry = None
+                if "402" in str(e) or "upper limit" in str(e):
+                    print(f"  quota exhausted ({e}); sleeping {QUOTA_SLEEP_SECONDS}s then retrying {cand['code']}", flush=True)
+                    time.sleep(QUOTA_SLEEP_SECONDS)
+                    continue
+                print(f"[{i}/{len(todo)}] {cand['code']} {cand['name']}: FETCH FAILED ({e}); will retry next run", flush=True)
+                break
+        if entry is None:
             continue
         _save(cand["code"], entry)
         counts[entry["status"]] += 1
-        print(f"[{i}/{len(todo)}] {cand['code']} {cand['name']} delisted {cand['delisted_date']}: {entry['status']}")
+        print(f"[{i}/{len(todo)}] {cand['code']} {cand['name']} delisted {cand['delisted_date']}: {entry['status']}", flush=True)
     print("done this run:", dict(counts))
 
 

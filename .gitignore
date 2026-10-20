@@ -10,3 +10,4 @@ dist/
 logs/
 .claude/hookify.*.local.md
 legacy/
+output/
