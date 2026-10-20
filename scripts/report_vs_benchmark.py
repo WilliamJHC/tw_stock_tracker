@@ -82,7 +82,13 @@ SWITCH_RULES = {
 _SYMBOL_RE = re.compile(r"^[0-9A-Za-z]{1,10}$")
 
 
-def fetch_benchmark_curves(start_date="2021-07-01", cache_path=None, refresh=False, symbol="0050"):
+# A cache whose last bar is older than this many calendar days is treated as
+# stale and re-fetched. 4 covers a normal weekend plus one holiday; a longer
+# closure (e.g. Lunar New Year) just costs one redundant fetch.
+_STALE_AFTER_DAYS = 4
+
+
+def fetch_benchmark_curves(start_date="2021-07-01", cache_path=None, refresh=False, symbol="0050", today=None):
     """Returns (total_return_curve, price_curve, resolved_ticker), where the
     first two are benchmark.py-shaped [{"date", "value"}] curves for `symbol`
     (default 0050) and resolved_ticker is the actual "<symbol>.TW"/".TWO"
@@ -106,11 +112,14 @@ def fetch_benchmark_curves(start_date="2021-07-01", cache_path=None, refresh=Fal
     verification step. This function keeps its own cache file instead, and
     never touches cache/daily_0050.json.
 
-    refresh=False (default) reuses cache_path as-is whenever it exists,
-    matches this `symbol`, AND was fetched with the same start_date -- it
-    does NOT check whether the cache is stale relative to today; pass
-    --refresh-benchmark to force a re-fetch when you want today's latest
-    bar. Raises ValueError for a `symbol` that fails _SYMBOL_RE (see its
+    refresh=False (default) reuses cache_path whenever it exists, matches
+    this `symbol`, was fetched with the same start_date, AND its last bar is
+    no older than _STALE_AFTER_DAYS before `today` (default: today's date).
+    A stale cache is re-fetched; if that fetch fails, the stale cache is
+    used with a warning on stderr rather than failing the whole report.
+    A fetch never keeps a bar dated `today` or later (it may be an unfinished
+    intraday value). Pass --refresh-benchmark to force a re-fetch
+    regardless. Raises ValueError for a `symbol` that fails _SYMBOL_RE (see its
     comment) and lets data_sources.SourceError propagate for a
     well-formed but unresolvable one -- callers should catch both."""
     if not _SYMBOL_RE.match(symbol):
@@ -118,6 +127,8 @@ def fetch_benchmark_curves(start_date="2021-07-01", cache_path=None, refresh=Fal
 
     cache_path = cache_path or os.path.join(BASE_DIR, "cache", f"benchmark_{symbol}.json")
     total_return_curve = price_curve = resolved_ticker = None
+    stale = None  # (total_return_curve, price_curve, resolved_ticker) kept as a fallback
+    today = today or dt.date.today()
     if not refresh and os.path.exists(cache_path):
         try:
             with open(cache_path, encoding="utf-8") as f:
@@ -128,14 +139,25 @@ def fetch_benchmark_curves(start_date="2021-07-01", cache_path=None, refresh=Fal
             # instead of forcing an unnecessary network re-fetch on first run after
             # upgrading (self-heals: the next write always stamps "symbol").
             if cached.get("symbol", "0050") == symbol and cached.get("start_date") == start_date:
-                total_return_curve = cached["total_return_curve"]
-                price_curve = cached["price_curve"]
-                resolved_ticker = cached.get("resolved_ticker", f"{symbol}.TW")
+                loaded = (cached["total_return_curve"], cached["price_curve"],
+                          cached.get("resolved_ticker", f"{symbol}.TW"))
+                last = loaded[0][-1]["date"] if loaded[0] else None
+                if last and (today - dt.date.fromisoformat(last)).days <= _STALE_AFTER_DAYS:
+                    total_return_curve, price_curve, resolved_ticker = loaded
+                else:
+                    stale = loaded
         except (OSError, ValueError, KeyError):
             pass
 
     if total_return_curve is None:
-        df = ds._yf_history_since(symbol, start_date, "1d")
+        try:
+            df = ds._yf_history_since(symbol, start_date, "1d")
+        except ds.SourceError as e:
+            if stale is None:
+                raise
+            print(f"WARNING: {symbol} benchmark cache is stale (last bar {stale[0][-1]['date']}) "
+                  f"and the refresh failed ({e}); using the stale cache", file=sys.stderr)
+            return stale
         resolved_ticker = df.attrs.get("resolved_ticker", f"{symbol}.TW")
         total_return_curve, price_curve = [], []
         for ts, row in df.iterrows():
@@ -143,6 +165,8 @@ def fetch_benchmark_curves(start_date="2021-07-01", cache_path=None, refresh=Fal
             if close != close or adj_close != adj_close:  # NaN, same convention as data_sources._df_to_hist
                 continue
             date = ts.date().isoformat()
+            if date >= today.isoformat():
+                continue  # today's bar may be a partial intraday value; never cache it
             price_curve.append({"date": date, "value": float(close)})
             total_return_curve.append({"date": date, "value": float(adj_close)})
 
