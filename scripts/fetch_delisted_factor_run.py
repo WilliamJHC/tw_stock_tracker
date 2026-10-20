@@ -66,7 +66,7 @@ def candidates(delisting_rows):
     for r in delisting_rows:
         code = (r.get("stock_id") or "").strip()
         date = r.get("date") or ""
-        if _CODE_RE.match(code) and date >= MIN_DELIST_DATE:
+        if _CODE_RE.match(code) and date >= MIN_DELIST_DATE and date >= by_code.get(code, {}).get("delisted_date", ""):
             by_code[code] = {"code": code, "name": (r.get("stock_name") or "").strip(), "delisted_date": date}
     return [by_code[c] for c in sorted(by_code)]
 
@@ -142,7 +142,10 @@ class ErrorTrap:
         try:
             return self.inner(*args, **kwargs)
         except ds.SourceError as e:
-            self.errors.append(str(e))
+            # get_financials() tolerates a cash-flow-only failure by design, and nothing
+            # here uses cash-flow data, so that one dataset is not a fetch failure.
+            if not (args and args[0] == "TaiwanStockCashFlowsStatement"):
+                self.errors.append(str(e))
             raise
 
 
@@ -152,6 +155,10 @@ class FetchFailed(Exception):
 
 QUOTA_SLEEP_SECONDS = 300
 QUOTA_MAX_WAITS = 30  # ~2.5h of waiting for the hourly quota to reopen, then give up
+
+
+def _is_quota_error(e):
+    return "HTTP 402" in str(e) or "upper limit" in str(e)
 
 
 def _already_in_factor_run(code):
@@ -197,7 +204,7 @@ def main():
             delisting_rows = ds._finmind("TaiwanStockDelisting")
             break
         except ds.SourceError as e:
-            if "402" not in str(e) and "upper limit" not in str(e):
+            if not _is_quota_error(e):
                 raise
             print(f"quota exhausted ({e}); sleeping {QUOTA_SLEEP_SECONDS}s", flush=True)
             time.sleep(QUOTA_SLEEP_SECONDS)
@@ -254,13 +261,14 @@ def main():
                 break
             except (ds.SourceError, FetchFailed) as e:
                 entry = None
-                if "402" in str(e) or "upper limit" in str(e):
+                if _is_quota_error(e):
                     print(f"  quota exhausted ({e}); sleeping {QUOTA_SLEEP_SECONDS}s then retrying {cand['code']}", flush=True)
                     time.sleep(QUOTA_SLEEP_SECONDS)
                     continue
                 print(f"[{i}/{len(todo)}] {cand['code']} {cand['name']}: FETCH FAILED ({e}); will retry next run", flush=True)
                 break
         if entry is None:
+            print(f"[{i}/{len(todo)}] {cand['code']}: not saved (see above); it stays in the to-fetch list", flush=True)
             continue
         _save(cand["code"], entry)
         counts[entry["status"]] += 1

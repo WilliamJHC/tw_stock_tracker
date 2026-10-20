@@ -213,6 +213,9 @@ def main():
         curve = bm.value_curve(sim["equity_curve"])
         end = WINDOW_END
         full = compare(curve, bench, WINDOW_START, end)
+        if full is None:
+            sys.exit(f"[{v['id']}] strategy and 0050 curves share fewer than 2 days in {WINDOW_START}..{end} "
+                     f"(0050 cache ends {bench[-1]['date']}); refresh cache/benchmark_0050_2012.json")
         results[v["id"]] = {
             "codes": len(universe), "n_trades": len(sim["trades"]),
             "full": full,

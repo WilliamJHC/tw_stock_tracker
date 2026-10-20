@@ -93,3 +93,24 @@ def test_error_trap_records_and_reraises_source_errors():
         trap("TaiwanStockMonthRevenue", "1234", "2010-01-01")
     assert trap.errors == ["HTTP 402 / Requests reach the upper limit"]
     assert fd.ErrorTrap(lambda *a, **k: [1])("x") == [1]
+
+
+def test_error_trap_ignores_cash_flow_dataset_errors():
+    import pytest
+    import data_sources as ds
+
+    def boom(*a, **k):
+        raise ds.SourceError("denied")
+
+    trap = fd.ErrorTrap(boom)
+    with pytest.raises(ds.SourceError):
+        trap("TaiwanStockCashFlowsStatement", "1234", "2010-01-01")
+    assert trap.errors == []
+
+
+def test_candidates_keeps_latest_delisting_row_regardless_of_order():
+    rows = [
+        {"stock_id": "2325", "stock_name": "x", "date": "2018-04-30"},
+        {"stock_id": "2325", "stock_name": "x", "date": "2015-01-05"},
+    ]
+    assert fd.candidates(rows)[0]["delisted_date"] == "2018-04-30"

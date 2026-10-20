@@ -506,3 +506,13 @@ def test_simulate_terminal_exit_ignores_code_that_is_still_printing():
     universe = {"A": _entry(50, 0.1, days=400), "B": _entry(100, 0.3, days=400)}
     result = pb.simulate(universe, params={**_DELIST_PARAMS, "terminal_exit_days": 30, "max_stale_days": 10})
     assert [t for t in result["trades"] if t.get("terminal")] == []
+
+
+def test_simulate_rejects_ranks_cache_shared_across_different_rank_settings():
+    import pytest
+    universe = {"A": _entry(50, 0.1, days=100), "B": _entry(100, 0.3, days=100)}
+    cache = {}
+    pb.simulate(universe, params={"top_n": 1}, ranks_cache=cache)
+    with pytest.raises(ValueError):
+        pb.simulate(universe, params={"top_n": 1, "max_stale_days": 10}, ranks_cache=cache)
+    pb.simulate(universe, params={"top_n": 1}, ranks_cache=cache)  # same settings: fine

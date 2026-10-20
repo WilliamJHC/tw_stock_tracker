@@ -66,6 +66,8 @@ import math
 import finlab_factors as ff
 import metrics as mt
 
+_RANK_KWARGS_KEY = "__rank_kwargs__"  # bookkeeping entry in a shared ranks_cache, see simulate()
+
 PORTFOLIO_PARAMS = {
     "initial_capital": 1_000_000,  # NTD
     "top_n": ff.RANKING_TOP_N,
@@ -298,6 +300,11 @@ def simulate(universe_data, params=None, ranks_cache=None, regime_by_date=None, 
     equity_curve, trades = [], []
 
     rank_kwargs = {"max_stale_days": p.get("max_stale_days"), "dark_rank": p.get("dark_rank")}
+    if ranks_cache is not None:
+        # The cache is keyed by date only, so it is valid for one set of rank settings.
+        if ranks_cache.setdefault(_RANK_KWARGS_KEY, rank_kwargs) != rank_kwargs:
+            raise ValueError(f"ranks_cache was filled with {ranks_cache[_RANK_KWARGS_KEY]}, "
+                             f"but this call uses {rank_kwargs}; use a separate cache")
 
     for date in calendar:
         for code in sorted(terminal_exits.get(date, [])):
