@@ -99,8 +99,12 @@ jobs:
       # 都會讓這個 step 失敗，由下一個 step 發 Telegram 通知。
       # 與前一步不同，這一步會對最多 120 檔各打一次 FinMind，所以需要
       # FINMIND_TOKEN；只設在這個 step，前一步仍然不碰網路。
+      # 2026-10-24 停用：日線代理回測未通過（平均 net_r -0.045，見
+      # docs/pullback_backtest_result_2026-10.md），Luk 式研究方向已結束。
+      # 程式與測試保留；要重開把下面這行 `if: false` 拿掉即可。
       - name: run_pullback_scan
         id: pullback_scan
+        if: false
         continue-on-error: true
         # 最多 120 檔循序抓取，卻佔著共用的 backtest-db-state concurrency
         # group；FinMind 卡住時不能讓它一路拖到 6 小時預設上限、擋住後面

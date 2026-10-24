@@ -2,7 +2,9 @@
 
 2026-10-13 新增。多因子排名法（`finlab_factors.composite_scores()`，月頻、全市場 top-N）以外的另一種方式：**挑已經漲很強、正在整理的股票，等它回到支撐區、分鐘線轉強才進場，先定停損再算股數，3R/5R 分批出場。** 兩者並列，互不影響：多因子那條的權重、自動套用、回測流程都沒有動。
 
-> **回測未通過：平均 net_r = −0.045。** 2026-10-19 依預先登記（`docs/pullback_backtest_preregistration_2026-10.md`）用日線代理回測，去重後 4,005 筆，平均 net_r −0.045（95% 區間 [−0.142, +0.049]；通過門檻為 ≥ +0.10 且下界 > 0），2012–2019 與 2020 之後兩半都是負的；§4 五項只過樣本量與「勝過控制組」，結論為**不通過**。完整數字見 `docs/pullback_backtest_result_2026-10.md`。這份結果只針對日線代理，**盤中 5 分 K 觸發仍未驗證**；它是照一套公開描述的交易流程實作出來的篩選＋計畫工具，不是像多因子那樣通過 walk-forward／DSR 檢驗的策略。畫面（`static/index.html` 的「此法尚未回測驗證」）保留未驗證警語；**Telegram 摘要（`run_pullback_scan.py` 的 `summary_text()`）目前沒有任何未驗證字樣**，先前這裡寫「Telegram 都照實標示」與程式不符，2026-10-19 更正。
+> **2026-10-24 收尾：排程與盤中輪詢已停用，程式與測試保留。** 每日掃描 step 在 `daily_recommendations.yml` 設 `if: false`；`monitor.py` 預設不再載入回調清單（要開設 `.env` 的 `PULLBACK_MONITOR=1`）；網頁警語與 Telegram 摘要都標明「回測未通過」。`meta.pullback_watchlist` 與 data.json 的 `pullback` 停在最後一次掃描的內容，不會更新。下面 §3 的排程與 §4 的盤中觸發說明描述的是停用前的設計。
+
+> **回測未通過：平均 net_r = −0.045。** 2026-10-19 依預先登記（`docs/pullback_backtest_preregistration_2026-10.md`）用日線代理回測，去重後 4,005 筆，平均 net_r −0.045（95% 區間 [−0.142, +0.049]；通過門檻為 ≥ +0.10 且下界 > 0），2012–2019 與 2020 之後兩半都是負的；§4 五項只過樣本量與「勝過控制組」，結論為**不通過**。完整數字見 `docs/pullback_backtest_result_2026-10.md`。這份結果只針對日線代理，**盤中 5 分 K 觸發仍未驗證**；它是照一套公開描述的交易流程實作出來的篩選＋計畫工具，不是像多因子那樣通過 walk-forward／DSR 檢驗的策略。畫面（`static/index.html`）與 Telegram 摘要（`run_pullback_scan.py` 的 `summary_text()`）自 2026-10-24 起都標示「日線代理回測未通過」。
 
 ## 1. 方法 → 程式對照
 

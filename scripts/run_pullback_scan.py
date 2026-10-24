@@ -236,7 +236,7 @@ def summary_text(payload):
     scope = "強勢" if payload.get("mode") == "screen" else "指定"
     head = (f"[強勢回調] as_of={payload['as_of']} {scope} {payload['counts']['strong']} 檔 → "
             f"合格整理 {payload['counts']['setups']} 檔，接近支撐 {payload['counts']['near_support']} 檔")
-    lines = [head]
+    lines = [head, "⚠ 日線代理回測未通過（平均 net_r −0.045），僅供參考，不是進場建議"]
     for s in near[:8]:
         z, pl = s["zone"], s["plan"]
         first = "・首次回測" if (s.get("retest") or {}).get("first_retest") else ""

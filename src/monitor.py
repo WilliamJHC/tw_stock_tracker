@@ -382,6 +382,10 @@ def _pullback_account_size():
 
 
 def _load_default_pullback_plans():
+    # Off by default: the daily-proxy backtest failed (docs/pullback_backtest_result_2026-10.md)
+    # and the scheduled scan is disabled, so the stored watchlist goes stale.
+    if load_env_value("PULLBACK_MONITOR", pipeline.BASE_DIR) != "1":
+        return {}
     try:
         return pipeline.load_pullback_plans()
     except Exception as exc:  # noqa: BLE001 -- optional feature, never blocks the monitor
@@ -403,8 +407,9 @@ def main(codes=None, crypto_codes=None, max_iterations=None, sleep_seconds=30,
 
     pullback_plans: {code: setup} for the 強勢回調 intraday trigger. None +
     codes=None (the plain `python src/monitor.py` run) loads the latest
-    meta.pullback_watchlist; None with explicit codes means off, so
-    scripted/test runs aren't affected by whatever the DB holds.
+    meta.pullback_watchlist only when PULLBACK_MONITOR=1 is set (off by
+    default); None with explicit codes means off, so scripted/test runs
+    aren't affected by whatever the DB holds.
     """
     if pullback_plans is None:
         pullback_plans = _load_default_pullback_plans() if codes is None else {}

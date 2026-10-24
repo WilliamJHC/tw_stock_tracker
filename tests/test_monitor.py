@@ -477,6 +477,15 @@ def test_main_with_explicit_codes_does_not_load_pullback_plans(monkeypatch):
     assert src.codes == ["2330"]
 
 
+def test_default_pullback_plans_off_unless_env_opt_in(monkeypatch):
+    plans = {"3017": _PB_SETUP}
+    monkeypatch.setattr(monitor.pipeline, "load_pullback_plans", lambda: plans)
+    monkeypatch.setattr(monitor, "load_env_value", lambda key, base: None)
+    assert monitor._load_default_pullback_plans() == {}
+    monkeypatch.setattr(monitor, "load_env_value", lambda key, base: "1")
+    assert monitor._load_default_pullback_plans() == plans
+
+
 def test_main_subscribes_pullback_codes_too():
     class Src:
         def subscribe(self, codes):
