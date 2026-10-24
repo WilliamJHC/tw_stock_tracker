@@ -1,6 +1,6 @@
 # EP-TW（營收催化跳空，純價量版）：事件研究預先登記（pre-registration）
 
-2026-10-21 起草，**尚未鎖定**（§8 全部留空，由使用者逐項確認後鎖定）。鎖定之前本文件可以改；鎖定之後參數與成功標準不改，要改就另開一份登記、n_trials 重算。
+2026-10-21 起草，**2026-10-24 已鎖定**（§8 四項由使用者確認，鎖定 commit 見 §8）。鎖定之後參數與成功標準不改，要改就另開一份登記、n_trials 重算。
 
 對應 `docs/martin_luk_expansion_plan_2026-10-20.md` 的 §5（規格）、§6（關卡）、§7 步驟 1–2。姊妹文件：`docs/pullback_backtest_preregistration_2026-10.md`（回調，已鎖定並已跑完，結果見 `docs/pullback_backtest_result_2026-10.md`）。**本草稿起草與測試時沒有讀取任何真實快取資料**，程式只用合成資料跑過 pytest；EP 的任何數字都還不存在。
 
@@ -149,9 +149,9 @@
 
 鎖定 = 下列四項都完成，並在一個 commit 內補上本節空白、把 `- [ ]` 改成已勾選。**本草稿的起草者不得代為勾選或填寫；全部由使用者確認。**
 
-- [ ] V2 池資料量測已貼在 §2.1（主快取檔數、補回 `ok` 檔數、非普通股剔除數、o/h/l 缺漏整檔排除數、可用檔數、資料指紋、最後一根 bar 日期），並與腳本輸出核對一致：2026-10-24 量測值見 §2.1（主快取 1,821／補回 ok 53／合併 1,860／非普通股 0／缺漏排除 10／可用 1,850／指紋 `89556465a98c9d21`／最後 bar 2026-10-16）；量測與腳本同走 `load_universe()`，鎖定當天回測前仍須比對腳本輸出
-- [ ] 使用者已確認或修改 §2.2 的參數、§2.3 的規則（含 §3 第 6 點起草者補上的口徑）、§4 的門檻、§3 第 5 點固定的 80/20 與公告日來源：______
-- [ ] `python -m pytest tests/test_ep_strategy.py` 與回調的 `tests/test_pullback_backtest.py`、`tests/test_pullback_strategy.py` 在鎖定當下全過，結果貼在這裡：2026-10-24 於 HEAD `29d9ef8` 跑三檔合計 137 passed, 1 skipped（skip 是 `test_pullback_backtest.py:360` 的「回調登記已鎖定」條件式跳過，預期行為）；鎖定當下要再跑一次
-- [ ] 鎖定時 `src/ep_strategy.py`（及其依賴 `src/pullback_backtest.py`、`src/pullback_strategy.py`）所在 commit：______（回測前先 `git diff <此 hash> -- src/ep_strategy.py src/pullback_backtest.py src/pullback_strategy.py`，不得有差異）
+- [x] V2 池資料量測已貼在 §2.1（主快取檔數、補回 `ok` 檔數、非普通股剔除數、o/h/l 缺漏整檔排除數、可用檔數、資料指紋、最後一根 bar 日期），並與腳本輸出核對一致：2026-10-24 量測值見 §2.1（主快取 1,821／補回 ok 53／合併 1,860／非普通股 0／缺漏排除 10／可用 1,850／指紋 `89556465a98c9d21`／最後 bar 2026-10-16）；量測與腳本同走 `load_universe()`，鎖定當天回測前仍須比對腳本輸出
+- [x] 使用者已確認或修改 §2.2 的參數、§2.3 的規則（含 §3 第 6 點起草者補上的口徑）、§4 的門檻、§3 第 5 點固定的 80/20 與公告日來源：使用者 2026-10-24 回覆「全部確認，照現狀鎖定」，無修改。確認前已被告知：§2.2 參數無一以 EP 真實資料校準（4% 跳空、3 倍量、1/3 分批、8% 停損上限、5,000 萬門檻為起草者假設；3% 停損下限為看過回調結果後加入）；月去重使樣本偏少；關卡 5 前半段不足 100 筆時結論只會是「樣本不足」
+- [x] `python -m pytest tests/test_ep_strategy.py` 與回調的 `tests/test_pullback_backtest.py`、`tests/test_pullback_strategy.py` 在鎖定當下全過，結果貼在這裡：2026-10-24 鎖定當下於 HEAD `2eeae8d` 再跑一次，三檔合計 137 passed, 1 skipped（skip 是 `test_pullback_backtest.py:360` 的「回調登記已鎖定」條件式跳過，預期行為）
+- [x] 鎖定時 `src/ep_strategy.py`（及其依賴 `src/pullback_backtest.py`、`src/pullback_strategy.py`）所在 commit：`2eeae8d`（鎖定 commit 本身只改這份文件；已驗 `git diff 2eeae8d -- src/ep_strategy.py src/pullback_backtest.py src/pullback_strategy.py` 無差異）（回測前先 `git diff <此 hash> -- src/ep_strategy.py src/pullback_backtest.py src/pullback_strategy.py`，不得有差異）
 
-鎖定日期：______　　鎖定時間序：資料量測（鎖定前）→ 使用者確認 → 鎖定 → 才能跑回測。
+鎖定日期：2026-10-24　　鎖定時間序：資料量測（鎖定前）→ 使用者確認 → 鎖定 → 才能跑回測。
