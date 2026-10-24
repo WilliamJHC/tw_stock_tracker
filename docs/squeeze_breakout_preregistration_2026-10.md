@@ -1,6 +1,6 @@
 # 緊縮突破（inside day／區間收斂）：事件研究預先登記（pre-registration）
 
-2026-10-24 起草，**尚未鎖定**（§8 四項空白，由使用者確認後才算鎖定）。鎖定之後參數與成功標準不改，要改就另開一份登記、n_trials 重算。
+2026-10-24 起草，**2026-10-24 已鎖定**（§8 四項由使用者確認，鎖定 commit 見 §8）。鎖定之後參數與成功標準不改，要改就另開一份登記、n_trials 重算。
 
 對應 `docs/martin_luk_expansion_plan_2026-10-20.md` 的 §5（規格）、§6（關卡）、§7 步驟 3。姊妹文件：`docs/ep_backtest_preregistration_2026-10.md`（EP-TW，已鎖定、已跑完，結果見 `docs/ep_backtest_result_2026-10.md`：不通過）、`docs/pullback_backtest_preregistration_2026-10.md`（回調，不通過）。**本草稿起草與測試時沒有讀取任何真實快取資料，沒有產生任何訊號或績效**，程式只用合成資料跑過 pytest；緊縮突破的任何數字都還不存在。
 
@@ -21,7 +21,7 @@
 
 - **股票池 V2**、普通股判定（`^[1-9]\d{3}$`）、o/h/l 缺漏整檔排除、還原價尺度、「與回調 V1 池不同、結果不可直接等同比較」：全部沿用 `docs/ep_backtest_preregistration_2026-10.md` §2.1，且與 EP 腳本走同一個 `run_ep_backtest.load_universe()`。
 - **範圍**：快取最早日到鎖定當時的快取最後一日。最早的訊號需要 50 根歷史（EMA50）。
-- **資料量測**：鎖定前由使用者的鎖定流程補上（見 §8 第 1 項，只呼叫 `load_universe()`，不產生訊號）。EP 在 2026-10-24 的量測值（1,850 檔可用、指紋 `89556465a98c9d21`、最後一根 bar 2026-10-16）僅供參考，鎖定時要重量並核對。
+- **資料量測（2026-10-24，鎖定前，只呼叫 `load_universe()`，未產生任何訊號或績效）**：主快取 1,821 檔＋下市補回 `ok` 53 檔 → 合併 1,860 檔；非普通股剔除 0 檔；o/h/l 或 c_adj 缺漏整檔排除 10 檔；可用 1,850 檔；資料指紋 `89556465a98c9d21`；資料範圍 2010-01-04 ~ 2026-10-16（最後一根 bar）。與 EP-TW 登記 §2.1 的量測值逐項相同（同一份快取、同一個 `load_universe()`）。腳本每次執行都會重新計算並印出，鎖定後回測前要與此核對，不一致先說明差異。
 - 已知偏誤：同 EP §2.1（未含息收盤價、`c_adj` 只還原到快取日期、下市股只補回一部分）。
 
 ### 2.2 參數
@@ -147,9 +147,9 @@
 
 鎖定 = 下列四項都完成，並在一個 commit 內補上本節空白、把 `- [ ]` 改成已勾選。**本草稿的起草者不得代為勾選或填寫；全部由使用者確認。**
 
-- [ ] V2 池資料量測已貼在 §2.1（主快取檔數、補回 `ok` 檔數、非普通股剔除數、o/h/l 缺漏整檔排除數、可用檔數、資料指紋、最後一根 bar 日期；只呼叫 `load_universe()`，不產生訊號），並與腳本輸出核對一致：______
-- [ ] 使用者已確認或修改 §2.2 的參數、§2.3 的規則（含 §3 第 6 點起草者補上的口徑）、§2.4 的控制組口徑、§4 的門檻、§3 第 7 點固定的 80/20 與不加法人合力：______
-- [ ] `python -m pytest tests/test_squeeze_breakout.py` 與 `tests/test_ep_strategy.py`、回調的 `tests/test_pullback_backtest.py`、`tests/test_pullback_strategy.py` 在鎖定當下全過，結果貼在這裡：______
-- [ ] 鎖定時 `src/squeeze_breakout.py`（及其依賴 `src/ep_strategy.py`、`src/pullback_backtest.py`、`src/pullback_strategy.py`、`src/finlab_factors.py`、`scripts/run_ep_backtest.py`、`scripts/run_squeeze_backtest.py`）所在 commit：______（回測前先 `git diff <此 hash> -- <上列檔案>`，不得有差異）
+- [x] V2 池資料量測已貼在 §2.1（主快取檔數、補回 `ok` 檔數、非普通股剔除數、o/h/l 缺漏整檔排除數、可用檔數、資料指紋、最後一根 bar 日期；只呼叫 `load_universe()`，不產生訊號），並與腳本輸出核對一致：2026-10-24 量測值見 §2.1（主快取 1,821／補回 ok 53／合併 1,860／非普通股 0／缺漏排除 10／可用 1,850／指紋 `89556465a98c9d21`／最後 bar 2026-10-16）；量測與腳本同走 `load_universe()`，鎖定後回測當天仍須比對腳本輸出
+- [x] 使用者已確認或修改 §2.2 的參數、§2.3 的規則（含 §3 第 6 點起草者補上的口徑）、§2.4 的控制組口徑、§4 的門檻、§3 第 7 點固定的 80/20 與不加法人合力：使用者 2026-10-24 回覆「全部確認，照現狀鎖定」，無修改。確認前已被告知：§2.3／§2.4／§3 第 6 點全文，以及需要判斷的五點（控制組用強勢池而非計畫書字面的流動性池、inside day 嚴格不等號、區間收斂比的是平均振幅的比值、強勢篩選流動性窗口含 setup 日、inside day 的近停損多半被 3% 下限放寬）
+- [x] `python -m pytest tests/test_squeeze_breakout.py` 與 `tests/test_ep_strategy.py`、回調的 `tests/test_pullback_backtest.py`、`tests/test_pullback_strategy.py` 在鎖定當下全過，結果貼在這裡：2026-10-24 鎖定當下於 HEAD `f58cd58` 再跑一次，四檔合計 162 passed, 3 skipped（skip 是 EP、回調「登記已鎖定」的條件式跳過，預期行為）；全專案另跑過 850 passed, 3 skipped
+- [x] 鎖定時 `src/squeeze_breakout.py`（及其依賴 `src/ep_strategy.py`、`src/pullback_backtest.py`、`src/pullback_strategy.py`、`src/finlab_factors.py`、`scripts/run_ep_backtest.py`、`scripts/run_squeeze_backtest.py`）所在 commit：`f58cd58`（鎖定 commit 本身只改這份文件；已驗 `git diff f58cd58 -- <上列檔案>` 無差異）（回測前先 `git diff <此 hash> -- <上列檔案>`，不得有差異）
 
-鎖定日期：______　　鎖定時間序：資料量測（鎖定前）→ 使用者確認 → 鎖定 → 才能跑回測。
+鎖定日期：2026-10-24　　鎖定時間序：資料量測（鎖定前）→ 使用者確認 → 鎖定 → 才能跑回測。
