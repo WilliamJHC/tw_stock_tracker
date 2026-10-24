@@ -23,11 +23,13 @@ name: optimize
 # those is a full ~19-22h --universe all pull. Same for the lighthouse.md
 # Phase 6c "每季全量重抛 universe 清單" step (new/delisted codes). Both are
 # still manual/unscheduled.
+#
+# 排程已停用（2026-10-24）：Luk 式研究方向依計畫書 §6／§7 結束，雙週自動搜參數
+# 等於持續做不計入 n_trials 的隱性多重試驗。要重開：把下面 schedule 區塊還原為
+#   schedule:
+#     - cron: '0 22 1,15 * *'   # 每月 1、15 號台北 06:00（UTC 前一天 22:00）
+# 目前只保留手動觸發。
 on:
-  schedule:
-    - cron: '0 22 1,15 * *'   # 每月 1、15 號台北 06:00（UTC 前一天 22:00），近似雙週一次
-    # 注意：月底到下月 1 號的實際間隔不是固定 14 天（可能只隔 13~16 天），
-    # 這是 cron 本身無法表示「每 14 天」區間之下的近似取捨，非 bug。
   workflow_dispatch:
     inputs:
       dry_run:

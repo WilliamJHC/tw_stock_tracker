@@ -8,11 +8,12 @@ name: run-backtest
 # 建議」一節：回測面板只在本機即時模式才顯示，靜態快照/雲端版本來就沒有
 # 這塊）。這個 workflow 的產出只餵給 optimize.yml/daily_recommendations.yml
 # 共用讀寫的那份 optimize-state- cache 血統。
+#
+# 排程已停用（2026-10-24）：它的產出只餵給 optimize.yml／strategy_search.yml，
+# 兩者已停排程，這支跟著停。要重開：還原下面 schedule 區塊；目前只保留手動觸發。
+#   schedule:
+#     - cron: '0 19 1,15 * *'   # 台北時間每月 1、15 號 03:00（UTC 前一天 19:00）
 on:
-  schedule:
-    - cron: '0 19 1,15 * *'   # 台北時間每月 1、15 號 03:00（UTC 前一天 19:00），
-    # 排在 strategy_search.yml(20:00)/optimize.yml(22:00)/daily_recommendations.yml(23:00)
-    # 之前，避免同一天四個 job 排隊等 backtest-db-state 併發鎖。
   workflow_dispatch:
     inputs:
       codes:

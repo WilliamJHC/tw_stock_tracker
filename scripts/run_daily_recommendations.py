@@ -65,6 +65,8 @@ import report_factor_ic as rfi  # noqa: E402
 META_KEY = "daily_recommendations"
 ACTIVE_META_KEY = "active_ranking_weights"
 REGIME_META_KEY = "active_ranking_weights_by_regime"
+# docs/delisted_survivorship_result_2026-10.md: V2 (delisted stocks added back) lost to 0050.
+UNVALIDATED_NOTE = "⚠ 多因子補回下市股後對 0050 未通過（Sharpe 0.88 vs 1.13），僅供觀察，不是進場建議"
 
 
 def _latest_bar_date(universe_data):
@@ -181,7 +183,8 @@ def main():
 
     summary = (
         f"[每日推薦排名] as_of={payload['as_of']} top{args.top_n}=" +
-        ", ".join(f"{c['code']}({c['composite_score']:.3f})" for c in payload["codes"])
+        ", ".join(f"{c['code']}({c['composite_score']:.3f})" for c in payload["codes"]) +
+        "\n" + UNVALIDATED_NOTE
     )
 
     if args.dry_run:
