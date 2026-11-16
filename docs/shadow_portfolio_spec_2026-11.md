@@ -123,7 +123,7 @@
 3. **換倉的計算時點**：換倉日 T 的 07:00 job 以 T−1 收盤資料（as-of T−1）算排名並存檔，成為 T 日的目標持股；T 日收盤成交（成交價＝T 日收盤）；T+1 的 07:00 取得 T 收盤後記帳。A5c-4 的「訊號日」改稱「換倉日 T」。S2 的營收完成判定也在 T 的 07:00 做。週更新（台北週日／週一 04:00）重算 `c_adj` 發生在 07:00 之前；排名以 07:00 當下的快取為準並存檔，重放用存檔，不重新計算。T−1 的全市場收盤缺 → 視為換倉日資料缺漏，依 A5d-1。
 4. **S2「營收更新完成」的定義（修改 A5b-2、A5c-4 的欄位，90% 門檻不變）**：分母＝鎖定日宇宙中當下非 skip 的代號；某代號算「完成」，只要滿足任一：(a) `fund_refresh["revenue"]` 等於 `revenue_target(當日)`（`insufficient` 也被蓋章，視同完成）；(b) `fund_refresh["revenue_attempt"]` ≥ 該月 11 日（已嘗試但資料晚公告而 stale）。完成比例 ≥ 90% 即達標；`failed`（沒有資料列、不蓋 attempt）留在分母。20 日強制換倉規則不變。理由：`update_fundamentals.py` 對 stale 的代號不蓋章，只看 (a) 的話晚公告的公司會讓 90% 拖到 15–20 日才達標，削弱「≥12 日」的設計目的。**覆蓋率曲線尚未量測**（本機快取沒有 `fund_refresh`，要看雲端），實作時用 dry-run 量，這不是績效回測，不違反 A5。
 5. **停牌（修改 A5b-6、A5c-5 的 5 日門檻）**：廢除「連續 5 日」門檻（它沒有任何操作上的差異）。持股從無收盤的第 1 個交易日起即凍結：淨值用最後收盤、不賣；連續 20 個交易日無收盤視同下市，以最後收盤出場（只扣賣出腿費用與滑價）。換倉日遇凍結持股：不賣、佔名額；S3 的主產業上限先扣掉凍結檔所屬產業的名額。
-6. **上櫃除權息來源**：沿用 `scripts/build_adj_factors.py` 的現行做法——上市用 TWSE TWT49U，上櫃（TWT49U 不涵蓋）用 Yahoo 調整比值。兩者都失敗時，該檔當日報酬以原始價計，ledger 標記 `adj_missing`，不補。A6 0.5 的端點驗證一併涵蓋除權息。鎖定日宇宙清單與主產業快照檔放專案根目錄 `shadow/`（`cache/` 是 gitignore，不能放）。
+6. **除權息來源（11/16 端點驗證後，使用者同意修改；原「上櫃用 Yahoo 比值」作廢）**：上市用 TWSE `TWT49U`（日期區間），上櫃用 TPEx `exDailyQ`（`startDate`／`endDate` 日期區間）；當日因子＝除權息參考價 ÷ 除權息前收盤價。上櫃備援：TPEx 表取不到時，只對當日行情標記「除息／除權」的代號，逐檔用 Yahoo 調整比值（每天最多數十檔，不是全市場）。主來源與備援都失敗時，該檔當日報酬以原始價計，ledger 標記 `adj_missing`，不補。A6 0.5 的端點驗證一併涵蓋除權息。鎖定日宇宙清單與主產業快照檔放專案根目錄 `shadow/`（`cache/` 是 gitignore，不能放）。
 7. **判定日的邊界**：
    - 判定日正常情形不是換倉日（A3）。若資料缺漏順延使某候選的換倉恰落在判定日，該候選的判定淨值取當日**換倉前**市值。
    - 判定日當天缺資料或事後補抓：以補記後的更正序列為準；判定日後 10 個交易日仍無資料，取最後可得淨值並標註「口徑受損」。
@@ -135,7 +135,7 @@
 
 ### A6. 實作清單
 0. ~~先 `git push` `afc6c69`~~：**已完成**（11/15 查證 origin/main = 本機 = `afc6c69`，雙週排程停用已在雲端生效）。
-0.5. 全市場日收盤抓取（TWSE／TPEx 批次端點，見 A2「價格資料路徑」）：先驗證端點可用，再寫每日補抓與小快取。
+0.5. 全市場日收盤與除權息抓取。**本機端點驗證已完成（2026-11-16，見 A9）**，可按日期補抓歷史；寫抓取模組時加 schema 檢查（欄位或列數異常視為缺資料，並明確指定 utf-8）。**尚待驗證：從 GitHub Actions 連 `tpex.org.tw`**（repo 現有 workflow 沒用過這個網域，需 push 後以 `workflow_dispatch` 實跑）。
 1. `src/shadow_portfolio.py`：ledger 狀態（持股、現金、淨值、交易紀錄），每日更新淨值、換倉日重排；排名呼叫 `ff.composite_scores()`，不另寫因子邏輯；取前 N 名**不直接用 `ff.top_n()`**（它同分時依 dict 插入順序），改包一層以 `(−分數, 代號)` 排序（A5b-11）。ledger 持股以市值（元）記，不用「股數 × 最新 `c_adj`」（A5b-1）。
 2. 換倉日函式：`first_trading_day(month)`、`first_trading_day_on_or_after(month, day=12)`。（`portfolio_backtest._rebalance_dates()` 只有月份層級，沒有月內日期，要新寫。）
 3. 產業上限函式：輸入排名列表與主產業對照（主產業定義見 A1），回傳上限內的 20 檔（`portfolio_backtest` 目前沒有產業邏輯）。
@@ -156,6 +156,14 @@
 8. 鎖定：打 tag `shadow-lock-v1` 指向鎖定 commit；**鎖定 commit 不含自己的 hash**，A7 另開只改 A7／A8 欄位的 commit 填入（A5b-3）。
 9. 其餘元件：起始日、判定日、作廢後新起始日的計算函式；缺資料計數與「口徑受損」標註；重放工具與 `shadow-ledger-replay-N` 分支；`prices/` 推送、每日除權息因子與營收覆蓋率落盤；0050 缺 bar 補值（A5c-10）；鎖定日宇宙與產業快照檔（放專案根目錄 `shadow/`，不放 gitignore 的 `cache/`；A5d-6）。
 10. 補充測試：起始日缺資料順延、臨時停市日曆、判定日缺資料、無收盤第 1 天凍結、凍結檔佔 S3 產業名額、補抓後補記序列與淨值鏈。
+
+### A9. 端點驗證紀錄（2026-11-16，本機實測；腳本在 job 暫存目錄，不進 repo）
+- **TWSE 日收盤**：`https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date=YYYYMMDD&type=ALLBUT0999&response=json`。支援指定日期（驗證 2026-11-13、2026-11-10、2025-01-02），每天約 1,090–1,099 檔 4 位數代號；以「列數大於 1000 的表」取個股，欄位用位置取。除權息日漲跌欄為 `X`、價差 0.00，不能反推參考價。
+- **TPEx 日收盤**：`https://www.tpex.org.tw/www/zh-tw/afterTrading/otc?date=YYYY%2FMM%2FDD&type=EW&response=json`，西元日期、支援歷史（驗證 2026-11-13、2025-01-02、2026-07-16），每天約 835–895 檔 4 位數代號。舊端點 `web/stock/aftertrading/daily_close_quotes/stk_quote_result.php` **忽略日期參數**、永遠回最新一天，不可用。
+- **TWSE 除權息**：`https://www.twse.com.tw/rwd/zh/exRight/TWT49U?startDate=YYYYMMDD&endDate=YYYYMMDD&response=json`。
+- **TPEx 除權息**：`https://www.tpex.org.tw/www/zh-tw/bulletin/exDailyQ?startDate=YYYY%2FMM%2FDD&endDate=YYYY%2FMM%2FDD&response=json`；只帶 `date`／`d` 參數會回最新一天，要用 `startDate`／`endDate`。2026-07-16 共 54 列、4 位數 20 檔，與當日行情標「除息／除權」的 20 檔一致；1777 的除息前 75.30、參考價 71.30，與 Yahoo 還原價吻合。
+- **Yahoo**：`1777.TWO` 可取。
+- **未驗證**：從 GitHub Actions 連 `tpex.org.tw`；頻率限制（只打了約 20 個請求，間隔 3 秒）；這些是網頁後台 API，不是穩定契約。
 
 ### A7. 鎖定紀錄（待填）
 - 鎖定 commit：______（另打 git tag `shadow-lock-v1` 指向它，見 A5b-3）
