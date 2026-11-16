@@ -135,7 +135,7 @@
 
 ### A6. 實作清單
 0. ~~先 `git push` `afc6c69`~~：**已完成**（11/15 查證 origin/main = 本機 = `afc6c69`，雙週排程停用已在雲端生效）。
-0.5. 全市場日收盤與除權息抓取。**本機端點驗證已完成（2026-11-16，見 A9）**，可按日期補抓歷史；寫抓取模組時加 schema 檢查（欄位或列數異常視為缺資料，並明確指定 utf-8）。**尚待驗證：從 GitHub Actions 連 `tpex.org.tw`**（repo 現有 workflow 沒用過這個網域，需 push 後以 `workflow_dispatch` 實跑）。
+0.5. 全市場日收盤與除權息抓取。**本機端點驗證已完成（2026-11-16，見 A9）**，可按日期補抓歷史；寫抓取模組時加 schema 檢查（欄位或列數異常視為缺資料，並明確指定 utf-8）。**從 GitHub Actions 連 `tpex.org.tw` 也已驗證（A9）**。
 1. `src/shadow_portfolio.py`：ledger 狀態（持股、現金、淨值、交易紀錄），每日更新淨值、換倉日重排；排名呼叫 `ff.composite_scores()`，不另寫因子邏輯；取前 N 名**不直接用 `ff.top_n()`**（它同分時依 dict 插入順序），改包一層以 `(−分數, 代號)` 排序（A5b-11）。ledger 持股以市值（元）記，不用「股數 × 最新 `c_adj`」（A5b-1）。
 2. 換倉日函式：`first_trading_day(month)`、`first_trading_day_on_or_after(month, day=12)`。（`portfolio_backtest._rebalance_dates()` 只有月份層級，沒有月內日期，要新寫。）
 3. 產業上限函式：輸入排名列表與主產業對照（主產業定義見 A1），回傳上限內的 20 檔（`portfolio_backtest` 目前沒有產業邏輯）。
@@ -163,7 +163,8 @@
 - **TWSE 除權息**：`https://www.twse.com.tw/rwd/zh/exRight/TWT49U?startDate=YYYYMMDD&endDate=YYYYMMDD&response=json`。
 - **TPEx 除權息**：`https://www.tpex.org.tw/www/zh-tw/bulletin/exDailyQ?startDate=YYYY%2FMM%2FDD&endDate=YYYY%2FMM%2FDD&response=json`；只帶 `date`／`d` 參數會回最新一天，要用 `startDate`／`endDate`。2026-07-16 共 54 列、4 位數 20 檔，與當日行情標「除息／除權」的 20 檔一致；1777 的除息前 75.30、參考價 71.30，與 Yahoo 還原價吻合。
 - **Yahoo**：`1777.TWO` 可取。
-- **未驗證**：從 GitHub Actions 連 `tpex.org.tw`；頻率限制（只打了約 20 個請求，間隔 3 秒）；這些是網頁後台 API，不是穩定契約。
+- **Actions 連線已驗證（2026-11-16，GitHub-hosted ubuntu-24.04）**：臨時驗證分支 `verify/tpex-actions-probe` 的 push 觸發 run 43844926865，成功。TPEx 日收盤（2026-11-13：1,020 列；2025-01-02：943 列）、TPEx 除權息（2026-07-16：54 列）、TPEx openapi（13,843 列）、TWSE MI_INDEX（1,389 列）、TWSE TWT49U（61 列）、Yahoo `1777.TWO` 全部 HTTP 200，列數與本機一致；TPEx 日收盤與除權息重複打第二輪也成功。注意延遲：TPEx 日收盤從 Actions 要 6–12 秒（本機約 1 秒），實作要設足夠的 timeout。驗證分支已刪除，未併入 main。
+- **仍未驗證**：頻率限制（Actions 與本機合計只打了約 30 個請求，間隔 3–4 秒）；這些是網頁後台 API，不是穩定契約。
 
 ### A7. 鎖定紀錄（待填）
 - 鎖定 commit：______（另打 git tag `shadow-lock-v1` 指向它，見 A5b-3）
