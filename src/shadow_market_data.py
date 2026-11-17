@@ -4,8 +4,8 @@ A2 / A5b-1 / A5b-4 / A5c-1,5 / A5d-6 / A9).
 
 Fetches, once per trading day: whole-market closes for TWSE (listed) and TPEx (OTC), ex-rights/dividend
 tables for both, and the TWSE holiday calendar. Design rule: when the data is in doubt, report "missing"
-(``None`` / ``adj_missing``) instead of guessing. Public functions never raise to the caller; the reason is
-logged with ``logging.warning``.
+(``None`` / ``bad_row`` / ``adj_missing``) instead of guessing. Public functions never raise to the caller;
+the reason is logged with ``logging.warning``. ``datetime.datetime`` arguments are converted to ``date``.
 
 Endpoints (all verified 2026-11-16/17; the first four are recorded in spec A9)
 -------------------------------------------------------------------------------
@@ -13,13 +13,15 @@ Endpoints (all verified 2026-11-16/17; the first four are recorded in spec A9)
     Top-level ``stat`` ("OK") and ``date`` (YYYYMMDD, must equal the request). The stock table is the one whose
     header starts with 證券代號 (the response also carries index / statistics tables). Non-trading days answer
     ``{"stat": "很抱歉，沒有符合條件的資料!"}`` (also true for typhoon-closure days, e.g. 2024-07-24).
-    Column 9 (漲跌(+/-)) is HTML; ``<p>X</p>`` marks an ex-right/dividend day. No-trade rows show ``--``.
+    Column 9 (漲跌(+/-)) is HTML; ``<p>X</p>`` marks an ex-right/dividend day but cannot say which kind.
+    No-trade rows show ``--``.
 * TPEx close  https://www.tpex.org.tw/www/zh-tw/afterTrading/otc?date=YYYY%2FMM%2FDD&type=EW&response=json
     Top-level ``date`` is YYYYMMDD, ``tables[0]['date']`` is ROC "115/07/16". Non-trading days return an empty
-    ``data`` list. Change column holds 除息 / 除權 / 除權息 on ex days; no-trade rows show ``----``.
-    The legacy ``stk_quote_result.php`` endpoint ignores the date and must not be used.
+    ``data`` list. Change column holds 除息 (cash) / 除權 (stock) / 除權息 (both) on ex days; no-trade rows
+    show ``----``. The legacy ``stk_quote_result.php`` endpoint ignores the date and must not be used.
 * TWSE ex-rights  https://www.twse.com.tw/rwd/zh/exRight/TWT49U?startDate=YYYYMMDD&endDate=YYYYMMDD&response=json
     Rows start with ROC "115年07月16日". An empty range answers ``{"stat": "很抱歉，沒有符合條件的資料!"}``.
+    Not every day flagged X in the close table is listed here (e.g. 5236 on 2026-07-16).
 * TPEx ex-rights  https://www.tpex.org.tw/www/zh-tw/bulletin/exDailyQ?startDate=YYYY%2FMM%2FDD&endDate=...
     Rows start with ROC "115/07/16". Sending only ``date``/``d`` silently returns the latest day, so row
     dates are always checked against the requested range. An empty range returns ``data: []``.
@@ -45,17 +47,24 @@ Trading calendar findings (probed years 2024, 2025, 2026, 2027, 2028, 1990)
 
 Interface notes
 ---------------
-* ``fetch_*_close`` return ``{code: {"o","h","l","c","v","status"}}`` for 4-digit numeric codes only; ``None``
-  on any failure. A malformed 4-digit row (unparseable price/volume other than the no-trade marker, short
-  row, duplicate code) fails the whole fetch rather than silently dropping a stock.
+* ``fetch_*_close`` return ``{code: {"o","h","l","c","v","status","exright_kind"}}`` for 4-digit numeric codes
+  only. ``status`` is "ok" / "no_close" / "exright" / "bad_row". ``exright_kind`` is None unless status is
+  "exright": TPEx "cash" (除息) / "stock" (除權) / "both" (除權息); TWSE always "unknown" (X cannot tell).
+  A row that cannot be trusted (unparseable price or volume, short row, duplicate code) becomes
+  ``{"o","h","l","c","v": None, "status": "bad_row"}`` (the caller treats it as "no close"). The whole result is
+  None only on: HTTP/JSON failure, response date mismatch, header/column-order mismatch, non-OK stat, or fewer
+  4-digit codes than ``TWSE_MIN_CODES`` / ``TPEX_MIN_CODES``.
 * ``fetch_*_exright`` return ``{(date, code): {"pre_close", "ref_price"}}``; ``{}`` when the endpoint
-  cleanly says "no data" for the range; ``None`` on failure. A 4-digit row whose prices cannot be parsed is
-  skipped with a warning (``adj_factor`` then falls back because the quote is still flagged exright).
+  cleanly says "no data" for the range; ``None`` on failure. Non-4-digit rows are skipped before any length
+  check; a 4-digit row that is short / has unparseable prices / has ref_price/pre_close outside (0, 2) is
+  dropped with a warning (``adj_factor`` then falls back or reports adj_missing); a duplicate (date, code)
+  keeps the first row with a warning.
 * ``adj_factor``'s ``exright_tables`` argument is a dict with these optional keys:
     ``"twse"`` / ``"tpex"``              result of ``fetch_*_exright`` (``None`` = fetch failed)
     ``"twse_close"`` / ``"tpex_close"``  result of ``fetch_*_close`` for the same day (``None`` = failed)
 """
 import datetime
+import functools
 import json
 import logging
 import math
@@ -67,12 +76,17 @@ import requests
 logger = logging.getLogger(__name__)
 
 REQUEST_INTERVAL = 3.0  # seconds between two requests (tests monkeypatch this to 0)
+RETRY_BACKOFF = (3.0, 6.0)  # waits before retry 1 and retry 2 (connection error / timeout / 5xx only)
 TIMEOUT = 40  # seconds; TPEx close takes 6-12 s from GitHub Actions
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-TWSE_MIN_CODES = 900  # fewer 4-digit listed codes than this = abnormal (normal: ~1,090-1,099)
-TPEX_MIN_CODES = 700  # fewer 4-digit OTC codes than this = abnormal (normal: ~835-895)
+# Fewer 4-digit codes than this = truncated/abnormal response. Real counts: TWSE ~1,043 (2025-01) to ~1,090
+# now; TPEx ~835 (2025-01) to ~889 now.
+TWSE_MIN_CODES = 1000
+TPEX_MIN_CODES = 800
 CALENDAR_MIN_CLOSED_WEEKDAYS = 5
+EXRIGHT_RATIO_MAX = 2.0  # ref_price / pre_close must lie in (0, 2) or the row is dropped
+YAHOO_FACTOR_MAX = 0.9999  # an ex-dividend flag with no price gap (factor >= this) is not believable
 
 TWSE_CLOSE_URL = ("https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
                   "?date={ymd}&type=ALLBUT0999&response=json")
@@ -96,6 +110,31 @@ _TRADING_DAY_NAME_RE = re.compile(r"(開始|最後)交易日$")
 _last_request_at = None
 
 
+# --------------------------------------------------------------------------- generic helpers
+
+def _never_raise(default):
+    """Public functions must not raise: log the exception and return ``default`` instead."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:  # noqa: BLE001 - deliberate catch-all at the public boundary
+                logger.warning("%s raised %r; returning %r", fn.__name__, e, default)
+                return default
+        return wrapper
+    return deco
+
+
+def _as_date(x):
+    """datetime -> date; date -> date; anything else -> None."""
+    if isinstance(x, datetime.datetime):
+        return x.date()
+    if isinstance(x, datetime.date):
+        return x
+    return None
+
+
 # --------------------------------------------------------------------------- HTTP
 
 def _throttle():
@@ -109,13 +148,28 @@ def _throttle():
 
 
 def _get_json(url, label):
-    """GET ``url`` and return the parsed JSON, or None (with a warning) on any failure."""
-    _throttle()
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-    except requests.RequestException as e:
-        logger.warning("%s: request failed: %s", label, e)
-        return None
+    """GET ``url`` and return the parsed JSON, or None (with a warning) on any failure.
+
+    Retries (backoff ``RETRY_BACKOFF``) only on connection errors, timeouts and HTTP 5xx; 4xx and
+    unparseable JSON are not retried.
+    """
+    attempts = len(RETRY_BACKOFF) + 1
+    r = None
+    for attempt in range(attempts):
+        if attempt > 0 and RETRY_BACKOFF[attempt - 1] > 0:
+            time.sleep(RETRY_BACKOFF[attempt - 1])
+        _throttle()
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+        except requests.RequestException as e:
+            logger.warning("%s: request failed (attempt %d/%d): %s", label, attempt + 1, attempts, e)
+            if attempt + 1 < attempts:
+                continue
+            return None
+        if r.status_code >= 500 and attempt + 1 < attempts:
+            logger.warning("%s: HTTP %s (attempt %d/%d), retrying", label, r.status_code, attempt + 1, attempts)
+            continue
+        break
     if r.status_code != 200:
         logger.warning("%s: HTTP %s", label, r.status_code)
         return None
@@ -177,23 +231,46 @@ def _roc_date(text):
         return None
 
 
-def _parse_stock_rows(rows, idx, flag_fn, label, min_codes):
-    """Shared row loop for both close endpoints. Returns the result dict or None."""
+def _bad_entry():
+    return {"o": None, "h": None, "l": None, "c": None, "v": None,
+            "status": "bad_row", "exright_kind": None}
+
+
+def _twse_kind(cell):
+    """TWSE change column: '<p>X</p>' = ex day, kind unknowable. Returns kind or None."""
+    return "unknown" if _TAG_RE.sub("", str(cell)).strip() == "X" else None
+
+
+def _tpex_kind(cell):
+    """TPEx change column: 除息 -> cash, 除權 -> stock, 除權息 -> both. Returns kind or None."""
+    t = str(cell).strip()
+    if "除" not in t:
+        return None
+    return {"除息": "cash", "除權": "stock", "除權息": "both"}.get(t, "unknown")
+
+
+def _parse_stock_rows(rows, idx, kind_fn, label, min_codes):
+    """Shared row loop for both close endpoints. Row-level problems become ``bad_row`` entries; returns
+    None only when the number of 4-digit codes is below ``min_codes``."""
     out = {}
+    dups = set()
     need = max(idx.values()) + 1
     for row in rows:
         if not isinstance(row, list) or not row:
-            logger.warning("%s: malformed row %r", label, row)
-            return None
+            logger.warning("%s: malformed row without a code skipped: %r", label, row)
+            continue
         code = str(row[0]).strip()
         if not _is_code(code):
             continue
+        if code in out or code in dups:
+            logger.warning("%s: duplicate code %s -> bad_row", label, code)
+            dups.add(code)
+            out[code] = _bad_entry()
+            continue
         if len(row) < need:
-            logger.warning("%s: row for %s has %d columns, need %d", label, code, len(row), need)
-            return None
-        if code in out:
-            logger.warning("%s: duplicate code %s", label, code)
-            return None
+            logger.warning("%s: row for %s has %d columns, need %d -> bad_row", label, code, len(row), need)
+            out[code] = _bad_entry()
+            continue
         try:
             c = _parse_price(row[idx["c"]])
             entry = {
@@ -204,14 +281,16 @@ def _parse_stock_rows(rows, idx, flag_fn, label, min_codes):
                 "v": _parse_volume(row[idx["v"]]),
             }
         except (ValueError, TypeError) as e:
-            logger.warning("%s: unparseable row for %s (%s): %r", label, code, e, row)
-            return None
+            logger.warning("%s: unparseable row for %s (%s) -> bad_row: %r", label, code, e, row)
+            out[code] = _bad_entry()
+            continue
+        kind = kind_fn(row[idx["flag"]])
         if c is None:
-            entry["status"] = "no_close"
-        elif flag_fn(row[idx["flag"]]):
-            entry["status"] = "exright"
+            entry["status"], entry["exright_kind"] = "no_close", None
+        elif kind:
+            entry["status"], entry["exright_kind"] = "exright", kind
         else:
-            entry["status"] = "ok"
+            entry["status"], entry["exright_kind"] = "ok", None
         out[code] = entry
     if len(out) < min_codes:
         logger.warning("%s: only %d 4-digit codes (< %d), treating as missing", label, len(out), min_codes)
@@ -221,14 +300,15 @@ def _parse_stock_rows(rows, idx, flag_fn, label, min_codes):
 
 # --------------------------------------------------------------------------- daily close
 
+@_never_raise(None)
 def fetch_twse_close(date):
     """Whole-market TWSE (listed) close for ``date``; see module docstring. None on failure."""
-    label = "TWSE close %s" % date
-    try:
-        ymd = date.strftime("%Y%m%d")
-    except AttributeError:
+    label = "TWSE close %s" % (date,)
+    date = _as_date(date)
+    if date is None:
         logger.warning("%s: bad date argument", label)
         return None
+    ymd = date.strftime("%Y%m%d")
     j = _get_json(TWSE_CLOSE_URL.format(ymd=ymd), label)
     if j is None:
         return None
@@ -255,20 +335,19 @@ def fetch_twse_close(date):
         logger.warning("%s: unexpected column layout %r", label, table.get("fields"))
         return None
     idx = {"v": 2, "o": 5, "h": 6, "l": 7, "c": 8, "flag": 9}
-    return _parse_stock_rows(table["data"], idx,
-                             lambda cell: _TAG_RE.sub("", str(cell)).strip() == "X",
-                             label, TWSE_MIN_CODES)
+    return _parse_stock_rows(table["data"], idx, _twse_kind, label, TWSE_MIN_CODES)
 
 
+@_never_raise(None)
 def fetch_tpex_close(date):
     """Whole-market TPEx (OTC) close for ``date``; see module docstring. None on failure."""
-    label = "TPEx close %s" % date
-    try:
-        ymd = date.strftime("%Y%m%d")
-        url = TPEX_CLOSE_URL.format(y=date.strftime("%Y"), m=date.strftime("%m"), d=date.strftime("%d"))
-    except AttributeError:
+    label = "TPEx close %s" % (date,)
+    date = _as_date(date)
+    if date is None:
         logger.warning("%s: bad date argument", label)
         return None
+    ymd = date.strftime("%Y%m%d")
+    url = TPEX_CLOSE_URL.format(y=date.strftime("%Y"), m=date.strftime("%m"), d=date.strftime("%d"))
     j = _get_json(url, label)
     if j is None:
         return None
@@ -295,19 +374,19 @@ def fetch_tpex_close(date):
         logger.warning("%s: unexpected column layout %r", label, table.get("fields"))
         return None
     idx = {"c": 2, "flag": 3, "o": 4, "h": 5, "l": 6, "v": 7}
-    return _parse_stock_rows(table["data"], idx, lambda cell: "除" in str(cell),
-                             label, TPEX_MIN_CODES)
+    return _parse_stock_rows(table["data"], idx, _tpex_kind, label, TPEX_MIN_CODES)
 
 
 # --------------------------------------------------------------------------- ex-rights / dividends
 
 def _parse_exright_rows(rows, start, end, label):
-    """rows: [date, code, name, pre_close, ref_price, ...]. Returns dict or None (date out of range)."""
+    """rows: [date, code, name, pre_close, ref_price, ...]. Returns dict, or None when a row date falls
+    outside ``start..end`` (the endpoint may have ignored the range)."""
     out = {}
     for row in rows:
-        if not isinstance(row, list) or len(row) < 5:
-            logger.warning("%s: short/malformed row %r", label, row)
-            return None
+        if not isinstance(row, list) or len(row) < 2:
+            logger.warning("%s: malformed row skipped: %r", label, row)
+            continue
         d = _roc_date(row[0])
         if d is None or not (start <= d <= end):
             logger.warning("%s: row date %r outside requested %s..%s (endpoint may have ignored the range)",
@@ -315,6 +394,9 @@ def _parse_exright_rows(rows, start, end, label):
             return None
         code = str(row[1]).strip()
         if not _is_code(code):
+            continue  # ETFs etc.: skipped before any length check
+        if len(row) < 5:
+            logger.warning("%s: short row for %s skipped: %r", label, code, row)
             continue
         try:
             pre = float(_clean(row[3]))
@@ -325,21 +407,36 @@ def _parse_exright_rows(rows, start, end, label):
         if not (math.isfinite(pre) and math.isfinite(ref) and pre > 0 and ref > 0):
             logger.warning("%s: non-positive prices for %s, row skipped: %r", label, code, row[:5])
             continue
-        out.setdefault((d, code), {"pre_close": pre, "ref_price": ref})
+        if not (0 < ref / pre < EXRIGHT_RATIO_MAX):
+            logger.warning("%s: implausible ref/pre ratio for %s, row dropped: %r", label, code, row[:5])
+            continue
+        if (d, code) in out:
+            logger.warning("%s: duplicate row for %s on %s, keeping the first", label, code, d)
+            continue
+        out[(d, code)] = {"pre_close": pre, "ref_price": ref}
     return out
 
 
+def _range_args(start, end, label):
+    s, e = _as_date(start), _as_date(end)
+    if s is None or e is None:
+        logger.warning("%s: bad date argument", label)
+        return None
+    if s > e:
+        logger.warning("%s: start after end", label)
+        return None
+    return s, e
+
+
+@_never_raise(None)
 def fetch_twse_exright(start, end):
     """TWSE ex-rights/dividend table for ``start..end`` (inclusive). None on failure, {} when no events."""
     label = "TWSE exright %s..%s" % (start, end)
-    try:
-        url = TWSE_EXRIGHT_URL.format(s=start.strftime("%Y%m%d"), e=end.strftime("%Y%m%d"))
-    except AttributeError:
-        logger.warning("%s: bad date argument", label)
+    rng = _range_args(start, end, label)
+    if rng is None:
         return None
-    if start > end:
-        logger.warning("%s: start after end", label)
-        return None
+    start, end = rng
+    url = TWSE_EXRIGHT_URL.format(s=start.strftime("%Y%m%d"), e=end.strftime("%Y%m%d"))
     j = _get_json(url, label)
     if j is None:
         return None
@@ -358,19 +455,17 @@ def fetch_twse_exright(start, end):
     return _parse_exright_rows(j["data"], start, end, label)
 
 
+@_never_raise(None)
 def fetch_tpex_exright(start, end):
     """TPEx ex-rights/dividend table for ``start..end`` (inclusive). None on failure, {} when no events."""
     label = "TPEx exright %s..%s" % (start, end)
-    try:
-        url = TPEX_EXRIGHT_URL.format(
-            sy=start.strftime("%Y"), sm=start.strftime("%m"), sd=start.strftime("%d"),
-            ey=end.strftime("%Y"), em=end.strftime("%m"), ed=end.strftime("%d"))
-    except AttributeError:
-        logger.warning("%s: bad date argument", label)
+    rng = _range_args(start, end, label)
+    if rng is None:
         return None
-    if start > end:
-        logger.warning("%s: start after end", label)
-        return None
+    start, end = rng
+    url = TPEX_EXRIGHT_URL.format(
+        sy=start.strftime("%Y"), sm=start.strftime("%m"), sd=start.strftime("%d"),
+        ey=end.strftime("%Y"), em=end.strftime("%m"), ed=end.strftime("%d"))
     j = _get_json(url, label)
     if j is None:
         return None
@@ -396,17 +491,26 @@ def fetch_tpex_exright(start, end):
 
 # --------------------------------------------------------------------------- adjustment factor
 
+def _num(x):
+    """True for a real finite number (bool excluded)."""
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
+@_never_raise(None)
 def yahoo_adj_ratio(date, code, market):
     """Day adjustment factor from Yahoo adjusted closes (default fallback for ``adj_factor``).
 
-    ``market`` is "twse" (suffix .TW) or "tpex" (suffix .TWO). Factor = (adjclose/close ratio on the previous
-    bar) / (same ratio on ``date``) = ref_price / pre_close when ``date`` is an ex day. Returns None when the
-    data is missing or implausible (> 1.01 or <= 0).
+    ``market`` is "twse" (suffix .TW) or "tpex" (suffix .TWO). Factor = (adjclose/close on the previous bar)
+    / (same ratio on ``date``). Yahoo's ``close`` is already split/stock-dividend adjusted, so the ratio
+    reflects CASH dividends only: it equals ref_price / pre_close on a cash ex-dividend day, but is wrong
+    (about 1.0 or only the cash part) on 除權 / 除權息 days. ``adj_factor`` therefore uses it only for TPEx
+    cash-dividend days. Returns None when the data is missing, non-numeric or implausible (<= 0 or > 1.01).
     """
     label = "Yahoo adj %s %s" % (code, date)
+    date = _as_date(date)
     suffix = {"twse": ".TW", "tpex": ".TWO"}.get(market)
-    if suffix is None:
-        logger.warning("%s: unknown market %r", label, market)
+    if date is None or not isinstance(code, str) or not code or suffix is None:
+        logger.warning("%s: bad arguments (market=%r)", label, market)
         return None
     tz = datetime.timezone(datetime.timedelta(hours=8))
     p1 = datetime.datetime.combine(date - datetime.timedelta(days=10), datetime.time(0, 0), tzinfo=tz)
@@ -422,17 +526,17 @@ def yahoo_adj_ratio(date, code, market):
         stamps = result["timestamp"]
         closes = result["indicators"]["quote"][0]["close"]
         adj = result["indicators"]["adjclose"][0]["adjclose"]
-    except (TypeError, KeyError, IndexError):
+        if not (len(stamps) == len(closes) == len(adj)):
+            logger.warning("%s: Yahoo arrays differ in length", label)
+            return None
+        bars = []  # (date, adjclose/close) for rows with usable values
+        for ts, c, a in zip(stamps, closes, adj):
+            if not (_num(c) and _num(a) and _num(ts)) or c <= 0 or a <= 0:
+                continue
+            bars.append((datetime.datetime.fromtimestamp(ts, tz).date(), a / c))
+    except (TypeError, KeyError, IndexError, ValueError, OverflowError, OSError):
         logger.warning("%s: unexpected Yahoo response shape", label)
         return None
-    if not (len(stamps) == len(closes) == len(adj)):
-        logger.warning("%s: Yahoo arrays differ in length", label)
-        return None
-    bars = []  # (date, adjclose/close) for rows with both values
-    for ts, c, a in zip(stamps, closes, adj):
-        if c is None or a is None or c <= 0 or a <= 0:
-            continue
-        bars.append((datetime.datetime.fromtimestamp(ts, tz).date(), a / c))
     idx = [i for i, (d, _) in enumerate(bars) if d == date]
     if len(idx) != 1 or idx[0] == 0:
         logger.warning("%s: bar for the date or its previous bar missing", label)
@@ -444,17 +548,26 @@ def yahoo_adj_ratio(date, code, market):
     return min(factor, 1.0)
 
 
+@_never_raise((None, "adj_missing"))
 def adj_factor(date, code, exright_tables, fallback=None):
     """Day adjustment factor (ref_price / pre_close) for ``code`` on ``date``.
 
     Returns ``(factor, source)`` with source in {"twse", "tpex", "yahoo", "adj_missing"}:
       * (date, code) in the market's ex-rights table      -> (ref/pre, market)
       * not in the table, quote not flagged exright       -> (1.0, market)
-      * not in the table, quote flagged exright           -> fallback(date, code) -> (f, "yahoo")
-        (``fallback=None`` means the default ``yahoo_adj_ratio``); fallback fails -> (None, "adj_missing")
+      * not in the table, quote flagged exright:
+          - TPEx and ``exright_kind == "cash"`` (除息)    -> fallback(date, code) -> (f, "yahoo"); the
+            fallback (``None`` = default ``yahoo_adj_ratio``) must return 0 < f < 0.9999, else adj_missing
+          - anything else (TWSE X, TPEx 除權 / 除權息, unknown kind) -> (None, "adj_missing"), no fallback
+            (Yahoo cannot represent stock dividends, so its number would be silently wrong)
       * market cannot be determined (code absent from both quote dicts and tables) -> (None, "adj_missing")
     ``exright_tables`` layout: see module docstring.
     """
+    d = _as_date(date)
+    if d is None or not isinstance(code, str):
+        logger.warning("adj_factor: bad arguments %r %r", date, code)
+        return None, "adj_missing"
+    date = d
     tables = exright_tables or {}
     market = None
     for m in ("twse", "tpex"):
@@ -465,7 +578,7 @@ def adj_factor(date, code, exright_tables, fallback=None):
     if market is not None:
         entry = tables[market][(date, code)]
         pre, ref = entry.get("pre_close"), entry.get("ref_price")
-        if pre and ref and pre > 0 and ref > 0:
+        if _num(pre) and _num(ref) and pre > 0 and ref > 0:
             return ref / pre, market
         logger.warning("adj_factor %s %s: bad table entry %r", code, date, entry)
         return None, "adj_missing"
@@ -482,25 +595,36 @@ def adj_factor(date, code, exright_tables, fallback=None):
     if quote.get("status") != "exright":
         return 1.0, market
 
+    kind = quote.get("exright_kind")
+    if market != "tpex" or kind != "cash":
+        logger.warning("adj_factor %s %s: exright day (market=%s kind=%s) missing from the table, "
+                       "no safe fallback", code, date, market, kind)
+        return None, "adj_missing"
+
     try:
         value = fallback(date, code) if fallback is not None else yahoo_adj_ratio(date, code, market)
     except Exception as e:  # a custom fallback must never break the daily job
         logger.warning("adj_factor %s %s: fallback raised %r", code, date, e)
         value = None
-    if value is None or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-        logger.warning("adj_factor %s %s: exright day, table and fallback both failed", code, date)
+    if not _num(value) or not (0 < value < YAHOO_FACTOR_MAX):
+        logger.warning("adj_factor %s %s: cash ex-dividend day, table missing and fallback gave %r",
+                       code, date, value)
         return None, "adj_missing"
     return float(value), "yahoo"
 
 
 # --------------------------------------------------------------------------- trading calendar
 
+@_never_raise(None)
 def fetch_trading_calendar(year):
     """All trading days of ``year`` (Mon-Fri minus TWSE closure days), or None on failure.
 
     Typhoon closures are not in the TWSE table (see module docstring), so they appear as trading days here.
     """
-    label = "TWSE calendar %s" % year
+    label = "TWSE calendar %s" % (year,)
+    if not isinstance(year, int) or isinstance(year, bool) or not (1911 <= year <= 9998):
+        logger.warning("%s: bad year argument", label)
+        return None
     j = _get_json(TWSE_HOLIDAY_URL.format(year=year), label)
     if j is None:
         return None

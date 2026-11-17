@@ -14,6 +14,10 @@ FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "shad
 D = datetime.date(2026, 7, 16)
 DEFAULT_INTERVAL = smd.REQUEST_INTERVAL  # captured before the autouse fixture zeroes it
 DEFAULT_TIMEOUT = smd.TIMEOUT
+DEFAULT_TWSE_MIN = smd.TWSE_MIN_CODES
+DEFAULT_TPEX_MIN = smd.TPEX_MIN_CODES
+DEFAULT_BACKOFF = smd.RETRY_BACKOFF
+BAD_ROW = {"o": None, "h": None, "l": None, "c": None, "v": None, "status": "bad_row", "exright_kind": None}
 
 
 def load(name):
@@ -28,10 +32,26 @@ class FakeResp:
         self.text = text if text is not None else json.dumps(payload, ensure_ascii=False)
 
 
+def twse_synthetic(n):
+    """The real TWSE fixture with its stock table replaced by n synthetic 4-digit rows."""
+    p = load("twse_close_20260716")
+    tpl = next(r for r in p["tables"][1]["data"] if r[0] == "1101")
+    p["tables"][1]["data"] = [[str(1000 + i)] + tpl[1:] for i in range(n)]
+    return p
+
+
+def tpex_synthetic(n):
+    p = load("tpex_close_20260716")
+    tpl = next(r for r in p["tables"][0]["data"] if r[0] == "1240")
+    p["tables"][0]["data"] = [[str(1000 + i)] + tpl[1:] for i in range(n)]
+    return p
+
+
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
     monkeypatch.setattr(smd, "REQUEST_INTERVAL", 0)
     monkeypatch.setattr(smd, "_last_request_at", None)
+    monkeypatch.setattr(smd, "RETRY_BACKOFF", (0.0, 0.0))
     # The fixtures are shrunk (38 four-digit codes), so lower the size gates; the gates themselves are
     # tested separately with the real thresholds.
     monkeypatch.setattr(smd, "TWSE_MIN_CODES", 30)
@@ -65,9 +85,9 @@ class TestTwseClose:
         assert "0050" in res and "006208" not in res and "00400A" not in res
         assert all(len(c) == 4 and c.isdigit() for c in res)
         row = res["1101"]
-        assert set(row) == {"o", "h", "l", "c", "v", "status"}
+        assert set(row) == {"o", "h", "l", "c", "v", "status", "exright_kind"}
         assert isinstance(row["c"], float) and isinstance(row["v"], int)
-        assert row["status"] == "ok"
+        assert row["status"] == "ok" and row["exright_kind"] is None
         url, kw = calls[0]
         assert "date=20260716" in url and "type=ALLBUT0999" in url
         assert kw["timeout"] == 40 and kw["headers"]["User-Agent"] == "Mozilla/5.0"
@@ -84,6 +104,8 @@ class TestTwseClose:
         assert res["1102"]["status"] == "exright"
         assert res["1102"]["c"] == 33.0
         assert res["2382"]["status"] == "exright"
+        assert res["1102"]["exright_kind"] == "unknown"  # X cannot tell cash from stock
+        assert res["5236"]["status"] == "exright"
 
     def test_no_close(self, serve):
         serve(load("twse_close_20260716"))
@@ -112,22 +134,39 @@ class TestTwseClose:
         assert smd.fetch_twse_close(datetime.date(2026, 7, 18)) is None
 
     def test_too_few_codes_with_real_threshold(self, serve, monkeypatch):
-        monkeypatch.setattr(smd, "TWSE_MIN_CODES", 900)
-        serve(load("twse_close_20260716"))  # only 38 four-digit codes
+        monkeypatch.setattr(smd, "TWSE_MIN_CODES", 1000)
+        serve(load("twse_close_20260716"))  # only ~40 four-digit codes
         assert smd.fetch_twse_close(D) is None
+
+    def test_default_thresholds(self):
+        assert DEFAULT_TWSE_MIN == 1000 and DEFAULT_TPEX_MIN == 800
 
     def test_threshold_boundary(self, serve, monkeypatch):
         serve(load("twse_close_20260716"))
-        monkeypatch.setattr(smd, "TWSE_MIN_CODES", 38)
+        n = len(smd.fetch_twse_close(D))
+        monkeypatch.setattr(smd, "TWSE_MIN_CODES", n)
         assert smd.fetch_twse_close(D) is not None
-        monkeypatch.setattr(smd, "TWSE_MIN_CODES", 39)
+        monkeypatch.setattr(smd, "TWSE_MIN_CODES", n + 1)
         assert smd.fetch_twse_close(D) is None
 
-    def test_short_row_returns_none(self, serve):
-        p = load("twse_close_20260716")
-        p["tables"][1]["data"][5] = p["tables"][1]["data"][5][:9]  # drops the change column
-        serve(p)
+    def test_truncated_below_real_threshold_returns_none(self, serve, monkeypatch):
+        monkeypatch.setattr(smd, "TWSE_MIN_CODES", DEFAULT_TWSE_MIN)
+        serve(twse_synthetic(1000))
+        assert len(smd.fetch_twse_close(D)) == 1000
+        serve(twse_synthetic(999))  # truncated response
         assert smd.fetch_twse_close(D) is None
+        serve(twse_synthetic(910))  # the old threshold (900) would have let this through
+        assert smd.fetch_twse_close(D) is None
+
+    def test_short_row_becomes_bad_row(self, serve):
+        p = load("twse_close_20260716")
+        data = p["tables"][1]["data"]
+        i = next(i for i, r in enumerate(data) if r[0] == "1101")
+        data[i] = data[i][:9]  # drops the change column
+        serve(p)
+        res = smd.fetch_twse_close(D)
+        assert res["1101"] == BAD_ROW
+        assert res["2330"]["status"] == "ok" and res["1102"]["status"] == "exright"
 
     def test_too_few_columns_in_header_returns_none(self, serve):
         p = load("twse_close_20260716")
@@ -142,17 +181,24 @@ class TestTwseClose:
         serve(p)
         assert smd.fetch_twse_close(D) is None
 
-    def test_garbage_price_returns_none(self, serve):
+    def test_garbage_price_becomes_bad_row(self, serve, caplog):
         p = load("twse_close_20260716")
-        p["tables"][1]["data"][5][8] = "N/A"
+        for r in p["tables"][1]["data"]:
+            if r[0] == "1101":
+                r[8] = "N/A"
         serve(p)
-        assert smd.fetch_twse_close(D) is None
+        with caplog.at_level("WARNING", logger="shadow_market_data"):
+            res = smd.fetch_twse_close(D)
+        assert res["1101"] == BAD_ROW and res["2330"]["c"] == 2470.0
+        assert any("bad_row" in r.message for r in caplog.records)
 
-    def test_duplicate_code_returns_none(self, serve):
+    def test_duplicate_code_becomes_bad_row(self, serve):
         p = load("twse_close_20260716")
-        p["tables"][1]["data"].append(copy.deepcopy(p["tables"][1]["data"][4]))
+        data = p["tables"][1]["data"]
+        data.append(copy.deepcopy(next(r for r in data if r[0] == "2330")))
         serve(p)
-        assert smd.fetch_twse_close(D) is None
+        res = smd.fetch_twse_close(D)
+        assert res["2330"] == BAD_ROW and res["1102"]["status"] == "exright"
 
     def test_stock_table_missing_returns_none(self, serve):
         p = load("twse_close_20260716")
@@ -191,6 +237,59 @@ class TestTwseClose:
         assert seen["resp"].encoding == "utf-8"
 
 
+class TestRetry:
+    def _seq(self, monkeypatch, outcomes):
+        calls = []
+
+        def fake_get(url, **kw):
+            o = outcomes[min(len(calls), len(outcomes) - 1)]
+            calls.append(url)
+            if isinstance(o, Exception):
+                raise o
+            return o
+        monkeypatch.setattr(smd.requests, "get", fake_get)
+        return calls
+
+    def test_connection_error_then_success(self, monkeypatch):
+        import requests
+        calls = self._seq(monkeypatch, [requests.ConnectionError("x"), FakeResp(load("twse_close_20260716"))])
+        assert smd.fetch_twse_close(D) is not None and len(calls) == 2
+
+    def test_timeout_then_success(self, monkeypatch):
+        import requests
+        calls = self._seq(monkeypatch, [requests.Timeout("x"), requests.Timeout("y"),
+                                        FakeResp(load("twse_close_20260716"))])
+        assert smd.fetch_twse_close(D) is not None and len(calls) == 3
+
+    def test_5xx_then_success(self, monkeypatch):
+        calls = self._seq(monkeypatch, [FakeResp({}, status=503), FakeResp(load("twse_close_20260716"))])
+        assert smd.fetch_twse_close(D) is not None and len(calls) == 2
+
+    def test_gives_up_after_two_retries(self, monkeypatch):
+        calls = self._seq(monkeypatch, [FakeResp({}, status=500)])
+        assert smd.fetch_twse_close(D) is None
+        assert len(calls) == 3
+
+    def test_4xx_not_retried(self, monkeypatch):
+        calls = self._seq(monkeypatch, [FakeResp({}, status=404)])
+        assert smd.fetch_twse_close(D) is None and len(calls) == 1
+
+    def test_bad_json_not_retried(self, monkeypatch):
+        calls = self._seq(monkeypatch, [FakeResp(text="<html>")])
+        assert smd.fetch_twse_close(D) is None and len(calls) == 1
+
+    def test_backoff_waits(self, monkeypatch):
+        slept = []
+        monkeypatch.setattr(smd, "RETRY_BACKOFF", (3.0, 6.0))
+        monkeypatch.setattr(smd.time, "sleep", lambda s: slept.append(s))
+        self._seq(monkeypatch, [FakeResp({}, status=502)])
+        smd.fetch_twse_close(D)
+        assert 3.0 in slept and 6.0 in slept
+
+    def test_default_backoff(self):
+        assert DEFAULT_BACKOFF == (3.0, 6.0)
+
+
 # ------------------------------------------------------------------ TPEx close
 
 class TestTpexClose:
@@ -201,7 +300,8 @@ class TestTpexClose:
         assert "00679B" not in res
         assert all(len(c) == 4 and c.isdigit() for c in res)
         row = res["1240"]
-        assert row == {"o": 55.4, "h": 55.5, "l": 55.3, "c": 55.5, "v": 10000, "status": "ok"}
+        assert row == {"o": 55.4, "h": 55.5, "l": 55.3, "c": 55.5, "v": 10000,
+                       "status": "ok", "exright_kind": None}
         url, kw = calls[0]
         assert "date=2026%2F07%2F16" in url and "type=EW" in url
         assert "stk_quote_result" not in url
@@ -217,14 +317,17 @@ class TestTpexClose:
         serve(load("tpex_close_20260716"))
         res = smd.fetch_tpex_close(D)
         assert res["1777"]["status"] == "exright" and res["1777"]["c"] == 72.0  # 除息
-        assert res["2755"]["status"] == "exright"  # 除權息
-        assert res["6488"]["status"] == "exright"
+        assert res["1777"]["exright_kind"] == "cash"
+        assert res["2755"]["status"] == "exright" and res["2755"]["exright_kind"] == "both"  # 除權息
+        assert res["6703"]["status"] == "exright" and res["6703"]["exright_kind"] == "stock"  # 除權
+        assert res["6488"]["status"] == "exright" and res["6488"]["exright_kind"] == "cash"
 
     def test_no_close(self, serve):
         serve(load("tpex_close_20260716"))
         row = smd.fetch_tpex_close(D)["2752"]
         assert row["c"] is None and row["status"] == "no_close" and row["v"] == 0
         assert row["o"] is None and row["h"] is None and row["l"] is None
+        assert row["exright_kind"] is None
 
     def test_date_mismatch_returns_none(self, serve):
         p = load("tpex_close_20260716")
@@ -243,15 +346,27 @@ class TestTpexClose:
         assert smd.fetch_tpex_close(datetime.date(2026, 7, 18)) is None
 
     def test_too_few_codes_with_real_threshold(self, serve, monkeypatch):
-        monkeypatch.setattr(smd, "TPEX_MIN_CODES", 700)
+        monkeypatch.setattr(smd, "TPEX_MIN_CODES", 800)
         serve(load("tpex_close_20260716"))
         assert smd.fetch_tpex_close(D) is None
 
-    def test_short_row_returns_none(self, serve):
-        p = load("tpex_close_20260716")
-        p["tables"][0]["data"][3] = p["tables"][0]["data"][3][:6]
-        serve(p)
+    def test_truncated_below_real_threshold_returns_none(self, serve, monkeypatch):
+        monkeypatch.setattr(smd, "TPEX_MIN_CODES", DEFAULT_TPEX_MIN)
+        serve(tpex_synthetic(800))
+        assert len(smd.fetch_tpex_close(D)) == 800
+        serve(tpex_synthetic(799))
         assert smd.fetch_tpex_close(D) is None
+        serve(tpex_synthetic(710))  # the old threshold (700) would have let this through
+        assert smd.fetch_tpex_close(D) is None
+
+    def test_short_row_becomes_bad_row(self, serve):
+        p = load("tpex_close_20260716")
+        data = p["tables"][0]["data"]
+        i = next(i for i, r in enumerate(data) if r[0] == "1240")
+        data[i] = data[i][:6]
+        serve(p)
+        res = smd.fetch_tpex_close(D)
+        assert res["1240"] == BAD_ROW and res["1777"]["status"] == "exright"
 
     def test_header_with_too_few_columns_returns_none(self, serve):
         p = load("tpex_close_20260716")
@@ -267,11 +382,21 @@ class TestTpexClose:
         serve(FakeResp(text="not json"))
         assert smd.fetch_tpex_close(D) is None
 
-    def test_garbage_volume_returns_none(self, serve):
+    def test_garbage_volume_becomes_bad_row(self, serve):
         p = load("tpex_close_20260716")
-        p["tables"][0]["data"][3][7] = "abc"
+        for r in p["tables"][0]["data"]:
+            if r[0] == "1240":
+                r[7] = "abc"
         serve(p)
-        assert smd.fetch_tpex_close(D) is None
+        res = smd.fetch_tpex_close(D)
+        assert res["1240"] == BAD_ROW and res["6488"]["c"] == 1370.0
+
+    def test_duplicate_code_becomes_bad_row(self, serve):
+        p = load("tpex_close_20260716")
+        data = p["tables"][0]["data"]
+        data.append(copy.deepcopy(next(r for r in data if r[0] == "1240")))
+        serve(p)
+        assert smd.fetch_tpex_close(D)["1240"] == BAD_ROW
 
 
 # ------------------------------------------------------------------ ex-rights tables
@@ -331,11 +456,50 @@ class TestExright:
         serve({"stat": "something else"})
         assert smd.fetch_twse_exright(D, D) is None
 
-    def test_short_row_returns_none(self, serve):
+    def test_short_4digit_row_is_dropped(self, serve):
         p = load("twse_exright_20260716")
-        p["data"][0] = p["data"][0][:4]
+        i = next(i for i, r in enumerate(p["data"]) if r[1] == "2382")
+        p["data"][i] = p["data"][i][:4]
         serve(p)
-        assert smd.fetch_twse_exright(D, D) is None
+        res = smd.fetch_twse_exright(D, D)
+        assert (D, "2382") not in res and (D, "1102") in res
+
+    def test_short_non_4digit_row_does_not_fail_whole_table(self, serve):
+        p = load("twse_exright_20260716")
+        i = next(i for i, r in enumerate(p["data"]) if r[1] == "006208")
+        p["data"][i] = p["data"][i][:2]  # ETF row cut short: skipped before any length check
+        serve(p)
+        res = smd.fetch_twse_exright(D, D)
+        assert res is not None and (D, "1102") in res
+        p = load("tpex_exright_20260716")
+        i = next(i for i, r in enumerate(p["tables"][0]["data"]) if r[1] == "00694B")
+        p["tables"][0]["data"][i] = p["tables"][0]["data"][i][:2]
+        serve(p)
+        assert (D, "1777") in smd.fetch_tpex_exright(D, D)
+
+    def test_duplicate_row_keeps_first_and_warns(self, serve, caplog):
+        p = load("twse_exright_20260716")
+        dup = copy.deepcopy(next(r for r in p["data"] if r[1] == "1102"))
+        dup[3], dup[4] = "50.00", "40.00"
+        p["data"].append(dup)
+        serve(p)
+        with caplog.at_level("WARNING", logger="shadow_market_data"):
+            res = smd.fetch_twse_exright(D, D)
+        assert res[(D, "1102")] == {"pre_close": 34.8, "ref_price": 32.5}
+        assert any("duplicate" in r.message for r in caplog.records)
+
+    def test_implausible_ratio_row_dropped_with_warning(self, serve, caplog):
+        p = load("tpex_exright_20260716")
+        for r in p["tables"][0]["data"]:
+            if r[1] == "1777":
+                r[4] = "200.00"  # ratio 2.66
+            if r[1] == "1785":
+                r[4] = "242.00"  # 121 * 2 = 242: ratio exactly 2.0 is outside the open interval
+        serve(p)
+        with caplog.at_level("WARNING", logger="shadow_market_data"):
+            res = smd.fetch_tpex_exright(D, D)
+        assert (D, "1777") not in res and (D, "1785") not in res and (D, "2755") in res
+        assert any("implausible" in r.message for r in caplog.records)
 
     def test_bad_price_row_is_skipped_not_fatal(self, serve):
         p = load("tpex_exright_20260716")
@@ -385,9 +549,9 @@ class TestAdjFactor:
         assert smd.adj_factor(D, "2330", t) == (1.0, "twse")
         assert smd.adj_factor(D, "1240", t) == (1.0, "tpex")
 
-    def test_fallback_used_when_table_lacks_exright_code(self, serve):
+    def test_tpex_cash_table_missing_uses_fallback(self, serve):
         t = real_tables(serve)
-        del t["tpex"][(D, "1777")]  # table lost the row, but the quote still says 除息
+        del t["tpex"][(D, "1777")]  # table lost the row, quote still says 除息 (cash)
         got = []
 
         def fb(d, c):
@@ -396,17 +560,57 @@ class TestAdjFactor:
         assert smd.adj_factor(D, "1777", t, fallback=fb) == (0.947, "yahoo")
         assert got == [(D, "1777")]
 
-    def test_fallback_used_when_whole_table_failed(self, serve):
+    def test_tpex_cash_whole_table_failed_uses_fallback(self, serve):
         t = real_tables(serve)
         t["tpex"] = None  # fetch_tpex_exright failed
         assert smd.adj_factor(D, "1777", t, fallback=lambda d, c: 0.95) == (0.95, "yahoo")
-        # ... but a normal stock does not trigger the fallback
+        # a normal stock does not trigger the fallback
         assert smd.adj_factor(D, "1240", t, fallback=lambda d, c: pytest.fail("must not be called")) == (1.0, "tpex")
 
     def test_fallback_not_called_when_table_has_code(self, serve):
         t = real_tables(serve)
         f, src = smd.adj_factor(D, "1102", t, fallback=lambda d, c: pytest.fail("must not be called"))
         assert src == "twse"
+
+    def test_flag_exright_but_fallback_returns_one_is_adj_missing(self, serve):
+        t = real_tables(serve)
+        t["tpex"] = None
+        assert smd.adj_factor(D, "1777", t, fallback=lambda d, c: 1.0) == (None, "adj_missing")
+        assert smd.adj_factor(D, "1777", t, fallback=lambda d, c: 0.9999) == (None, "adj_missing")
+        assert smd.adj_factor(D, "1777", t, fallback=lambda d, c: 0.99989) == (0.99989, "yahoo")
+
+    def test_tpex_stock_dividend_day_never_uses_fallback(self, serve):
+        t = real_tables(serve)
+        assert t["tpex_close"]["6703"]["exright_kind"] == "stock"
+        assert t["tpex_close"]["2755"]["exright_kind"] == "both"
+        # with the table present both come from the table (real values: 6703 117 -> 106.36, 2755 137.5 -> 107.54)
+        assert smd.adj_factor(D, "6703", t) == (pytest.approx(106.36 / 117.0), "tpex")
+        assert smd.adj_factor(D, "2755", t) == (pytest.approx(107.54 / 137.5), "tpex")
+        for code in ("6703", "2755"):
+            del t["tpex"][(D, code)]  # table lost the rows
+            assert smd.adj_factor(D, code, t, fallback=lambda d, c: pytest.fail("must not be called")) \
+                == (None, "adj_missing")
+        t["tpex"] = None  # whole table failed
+        assert smd.adj_factor(D, "6703", t, fallback=lambda d, c: pytest.fail("must not be called")) \
+            == (None, "adj_missing")
+
+    def test_default_yahoo_not_called_for_stock_dividend(self, serve, monkeypatch):
+        t = real_tables(serve)
+        t["tpex"] = None
+        monkeypatch.setattr(smd, "yahoo_adj_ratio", lambda d, c, m: pytest.fail("must not be called"))
+        assert smd.adj_factor(D, "6703", t) == (None, "adj_missing")
+
+    def test_twse_x_missing_from_table_is_adj_missing(self, serve, monkeypatch):
+        t = real_tables(serve)
+        # 5236 is flagged X in the close table but is absent from TWT49U (real 2026-07-16 case)
+        assert (D, "5236") not in t["twse"] and t["twse_close"]["5236"]["status"] == "exright"
+        assert smd.adj_factor(D, "5236", t, fallback=lambda d, c: pytest.fail("must not be called")) \
+            == (None, "adj_missing")
+        # the default Yahoo fallback is not consulted for TWSE either (it returned exactly 1.0 for 5236)
+        monkeypatch.setattr(smd, "yahoo_adj_ratio", lambda d, c, m: pytest.fail("must not be called"))
+        assert smd.adj_factor(D, "5236", t) == (None, "adj_missing")
+        t["twse"] = None
+        assert smd.adj_factor(D, "1102", t, fallback=lambda d, c: 0.93) == (None, "adj_missing")
 
     def test_adj_missing_when_fallback_returns_none(self, serve):
         t = real_tables(serve)
@@ -424,8 +628,16 @@ class TestAdjFactor:
     def test_adj_missing_when_fallback_returns_garbage(self, serve):
         t = real_tables(serve)
         t["tpex"] = None
-        assert smd.adj_factor(D, "1777", t, fallback=lambda d, c: float("nan")) == (None, "adj_missing")
-        assert smd.adj_factor(D, "1777", t, fallback=lambda d, c: -1.0) == (None, "adj_missing")
+        for bad in (float("nan"), -1.0, "0.9", True):
+            assert smd.adj_factor(D, "1777", t, fallback=lambda d, c, b=bad: b) == (None, "adj_missing")
+
+    def test_quote_without_kind_is_adj_missing(self):
+        tab = make_tables(tpex_ex={}, tpex_close={"1777": {"c": 72.0, "status": "exright"}})
+        assert smd.adj_factor(D, "1777", tab, fallback=lambda d, c: 0.95) == (None, "adj_missing")
+
+    def test_datetime_argument_is_accepted(self, serve):
+        t = real_tables(serve)
+        assert smd.adj_factor(datetime.datetime(2026, 7, 16, 9, 30), "1102", t)[1] == "twse"
 
     def test_adj_missing_when_code_unknown(self, serve):
         t = real_tables(serve)
@@ -445,10 +657,6 @@ class TestAdjFactor:
         monkeypatch.setattr(smd, "yahoo_adj_ratio", lambda d, c, m: seen.append((d, c, m)) or 0.9469)
         assert smd.adj_factor(D, "1777", t) == (0.9469, "yahoo")
         assert seen == [(D, "1777", "tpex")]
-        seen.clear()
-        t["twse"] = None
-        smd.adj_factor(D, "1102", t)
-        assert seen == [(D, "1102", "twse")]
 
     def test_no_close_exright_not_applicable(self):
         tab = make_tables(twse_close={"1213": {"c": None, "status": "no_close"}}, twse_ex={})
@@ -483,6 +691,21 @@ class TestYahooAdjRatio:
 
     def test_unknown_market_returns_none(self):
         assert smd.yahoo_adj_ratio(D, "1777", "nyse") is None
+
+    def test_non_numeric_values_return_none(self, serve):
+        p = load("yahoo_chart_1777_two")
+        p["chart"]["result"][0]["indicators"]["quote"][0]["close"][7] = "abc"
+        serve(p)
+        assert smd.yahoo_adj_ratio(D, "1777", "tpex") is None
+        p = load("yahoo_chart_1777_two")
+        p["chart"]["result"][0]["indicators"]["adjclose"][0]["adjclose"][7] = {"x": 1}
+        serve(p)
+        assert smd.yahoo_adj_ratio(D, "1777", "tpex") is None
+
+    def test_datetime_argument_is_accepted(self, serve):
+        serve(load("yahoo_chart_1777_two"))
+        r = smd.yahoo_adj_ratio(datetime.datetime(2026, 7, 16, 13, 30), "1777", "tpex")
+        assert r == pytest.approx(71.3 / 75.3, rel=1e-5)
 
     def test_implausible_factor_returns_none(self, serve):
         p = load("yahoo_chart_1777_two")
@@ -579,6 +802,60 @@ class TestCalendar:
         calls = serve(load("holidays_2026"))
         smd.fetch_trading_calendar(2026)
         assert "holidaySchedule" in calls[0][0] and "date=2026" in calls[0][0]
+
+
+# ------------------------------------------------------------------ public functions never raise
+
+class TestNeverRaise:
+    def test_datetime_is_converted_to_date(self, serve):
+        calls = serve(load("twse_close_20260716"))
+        assert smd.fetch_twse_close(datetime.datetime(2026, 7, 16, 8, 0)) is not None
+        assert "date=20260716" in calls[0][0]
+        serve(load("tpex_close_20260716"))
+        assert smd.fetch_tpex_close(datetime.datetime(2026, 7, 16, 8, 0)) is not None
+        assert "date=2026%2F07%2F16" in calls[-1][0]
+        serve(load("twse_exright_20260716"))
+        assert smd.fetch_twse_exright(datetime.datetime(2026, 7, 16, 8, 0), datetime.datetime(2026, 7, 16, 9, 0))
+        serve(load("tpex_exright_20260716"))
+        assert smd.fetch_tpex_exright(datetime.datetime(2026, 7, 16, 8, 0), D)
+
+    @pytest.mark.parametrize("bad", [None, "2026-07-16", 20260716, 3.5, object()])
+    def test_bad_types_return_none(self, serve, bad):
+        serve(load("twse_close_20260716"))
+        assert smd.fetch_twse_close(bad) is None
+        assert smd.fetch_tpex_close(bad) is None
+        assert smd.fetch_twse_exright(bad, D) is None
+        assert smd.fetch_tpex_exright(D, bad) is None
+        assert smd.yahoo_adj_ratio(bad, "1777", "tpex") is None
+        assert smd.adj_factor(bad, "1777", {}) == (None, "adj_missing")
+
+    @pytest.mark.parametrize("bad", [None, "2026", 2026.0, True, 12, object()])
+    def test_bad_year_returns_none(self, serve, bad):
+        serve(load("holidays_2026"))
+        assert smd.fetch_trading_calendar(bad) is None
+
+    def test_unexpected_exception_is_swallowed(self, monkeypatch, caplog):
+        def boom(*a, **k):
+            raise RuntimeError("kaboom")
+        monkeypatch.setattr(smd, "_get_json", boom)
+        with caplog.at_level("WARNING", logger="shadow_market_data"):
+            assert smd.fetch_twse_close(D) is None
+            assert smd.fetch_tpex_close(D) is None
+            assert smd.fetch_twse_exright(D, D) is None
+            assert smd.fetch_tpex_exright(D, D) is None
+            assert smd.fetch_trading_calendar(2026) is None
+            assert smd.yahoo_adj_ratio(D, "1777", "tpex") is None
+        assert any("kaboom" in r.message for r in caplog.records)
+
+    def test_non_dict_json_returns_none(self, serve):
+        for payload in ([], "str", 5, None):
+            serve(payload)
+            assert smd.fetch_twse_close(D) is None
+            assert smd.fetch_tpex_close(D) is None
+            assert smd.fetch_twse_exright(D, D) is None
+            assert smd.fetch_tpex_exright(D, D) is None
+            assert smd.fetch_trading_calendar(2026) is None
+            assert smd.yahoo_adj_ratio(D, "1777", "tpex") is None
 
 
 # ------------------------------------------------------------------ throttle
