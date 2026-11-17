@@ -59,12 +59,14 @@ Rows (each dict has "file" and, where applicable, "candidate")
 --------------------------------------------------------------
 daily:       date, written_at, nav, ret, cash, holdings, frozen, flags, supersedes
 rebalances:  kind ("start"|"rebalance"), nominal_date, signal_asof, fill_date, written_at,
-             ranking, targets, frozen, orders, cost, s2_coverage, supersedes
+             ranking, targets, frozen, orders, cost, s2_coverage, flags, supersedes
 benchmark:   date, adj_close, ret, source, flags, written_at, supersedes
 meta:        written_at + the full ``state["meta"]`` (overwrite-style, meta/state.json)
 Rows are emitted in the order: rebalances, daily, benchmark, meta.
-Daily flags: missing_day, rebalance_deferred, adj_missing:<code>, delisted_exit:<code>,
-late_fill (added by ``mark_superseded``).
+Daily flags: missing_day, rebalance_deferred, s2_status_missing, rebalance_skipped_all_frozen,
+adj_missing:<code>, delisted_exit:<code>, late_fill (added by ``mark_superseded``).
+Rebalance-row flags: rebalance_skipped_all_frozen (nothing tradable: no order, cost 0).
+``prices={}`` (an empty dict, not None) is a data day on which every held code has no close.
 """
 import copy
 import math
@@ -92,6 +94,7 @@ DEFERRAL_LIMIT = 5                # A5: one rebalance deferred > 5 trading days 
 RETRY_DAYS = 3                    # A5d-1
 JUDGMENT_RETRY_DAYS = 10          # A5d-7
 START_DEFER_LIMIT = 10            # A5d-8
+SKIP_TOLERANCE = 1e-6             # yuan: tradable funds at/below this = nothing to trade
 PRICE_OK = ("ok", "exright")      # statuses that carry a valid close (no_close / bad_row do not)
 
 
@@ -169,6 +172,17 @@ def _set_judgment_date(meta, cal):
         meta["judgment_date"] = sr.judgment_date(_d(meta["start_date"]), cal).isoformat()
     except ValueError:
         meta["judgment_date"] = None
+
+
+def _refresh_judgment_date(meta, cal):
+    """A5d-7: recompute the judgment date from the calendar of the current step (the final TWSE
+    holiday table replaces the provisional one; this is not a rule change).  A calendar too short
+    to answer leaves the previous value untouched."""
+    try:
+        new = sr.judgment_date(_d(meta["start_date"]), cal).isoformat()
+    except ValueError:
+        return
+    meta["judgment_date"] = new
 
 
 def _add_retry(meta, cal, d, days=RETRY_DAYS):
@@ -273,8 +287,14 @@ def rebalance_due(state, d, calendar, s2_status=None):
 
 def _rebalance(st, name, prices, ranking, nominal_date, fill_date, written_at, kind, s2_cov):
     """Rebalance one candidate at today's close and return the rebalances row.
-    cs["nav"] must already be marked to market.  Cost is paid from cash (A5e-3)."""
+    cs["nav"] must already be marked to market.  Cost is paid from cash (A5e-3).
+    Raises ValueError when the ranking was not computed strictly before the fill date (look-ahead)."""
     cs = st["candidates"][name]
+    # ASSUMPTION: a ranking without "asof" cannot be shown to be free of look-ahead, so it is
+    # rejected like one whose asof is on/after the fill date (caller bug, never silent).
+    asof = ranking.get("asof")
+    if asof is None or _d(asof) >= _d(fill_date):
+        raise ValueError(f"{name}: ranking asof {asof!r} must be before the fill date {fill_date}")
     frozen_vals = {c: v for c, v in cs["holdings"].items() if st["frozen_days"].get(c, 0) >= FREEZE_FROM_DAY}
     frozen = frozenset(frozen_vals)
     nav_pre = cs["nav"]
@@ -286,26 +306,38 @@ def _rebalance(st, name, prices, ranking, nominal_date, fill_date, written_at, k
                                      n=N_SLOTS, frozen=frozen)
     else:
         targets = sr.select_uncapped(ranked, n=N_SLOTS, frozen=frozen)
-    orders = sr.rebalance_orders(cs["holdings"], targets, nav_pre, frozen_vals)
-    each = _r4((nav_pre - sum(frozen_vals.values())) / len(targets)) if targets else 0.0
-    new_holdings = dict(frozen_vals)
-    for code in targets:
-        new_holdings[code] = each
-        if code not in cs["holdings"]:          # newly bought: price base is today's close
-            st["last_close"][code] = _close(prices, code)
-            st["acc_factor"][code] = 1.0
+    investable = nav_pre - sum(frozen_vals.values())
+    flags = []
+    # ASSUMPTION: when nothing is tradable (no target slot left, or the frozen holdings take all of
+    # the nav: with the slightly negative cash of A5e-3 they can exceed it) the rebalance is a
+    # no-op, A5c-5's "k = slots -> do not touch", and counts as done.  Also applies when no
+    # ranked code has a close today.
+    if not targets or investable <= SKIP_TOLERANCE:
+        flags.append("rebalance_skipped_all_frozen")
+        targets = []
+        orders = {"buys": {}, "sells": {}, "cost": 0.0}
+        new_holdings = dict(cs["holdings"])
+    else:
+        orders = sr.rebalance_orders(cs["holdings"], targets, nav_pre, frozen_vals)
+        each = _r4(investable / len(targets))
+        new_holdings = dict(frozen_vals)
+        for code in targets:
+            new_holdings[code] = each
+            if code not in cs["holdings"]:          # newly bought: price base is today's close
+                st["last_close"][code] = _close(prices, code)
+                st["acc_factor"][code] = 1.0
     cs["holdings"] = _sorted_dict(new_holdings)
     cost = _r4(orders["cost"])
     cs["cash"] = _r4(nav_pre - sum(cs["holdings"].values()) - cost)
     cs["nav"] = _r4(sum(cs["holdings"].values()) + cs["cash"])
     cs["pending_rebalance"] = None
     return {"file": "rebalances", "candidate": name, "kind": kind,
-            "nominal_date": nominal_date, "signal_asof": ranking.get("asof"), "fill_date": fill_date,
+            "nominal_date": nominal_date, "signal_asof": asof, "fill_date": fill_date,
             "written_at": written_at, "ranking": copy.deepcopy(list(ranking.get("detail") or [])),
             "targets": list(targets), "frozen": sorted(frozen),
             "orders": {"buys": {c: _r4(v) for c, v in orders["buys"].items()},
                        "sells": {c: _r4(v) for c, v in orders["sells"].items()}},
-            "cost": cost, "s2_coverage": copy.deepcopy(s2_cov), "supersedes": None}
+            "cost": cost, "s2_coverage": copy.deepcopy(s2_cov), "flags": flags, "supersedes": None}
 
 
 def _has_ranking(rankings, name):
@@ -367,8 +399,7 @@ def step(state, inputs):
         raise ValueError(f"{d} is not in the supplied trading calendar")
     meta_before = copy.deepcopy(meta)
     _prune_retry(meta, d.isoformat())
-    if meta["judgment_date"] is None:       # the calendar at lock time may not reach it yet (A5e-9)
-        _set_judgment_date(meta, cal)
+    _refresh_judgment_date(meta, cal)       # provisional calendar -> final calendar (A5d-7, A5e-9)
     if meta["status"] == "not_started":
         rows = _step_pre_start(st, inputs, d, cal)
     else:
@@ -404,7 +435,8 @@ def _step_pre_start(st, inp, d, cal):
     # ASSUMPTION: the start needs the whole-market closes, a 0050 close (its start base) and a
     # ranking for every candidate; if any is missing the whole start is deferred together
     # (A5c-1 only mentions missing whole-market data) and the day is not counted as missing.
-    ready = (prices is not None and inp.get("benchmark_close") is not None
+    # (An empty prices dict is treated as not ready: nothing could be bought.)
+    ready = (bool(prices) and inp.get("benchmark_close") is not None
              and all(_has_ranking(rankings, c) for c in CANDIDATES))
     if not ready:
         if iso not in meta["start_wait"]:
@@ -455,6 +487,10 @@ def _step_active(st, inp, d, cal):
     missing = prices is None
     adj = inp.get("adj") or {}
     rankings = inp.get("rankings") or {}
+    # F10: S2 still waiting for its month's rebalance, from the 12th on, and no s2_status supplied.
+    month_key = f"{d.year:04d}-{d.month:02d}"
+    s2_status_missing = (inp.get("s2_status") is None and month_key not in meta["s2"]
+                         and d >= sr.first_trading_day_on_or_after(cal, d.year, d.month, sr.S2_EARLIEST_DAY))
     _mark_nominals(st, d, cal, inp.get("s2_status"))
     prev_nav = {c: st["candidates"][c]["nav"] for c in CANDIDATES}
     pre_trade_nav = {}
@@ -471,6 +507,18 @@ def _step_active(st, inp, d, cal):
     if missing:
         # A5: whole-market missing day: keep holdings, value at old prices (return 0).  The
         # per-code frozen counters are paused (A5c-5): no counter is touched on this branch.
+        # The ex-rights table is a separate endpoint and may exist on such a day: its factors are
+        # accumulated like those of a suspension (A5e-8) so the next data day shows no fake drop.
+        miss_adj = set()
+        for code in sorted(_held_union(st)):
+            if code in adj:
+                if adj[code] is None or not adj[code] > 0:
+                    miss_adj.add(code)
+                else:
+                    st["acc_factor"][code] = st["acc_factor"][code] * float(adj[code])
+        for name in CANDIDATES:
+            pre_flags[name] = [f"adj_missing:{c}" for c in sorted(miss_adj)
+                               if c in st["candidates"][name]["holdings"]]
         meta["missing_days"].append(iso)
         meta["missing_total"] += 1
         meta["consecutive_missing"] += 1
@@ -492,7 +540,10 @@ def _step_active(st, inp, d, cal):
         adj_missing = set()
         ratios = {}
         for code in sorted(_held_union(st)):
-            raw = adj.get(code, 1.0)
+            if code in adj:
+                raw = adj[code]
+            else:   # absent = 1.0, except an ex-rights row without any factor (F7): adj_missing
+                raw = None if (prices.get(code) or {}).get("status") == "exright" else 1.0
             if raw is None or not raw > 0:
                 adj_missing.add(code)           # A5d-6: raw price return, flagged
                 factor = 1.0
@@ -548,6 +599,9 @@ def _step_active(st, inp, d, cal):
         was_deferred = (cs["pending_rebalance"] is not None
                         or any(r["candidate"] == name and r["nominal_date"] != iso for r in rebalance_rows))
         flags = (["missing_day"] if missing else []) + (["rebalance_deferred"] if was_deferred else [])
+        if name == S2_NAME and s2_status_missing:
+            flags.append("s2_status_missing")
+        flags += [f for r in rebalance_rows if r["candidate"] == name for f in r["flags"]]
         flags += pre_flags[name] + delist_flags[name]
         ret = _ret(cs["nav"], prev_nav[name]) if cs["nav"] != prev_nav[name] else 0.0
         cs["rets"].append(ret)
@@ -608,21 +662,43 @@ def final_report(state, grace_elapsed=False):
 # Correction series helpers (A5d-1 / ledger format section 1)
 # --------------------------------------------------------------------------- #
 
-def _row_date(row):
-    return row.get("date") or row.get("fill_date")
+def _supersede_key(row):
+    """Key of a row inside its own file: rebalances by nominal_date, the others by date."""
+    return row["nominal_date"] if row["file"] == "rebalances" else row["date"]
+
+
+def supersede_index(original_rows):
+    """Build the `superseded_written_at` argument of ``mark_superseded`` from the rows being
+    replaced: {file: {date or nominal_date: {candidate: written_at}}} (benchmark: written_at str).
+    Uses the effective (newest) original row per key."""
+    index = {}
+    for file in ("daily", "rebalances", "benchmark"):
+        for row in effective_rows(original_rows, file):
+            slot = index.setdefault(file, {})
+            if file == "benchmark":
+                slot[_supersede_key(row)] = row["written_at"]
+            else:
+                slot.setdefault(_supersede_key(row), {})[row["candidate"]] = row["written_at"]
+    return index
 
 
 def mark_superseded(rows, superseded_written_at):
     """Copy of `rows` (a re-run's output) with ``supersedes`` set on daily / rebalances / benchmark
-    rows, and the ``late_fill`` flag added to daily rows.  `superseded_written_at` is either one
-    string for every row or a {date: written_at of the original row} dict; a date without an
-    original row stays ``supersedes: None``.  Meta rows are overwrite-style and left alone."""
+    rows to the written_at of the original row of the SAME file (and candidate) and the same date
+    (rebalances: the same nominal_date, whatever the original fill date was), and the ``late_fill``
+    flag added to daily rows.  `superseded_written_at` is one string for every row, or the dict
+    from ``supersede_index``; a row without an original stays ``supersedes: None``.  Meta rows are
+    overwrite-style and left alone."""
     out = []
     for row in rows:
         row = copy.deepcopy(row)
         if row.get("file") in ("daily", "rebalances", "benchmark"):
-            w = (superseded_written_at if isinstance(superseded_written_at, str)
-                 else superseded_written_at.get(_row_date(row)))
+            if isinstance(superseded_written_at, str):
+                w = superseded_written_at
+            else:
+                w = superseded_written_at.get(row["file"], {}).get(_supersede_key(row))
+                if isinstance(w, dict):
+                    w = w.get(row["candidate"])
             row["supersedes"] = w
             if row["file"] == "daily" and w is not None and "late_fill" not in row["flags"]:
                 row["flags"].append("late_fill")

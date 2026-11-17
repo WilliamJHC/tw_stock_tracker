@@ -55,6 +55,8 @@ def px(overrides=None, base=100.0):
             out[code] = {"c": None, "status": "no_close"}
         elif v == "bad":
             out[code] = {"c": None, "status": "bad_row"}
+        elif isinstance(v, tuple):                      # ("exright", price)
+            out[code] = {"c": v[1], "status": v[0]}
         elif v == "absent":
             del out[code]
         else:
@@ -71,24 +73,26 @@ def default_rank(name, d, shift=0):
 class Sim:
     """Drives `step` day by day; asserts invariants and JSON round trips on every step."""
 
-    def __init__(self, state=None, primary=None, start=START):
+    def __init__(self, state=None, primary=None, start=START, cal_iso=None):
+        self.cal_iso = cal_iso or CAL_ISO
         self.state = state if state is not None else sp.new_state(start, CAL, primary or PRIMARY)
         self.rows = []
         self.log = []                      # (date, rows) per step
 
     def inputs(self, d, prices, adj, bench, s2, rankings, written_at):
-        return {"date": d.isoformat(), "calendar": CAL_ISO, "prices": prices, "adj": adj or {},
+        return {"date": d.isoformat(), "calendar": self.cal_iso, "prices": prices, "adj": adj or {},
                 "benchmark_close": bench, "rankings": rankings or {}, "s2_status": s2,
                 "written_at": written_at or f"{d.isoformat()}T07:00:00"}
 
-    def day(self, d, prices="default", adj=None, bench=100.0, s2=None, rank_fn=None,
+    def day(self, d, prices="default", adj=None, bench=100.0, s2="default", rank_fn=None,
             rankings=None, written_at=None):
-        if prices == "default":
+        if isinstance(prices, str) and prices == "default":
             prices = px()
-        s2 = s2 if s2 is not None else {"complete": False, "ratio": 0.5}
+        if isinstance(s2, str):                          # "default"; pass s2=None for "not supplied"
+            s2 = {"complete": False, "ratio": 0.5}
         if rankings is None:
             fn = rank_fn or (lambda name, dd: default_rank(name, dd))
-            rankings = {c: fn(c, d) for c in sp.rebalance_due(self.state, d, CAL_ISO, s2)}
+            rankings = {c: fn(c, d) for c in sp.rebalance_due(self.state, d, self.cal_iso, s2)}
         inp = json.loads(json.dumps(self.inputs(d, prices, adj, bench, s2, rankings, written_at)))
         before = json.loads(json.dumps(self.state))
         new_state, rows = sp.step(before, inp)
@@ -503,6 +507,10 @@ def test_frozen_holding_is_not_sold_and_takes_a_slot_at_rebalance():
     assert d["holdings"]["1000"] == sim.rows_of("daily", S0, date(2026, 12, 31))[0]["holdings"]["1000"]
     assert len(d["holdings"]) == 20 and d["frozen"] == ["1000"]
     assert "1000" not in r["orders"]["sells"] and "1000" not in r["orders"]["buys"]
+    # literal: nav before = 1,000,000 - 1,313.5 buy cost; each name gets (nav - frozen) / (20 - 1)
+    each = 49930.8684                                                  # = (998686.5 - 50000) / 19
+    assert all(d["holdings"][c] == each for c in CODES[1:20]) and d["holdings"]["1000"] == 50000.0
+    assert d["cash"] == pytest.approx(-r["cost"], abs=0.02)
 
 
 def test_frozen_holding_counts_toward_its_industry_cap_in_s3():
@@ -733,10 +741,20 @@ def test_catch_up_rerun_fills_at_the_nominal_close_and_is_not_a_missing_day():
     assert (r["nominal_date"], r["fill_date"]) == ("2027-01-04", "2027-01-04")
     assert fixed.cand(S0)["holdings"]["1020"] == pytest.approx(fixed.cand(S0)["holdings"]["1021"] * 1.2, abs=1e-3)
 
-    originals = {r["date"]: r["written_at"] for r in first.rows if r["file"] == "daily"}
-    corrected = sp.mark_superseded(fixed.rows, originals)
+    corrected = sp.mark_superseded(fixed.rows, sp.supersede_index(first.rows))
     cd = [r for r in corrected if r["file"] == "daily" and r["candidate"] == S0]
     assert [r["supersedes"] for r in cd] == ["2027-01-05T07:00:00", "2027-01-05T07:00:01"]
+    # F8: each file points at the original row of the SAME file: the corrected rebalance (nominal
+    # and fill 1/4) replaces the provisional one that was filled on 1/5, not the 1/4 daily row.
+    cr = [r for r in corrected if r["file"] == "rebalances" and r["candidate"] == S0]
+    orig_r = [r for r in first.rows if r["file"] == "rebalances" and r["candidate"] == S0]
+    assert len(cr) == len(orig_r) == 1 and orig_r[0]["fill_date"] == "2027-01-05"
+    assert cr[0]["supersedes"] == orig_r[0]["written_at"] == "2027-01-05T07:00:01"
+    assert cr[0]["supersedes"] != cd[0]["supersedes"]
+    cb = [r for r in corrected if r["file"] == "benchmark"]
+    assert [r["supersedes"] for r in cb] == ["2027-01-05T07:00:00", "2027-01-05T07:00:01"]
+    assert all(r["supersedes"] is not None for r in corrected if r["file"] in ("daily", "rebalances")
+               and r["candidate"] in (S0, S1, S3))
     assert all("late_fill" in r["flags"] for r in cd)
     assert all("supersedes" not in r for r in corrected if r["file"] == "meta")
     assert not any("late_fill" in r["flags"] for r in fixed.rows if r["file"] == "daily")   # input untouched
@@ -919,8 +937,7 @@ def test_judgment_day_missing_then_repaired_by_a_rerun(year):
               s2=s2_year(date(2027, 11, 30)), rank_fn=year_rank, written_at="2027-12-02T07:00:00")
     rep2 = sp.final_report(fixed.state)
     assert rep2["judgment_data_complete"] is True and rep2["impaired"] is False
-    orig = {r["date"]: r["written_at"] for r in sim.rows_of("daily", S0)}
-    corrected = sp.mark_superseded(fixed.rows, orig)
+    corrected = sp.mark_superseded(fixed.rows, sp.supersede_index(sim.rows))
     merged = sim.rows + corrected
     eff = sp.effective_rows(merged, "daily", S0)
     assert eff[-1]["date"] == "2027-11-30"
@@ -934,3 +951,194 @@ def test_judgment_date_recomputes_when_calendar_was_too_short():
     sim = Sim(state=st)
     sim.day(START)
     assert sim.meta()["judgment_date"] == "2027-11-30"                    # the full calendar arrives with the inputs
+
+
+# --------------------------------------------------------------------------- #
+# Review fixes: F1 all-frozen rebalance, F2 provisional calendar, F5 extra mutation guards,
+# F6 / F7 ex-rights factors, F9 look-ahead guard, F10 missing s2_status
+# --------------------------------------------------------------------------- #
+
+def test_f1_all_holdings_frozen_on_a_rebalance_day_is_a_noop_not_a_crash():
+    sim = started()
+    to_jan3(sim)
+    before = {n: copy.deepcopy(sim.cand(n)) for n in sp.CANDIDATES}
+    rows = sim.day(JAN4, prices=px({c: None for c in CODES[:20]}))       # nav < sum(frozen): cash is -1313.5
+    for name in (S0, S1, S3):
+        r = reb(rows, name)[0]
+        assert r["flags"] == ["rebalance_skipped_all_frozen"] and r["cost"] == 0.0
+        assert r["orders"] == {"buys": {}, "sells": {}} and r["targets"] == [] and len(r["frozen"]) == 20
+        d = daily(rows, name)
+        assert d["holdings"] == before[name]["holdings"] and d["cash"] == before[name]["cash"]
+        assert d["nav"] == before[name]["nav"] and d["ret"] == 0.0
+        assert "rebalance_skipped_all_frozen" in d["flags"] and len(d["frozen"]) == 20
+        assert sim.cand(name)["pending_rebalance"] is None             # counts as done
+    assert reb(rows, S2) == []
+
+
+def test_f1_empty_prices_dict_means_every_holding_has_no_close_not_a_missing_day():
+    sim = started()
+    nav0 = sim.cand(S0)["nav"]
+    rows = sim.day(D2, prices={})
+    assert sim.meta()["missing_total"] == 0 and sim.meta()["consecutive_missing"] == 0
+    assert sim.state["frozen_days"] == {c: 1 for c in CODES[:20]}
+    assert daily(rows, S0)["nav"] == nav0 and daily(rows, S0)["flags"] == []
+    sim2 = started()
+    to_jan3(sim2)
+    rows = sim2.day(JAN4, prices={})                                      # rebalance day, nothing has a close
+    assert reb(rows, S0)[0]["flags"] == ["rebalance_skipped_all_frozen"]
+    assert sim2.meta()["missing_total"] == 0
+
+
+def test_f1_empty_prices_on_the_start_day_do_not_start():
+    sim = Sim()
+    sim.day(START, prices={})
+    assert sim.meta()["status"] == "not_started"
+
+
+def test_f2_judgment_date_follows_the_final_calendar(year):
+    _, after = year
+    final_cal = [d for d in CAL if d != date(2027, 11, 30)]               # 11/30 turns out to be a holiday
+    sim = Sim(state=copy.deepcopy(after["2027-11-19"]), cal_iso=[d.isoformat() for d in final_cal])
+    assert sim.meta()["judgment_date"] == "2027-11-30"                    # provisional
+    sim.day(date(2027, 11, 22), s2=s2_year(date(2027, 11, 22)), rank_fn=year_rank)
+    assert sim.meta()["judgment_date"] == "2027-11-29" and sim.meta()["status"] == "active"
+    for d in trading_days(date(2027, 11, 23), date(2027, 11, 29)):
+        sim.day(d, s2=s2_year(d), rank_fn=year_rank)
+    assert sim.meta()["status"] == "ended" and sim.meta()["judgment"]["date"] == "2027-11-29"
+    assert sp.final_report(sim.state)["judgment_date"] == "2027-11-29"
+    assert sp.is_judgment_day(sim.state, "2027-11-29") and not sp.is_judgment_day(sim.state, "2027-11-30")
+
+
+def test_f2_short_calendar_keeps_the_previous_judgment_date():
+    sim = started()
+    short = [d.isoformat() for d in CAL if d <= date(2027, 6, 30)]
+    sim.cal_iso = short
+    sim.day(D2)
+    assert sim.meta()["judgment_date"] == "2027-11-30"
+
+
+def test_f5b_exright_status_row_has_a_close_and_its_factor_applies():
+    sim = started()
+    nav0 = sim.cand(S0)["nav"]
+    rows = sim.day(D2, prices=px({"1000": ("exright", 95.0)}), adj={"1000": 0.95})
+    r = daily(rows, S0)
+    assert r["frozen"] == [] and r["holdings"]["1000"] == 50000.0 and r["nav"] == nav0
+    assert r["flags"] == [] and sim.state["frozen_days"] == {}
+
+
+def test_f5c_non_positive_factor_is_adj_missing():
+    for bad in (0.0, -0.5):
+        sim = started()
+        rows = sim.day(D2, prices=px({"1000": 95.0}), adj={"1000": bad})
+        r = daily(rows, S0)
+        assert r["holdings"]["1000"] == 47500.0 and r["flags"] == ["adj_missing:1000"]
+
+
+def test_f5d_absent_s2_status_means_not_complete_and_is_flagged_f10():
+    sim = Sim()
+    sim.day(START, s2=None)
+    for d in trading_days(date(2026, 12, 2), date(2026, 12, 24)):
+        sim.day(d, s2=None, rank_fn=lambda n, dd: default_rank(n, dd, shift=3))
+    rows = s2_rebalance_rows(sim)
+    assert [r["fill_date"] for r in rows] == ["2026-12-21"]               # only the forced day
+    assert rows[0]["s2_coverage"] == {"ratio": None, "complete_day": None, "forced": True}
+    flagged = [d.isoformat() for d, rr in sim.log if "s2_status_missing" in daily(rr, S2)["flags"]]
+    assert flagged == [d.isoformat() for d in trading_days(date(2026, 12, 14), date(2026, 12, 21))]
+    for name in (S0, S1, S3):                                             # only S2's row carries it
+        assert all("s2_status_missing" not in daily(rr, name)["flags"] for _, rr in sim.log)
+    # supplied status: no flag
+    sim2 = Sim()
+    sim2.day(START)
+    sim2.run(trading_days(date(2026, 12, 2), date(2026, 12, 18)))
+    assert all("s2_status_missing" not in daily(rr, S2)["flags"] for _, rr in sim2.log)
+
+
+def test_f5e_market_missing_day_still_uses_the_0050_close():
+    sim = started()
+    rows = sim.day(D2, prices=None, bench=105.0)
+    b = next(r for r in rows if r["file"] == "benchmark")
+    assert b["adj_close"] == 105.0 and b["ret"] == pytest.approx(0.05)
+    assert b["flags"] == ["missing_day"] and b["source"] == "yahoo"
+
+
+def test_f5f_pending_rebalance_is_not_overridden_by_a_new_nominal_day():
+    sim = started()
+    to_jan3(sim)
+    days = trading_days(JAN4, date(2027, 1, 29))
+    for d in days:                                                        # S0 never gets a ranking in January
+        due = sp.rebalance_due(sim.state, d, CAL_ISO, {"complete": False, "ratio": 0.5})
+        sim.day(d, rankings={c: default_rank(c, d) for c in due if c != S0})
+    assert sim.cand(S0)["pending_rebalance"]["nominal_date"] == "2027-01-04"
+    feb1 = date(2027, 2, 1)
+    assert sr.first_trading_day(CAL, 2027, 2) == feb1
+    rows = sim.day(feb1)                                                  # a new nominal day arrives
+    assert sim.cand(S0)["pending_rebalance"] is None
+    s0_rows = [r for r in sim.rows if r["file"] == "rebalances" and r["candidate"] == S0 and r["kind"] == "rebalance"]
+    assert [(r["nominal_date"], r["fill_date"]) for r in s0_rows] == [("2027-01-04", "2027-02-01")]   # one rebalance only
+    assert len(reb(rows, S1)) == 1 and reb(rows, S1)[0]["nominal_date"] == "2027-02-01"
+
+
+def test_f6_ex_rights_factor_on_a_missing_data_day_is_not_lost():
+    sim = started()
+    nav0 = sim.cand(S0)["nav"]
+    rows = sim.day(D2, prices=None, adj={"1000": 0.95})                  # TWT49U answered, the close endpoint did not
+    assert daily(rows, S0)["nav"] == nav0 and daily(rows, S0)["flags"] == ["missing_day"]
+    assert sim.state["acc_factor"]["1000"] == pytest.approx(0.95) and "1001" in sim.state["acc_factor"]
+    assert sim.state["acc_factor"]["1001"] == 1.0
+    rows = sim.day(D3, prices=px({"1000": 95.0}))                        # the dividend is already inside 95
+    assert daily(rows, S0)["holdings"]["1000"] == pytest.approx(50000.0, abs=1e-3)
+    assert daily(rows, S0)["nav"] == nav0 and sim.state["acc_factor"]["1000"] == 1.0
+    # without the table the drop would be (wrongly) booked: documents the old behaviour
+    sim2 = started()
+    sim2.day(D2, prices=None)
+    rows = sim2.day(D3, prices=px({"1000": 95.0}))
+    assert daily(rows, S0)["holdings"]["1000"] == 47500.0
+
+
+def test_f6_adj_missing_on_a_missing_day_is_flagged_for_holders_only():
+    sim = started()
+    rows = sim.day(D2, prices=None, adj={"1000": None, "1030": None})
+    assert daily(rows, S0)["flags"] == ["missing_day", "adj_missing:1000"]
+
+
+def test_f7_exright_status_without_a_factor_is_adj_missing():
+    sim = started()
+    rows = sim.day(D2, prices=px({"1000": ("exright", 95.0)}), adj={})
+    r = daily(rows, S0)
+    assert r["holdings"]["1000"] == 47500.0 and r["flags"] == ["adj_missing:1000"]
+    rows = sim.day(D3, prices=px({"1000": ("exright", 95.0), "1001": ("exright", 100.0)}), adj={"1001": None})
+    assert daily(rows, S0)["flags"] == ["adj_missing:1000", "adj_missing:1001"]
+    rows = sim.day(D4, prices=px({"1000": 95.0}))                         # plain "ok" row and no entry: factor 1.0
+    assert daily(rows, S0)["flags"] == []
+
+
+def test_f9_ranking_not_before_the_fill_date_is_rejected():
+    sim = started()
+    to_jan3(sim)
+    for bad in ("2027-01-04", "2027-01-05", None):
+        rk = default_rank(S0, JAN4)
+        rk["asof"] = bad
+        rankings = {c: default_rank(c, JAN4) for c in (S1, S3)}
+        rankings[S0] = rk
+        before = copy.deepcopy(sim.state)
+        with pytest.raises(ValueError):
+            sp.step(sim.state, sim.inputs(JAN4, px(), None, 100.0, {"complete": False}, rankings, "w"))
+        assert sim.state == before
+    good = default_rank(S0, JAN4)
+    assert good["asof"] == "2026-12-31"
+    # a deferred rebalance needs an asof before the (later) fill date, not the nominal date
+    sim.day(JAN4, prices=None)
+    rk = default_rank(S0, JAN4)
+    rk["asof"] = "2027-01-04"                                             # >= nominal but < fill (1/5): allowed
+    rankings = {c: default_rank(c, JAN4) for c in (S1, S3)}
+    rankings[S0] = rk
+    sim.day(date(2027, 1, 5), rankings=rankings)
+    assert reb(sim.rows, S0)[-1]["signal_asof"] == "2027-01-04"
+
+
+def test_f9_start_day_ranking_must_also_precede_the_fill():
+    sim = Sim()
+    rankings = {c: default_rank(c, START) for c in sp.CANDIDATES}
+    rankings[S1]["asof"] = START.isoformat()
+    with pytest.raises(ValueError):
+        sp.step(sim.state, sim.inputs(START, px(), None, 100.0, None, rankings, "w"))
