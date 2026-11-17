@@ -78,3 +78,12 @@ step(state: dict, inputs: dict) -> (new_state: dict, rows: list[dict])
 2. 同一組輸入重跑兩次，輸出逐位元相同。
 3. 重放（只用 ledger 存的輸入）與原 ledger 的 `nav`、`ret` 一致。
 4. `daily.jsonl` 同一 `date` 有多列時，最新一列的 `supersedes` 指向被取代的列。
+
+## 6. 實作後更新（2026-11-17；以 `src/shadow_portfolio.py` 的模組 docstring 為準）
+階段 2 實作與審查後，上面各節有以下差異，**實作為準**：
+1. `step` 的 `inputs` 欄位名：`adj`（不是 `adj_factors`）、`rankings`（不是 `ranking_by_candidate`）、`s2_status`（`{"complete","ratio"}`，每天都要給，缺資料日也要）、`benchmark_close`；沒有 `prev_prices`（用 state 內的 `last_close`）；選填 `benchmark_source`。
+2. `state` 頂層有 `frozen_days`、`last_close`、`acc_factor`（三者跨候選共用，以代號為鍵），每候選有 `holdings`／`cash`／`nav`／`rets`／`pending_rebalance`。這些**不在 ledger 列裡**，所以重建 state 靠 `snapshots/<日期>.json`（處理完該日後的完整 state，階段 3 新增，全部保留）或從起始日重放。
+3. `rebalances` 列新增 `kind`（`start`／`rebalance`）、`frozen`、`flags`（如 `rebalance_skipped_all_frozen`）；`benchmark` 列新增 `flags`（`carry_forward`、`missing_day`）與 `supersedes`；daily flags 新增 `s2_status_missing`、`rebalance_skipped_all_frozen`、`adj_missing:<code>`。
+4. `mark_superseded(rows, index)` 的 `index` 由 `supersede_index(original_rows)` 產生，鍵為「檔案＋日期（rebalances 用 `nominal_date`）」；舊的「`{date: written_at}`」用法已移除。
+5. 階段 3 新增的目錄：`snapshots/`、`rankings/<日期>.json`（當日 07:00 算好存檔的各候選排名與 `asof`）、`s2/<日期>.json`。
+6. `state.meta` 新增 `status`（`not_started`／`active`／`void`／`ended`）、`start_date`、`start_wait`、`start_history`、`judgment_date`、`impaired_reasons`、`judgment`。
