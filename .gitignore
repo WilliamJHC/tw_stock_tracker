@@ -11,3 +11,4 @@ logs/
 .claude/hookify.*.local.md
 legacy/
 output/
+shadow_ledger/
