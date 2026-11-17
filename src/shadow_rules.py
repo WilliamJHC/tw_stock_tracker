@@ -6,10 +6,11 @@ No I/O, no network, standard library only.  Everything here is a deterministic
 function of its arguments so the ledger state machine can be replayed.
 
 Conventions
-  - "calendar" is a set (or any iterable) of datetime.date trading days.  It must
-    cover every month the call needs, including the neighbouring month for
-    "previous trading day" lookups; a calendar that is truncated mid-month gives
-    a wrong "first trading day", and this module cannot detect that.
+  - "calendar" is a set (or any iterable) of datetime.date trading days.
+    ASSUMPTION: the caller supplies a calendar that covers every month the call
+    needs, including the neighbouring month for "previous trading day" lookups.
+    A missing month raises ValueError, but a calendar truncated mid-month gives
+    a wrong "first trading day" and this module cannot detect that.
   - Money is in TWD (yuan) as float.
   - Strings are compared by Unicode code point (Python str ordering).
 
@@ -19,7 +20,7 @@ one reading had to be chosen; they are listed in the hand-off report.
 import math
 from bisect import bisect_left, bisect_right
 from collections.abc import Mapping
-from datetime import date
+from datetime import date, datetime
 
 # --------------------------------------------------------------------------- #
 # Constants fixed by the spec
@@ -177,10 +178,13 @@ def _merged_categories(raw):
     """Alias-merged, non-industry-label-free, "其他"-free category set of one code."""
     if raw is None:
         return set()
-    if isinstance(raw, str):  # guard: a bare string would otherwise be iterated per character
+    # ASSUMPTION: a bare string instead of a list is one label (a bare string would
+    # otherwise be iterated per character).
+    if isinstance(raw, str):
         raw = [raw]
     out = set()
     for label in raw:
+        # ASSUMPTION: empty / None labels are ignored.
         if not label:
             continue
         label = ALIASES.get(label, label)
@@ -201,6 +205,9 @@ def primary_industry(industries, universe):
     the merge (union, not a sum over spellings) -> take the category with the
     fewest members, ties by smallest name (Unicode code point).  A code with no
     candidate left (only non-industry labels / "其他" / no entry) gets "其他"."""
+    # ASSUMPTION: only universe codes are returned (codes that appear in
+    # `industries` but not in `universe` are neither counted nor returned), and a
+    # universe code with no entry in `industries` is treated as having no category.
     merged = {code: _merged_categories(industries.get(code)) for code in universe}
     counts = {}
     for cats in merged.values():
@@ -227,8 +234,11 @@ def select_with_cap(ranked, primary, cap=4, n=20, frozen=frozenset()):
 
     Frozen holdings (A5d-5) occupy one of the n slots each and count toward their
     industry's cap before anything else is picked; they are never returned.
-    Returns the new non-frozen targets, at most n - len(frozen) of them (fewer if
-    `ranked` runs out).  `ranked` order is taken as given (use rank_top first)."""
+    Returns the new non-frozen targets, at most n - len(frozen) of them.
+    ASSUMPTION: when `ranked` (or the cap) leaves fewer candidates than slots, the
+    shorter list is returned as is; the caller then equal-weights the fewer names
+    (see rebalance_orders) instead of leaving cash for the missing slots.
+    `ranked` order is taken as given (use rank_top first)."""
     slots = n - len(frozen)
     if slots <= 0:
         return []
@@ -254,8 +264,10 @@ def select_with_cap(ranked, primary, cap=4, n=20, frozen=frozenset()):
 def select_uncapped(ranked, n=20, frozen=frozenset()):
     """Uncapped candidates (S0-S2) with frozen holdings (A5c-5): k frozen codes
     take k slots, the rest of the target is the first n - k non-frozen codes of
-    `ranked`.  Not part of the pinned interface; added because A5c-5 applies to
-    every candidate, not only the capped one."""
+    `ranked`.
+    ASSUMPTION: this function is not part of the pinned interface; it is added
+    because A5c-5 (frozen holdings take slots) applies to every candidate, not
+    only the capped one.  As in select_with_cap, a short `ranked` yields fewer names."""
     slots = n - len(frozen)
     if slots <= 0:
         return []
@@ -309,7 +321,12 @@ def rebalance_orders(current, target_codes, total_nav, frozen_values={}):
     costs nothing) and is paid from cash by the caller.
     ASSUMPTION: because targets are sized on pre-cost NAV, a fully invested book
     ends with cash of about -cost after the trades (cash + holdings = NAV - cost
-    holds exactly).  This function does not clamp; the ledger decides how to book it."""
+    holds exactly).  This function does not clamp; the ledger decides how to book it.
+    ASSUMPTION: if fewer than n targets are given (short ranking, cap exhausted),
+    the investable amount is equal-weighted over the fewer names, not reserved as cash.
+    ASSUMPTION: invalid input raises ValueError (duplicate targets, a frozen code
+    among the targets, frozen value above total_nav); an empty target list sells
+    every non-frozen holding and buys nothing."""
     targets = list(target_codes)
     if len(set(targets)) != len(targets):
         raise ValueError("target_codes contains duplicates")
@@ -347,24 +364,32 @@ def revenue_target(today):
 
 
 def _attempt_date(value):
+    """Date part of a revenue_attempt stamp: datetime, date, "YYYY-MM-DD" or an ISO
+    string with a time ("YYYY-MM-DDTHH:MM:SS...", date part taken as written, no
+    timezone conversion).  None if it cannot be parsed."""
+    if isinstance(value, datetime):       # check first: datetime is a subclass of date
+        return value.date()
     if isinstance(value, date):
         return value
     try:
-        return date.fromisoformat(str(value))
+        return date.fromisoformat(str(value).strip()[:10])
     except ValueError:
-        return None  # ASSUMPTION: an unparseable attempt stamp does not count as done
+        # ASSUMPTION: an unparseable attempt stamp does not count as done.
+        return None
 
 
-def revenue_refresh_complete(fund_refresh_by_code, today, target):
+def revenue_refresh_complete(fund_refresh_by_code, today):
     """A5d-4.  Returns (ratio >= 90%, ratio).
 
     fund_refresh_by_code: {code: fund_refresh dict} for the universe codes that are
     currently not skipped (an empty dict is allowed and counts as not done).
-    A code is done when fr["revenue"] == target (an "insufficient" outcome is also
-    stamped, so it counts) or fr["revenue_attempt"] is on/after the 11th of
-    today's month.  Failed codes (no stamp) stay in the denominator.
-    ASSUMPTION: an empty universe returns (False, 0.0); the spec defines no such case."""
+    The target month is revenue_target(today).
+    A code is done when fr["revenue"] == that target (an "insufficient" outcome is
+    also stamped, so it counts) or fr["revenue_attempt"] is on/after the 11th of
+    today's month.  Failed codes (no stamp) stay in the denominator."""
+    target = revenue_target(today)
     total = len(fund_refresh_by_code)
+    # ASSUMPTION: an empty universe returns (False, 0.0); the spec defines no such case.
     if total == 0:
         return False, 0.0
     threshold = date(today.year, today.month, REVENUE_ATTEMPT_DAY)
@@ -379,7 +404,8 @@ def revenue_refresh_complete(fund_refresh_by_code, today, target):
             d = _attempt_date(attempt)
             if d is not None and d >= threshold:
                 done += 1
-    # Integer comparison avoids float edge cases at exactly 90%.
+    # ASSUMPTION: integer comparison (done*100 >= total*90) so that exactly 90% is
+    # complete without float edge cases; the spec only says ">= 90%".
     return done * 100 >= total * round(REVENUE_COMPLETE_RATIO * 100), done / total
 
 
@@ -403,7 +429,13 @@ def s2_rebalance_day(calendar, year, month, complete_by_day):
     complete_by_day: dict {date: bool} (may be filled partially by a day-by-day
     caller) or a callable date -> bool.  A day that is missing from the dict (or
     for which the callable returns None) is undecided, so the result is None
-    as long as no earlier day has already settled it."""
+    as long as no earlier day has already settled it.
+    ASSUMPTION (undecided days): a day missing from the dict / None from the
+    callable means "not known yet", so no later day may settle the result.
+    ASSUMPTION (forced day): on the forced day the function returns it without
+    consulting complete_by_day (it is forced whatever the coverage); recording the
+    actual coverage on that day (A5b-2) is the ledger layer's separate call to
+    revenue_refresh_complete."""
     days = _sorted_days(calendar)
     start = first_trading_day_on_or_after(days, year, month, S2_EARLIEST_DAY)
     forced = s2_forced_day(days, year, month)

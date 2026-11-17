@@ -2,7 +2,7 @@
 """Tests for src/shadow_rules.py.  Synthetic calendars and data only; no network.
 Every group maps to a boundary that the spec (A1/A3/A5b/A5c/A5d) argued about."""
 import random
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -83,6 +83,28 @@ def test_trading_days_between_excludes_start_includes_end():
     assert sr.trading_days_between(CAL, date(2026, 12, 5), date(2026, 12, 6)) == 0
 
 
+def test_trading_days_between_third_trading_day_after_T():
+    # A5d-1: "T 之後第 3 個交易日" is the day d with trading_days_between(T, d) == 3.
+    T = date(2026, 12, 17)                                   # Thu
+    third = sr.next_trading_day(CAL, sr.next_trading_day(CAL, sr.next_trading_day(CAL, T)))
+    assert third == date(2026, 12, 22)                       # Fri 18, Mon 21, Tue 22
+    assert sr.trading_days_between(CAL, T, third) == 3
+    assert sr.trading_days_between(CAL, T, date(2026, 12, 21)) == 2
+    assert sr.trading_days_between(CAL, T, date(2026, 12, 23)) == 4
+
+
+def test_trading_days_between_single_deferral_over_5_days():
+    # A5 / A5b-8: "單次換倉順延超過 5 個交易日" means
+    #   trading_days_between(nominal rebalance day, executed day) > 5.
+    nominal = date(2026, 12, 14)                             # Mon
+    assert sr.trading_days_between(CAL, nominal, date(2026, 12, 21)) == 5   # 5th trading day later: not > 5
+    assert not sr.trading_days_between(CAL, nominal, date(2026, 12, 21)) > 5
+    assert sr.trading_days_between(CAL, nominal, date(2026, 12, 22)) == 6   # 6th: exceeds the limit
+    assert sr.trading_days_between(CAL, nominal, date(2026, 12, 22)) > 5
+    # weekends and holidays in between do not count (12/31 Thu -> 2027-01-04 Mon, 1/1 closed)
+    assert sr.trading_days_between(CAL, date(2026, 12, 31), date(2027, 1, 4)) == 1
+
+
 def test_calendar_accepts_list_and_is_order_independent():
     shuffled = list(CAL)
     random.Random(1).shuffle(shuffled)
@@ -116,11 +138,53 @@ def test_judgment_date_is_never_a_first_day_or_s2_day():
         assert j.day >= 12
 
 
+def _realistic_calendar(seed):
+    """Weekdays 2026-11..2029-03 minus ~4% random weekday closures, plus a 13-day
+    new-year closure starting in the first 8 days of a random Jan/Feb of each year
+    (shape of the real TWSE table: the long closure never reaches past mid-month).
+    Edge case outside this shape: if every trading day from the 12th (or 20th) to
+    month end were closed except the last one, that last day would be both the
+    judgment date and S2's day, so A3's guarantee has this (unrealistic) hole."""
+    rng = random.Random(seed)
+    hol = set()
+    d = date(2026, 11, 1)
+    while d <= date(2029, 3, 31):
+        if d.weekday() < 5 and rng.random() < 0.04:
+            hol.add(d)
+        d += timedelta(days=1)
+    for y in (2027, 2028, 2029):
+        first = date(y, rng.choice([1, 2]), rng.randint(1, 8))
+        hol.update(span(first, first + timedelta(days=12)))
+    return make_calendar(date(2026, 11, 1), date(2029, 3, 31), holidays=hol)
+
+
+@pytest.mark.parametrize("cal", [CAL | make_calendar(date(2028, 3, 1), date(2029, 3, 31))] + [_realistic_calendar(k) for k in range(40)])
+def test_a3_judgment_date_is_never_any_candidates_rebalance_day(cal):
+    """A3 guarantee: the judgment date can never be a rebalance day of S0/S1/S3 (first
+    trading day of a month) nor of S2 (first trading day with day >= 12, or the forced 20th)."""
+    starts = [sr.first_trading_day(cal, y, m) for (y, m) in
+              [(2026, 12)] + [(2027, k) for k in range(1, 12)]]
+    for start in starts:
+        j = sr.judgment_date(start, cal)
+        target_first = sr.first_trading_day(cal, start.year + 1, start.month)
+        # independent construction: the trading day immediately before the target month's first one
+        assert j in cal and j < target_first
+        assert sr.next_trading_day(cal, j) == target_first
+        # and it is not a rebalance day of the month it lies in
+        assert j != sr.first_trading_day(cal, j.year, j.month)
+        assert j != sr.first_trading_day_on_or_after(cal, j.year, j.month, 12)
+        assert j != sr.s2_forced_day(cal, j.year, j.month)
+
+
 def test_judgment_date_over_lunar_new_year_month():
-    # start in 2027-02 (first trading day 02-15) -> 2028-02 first trading day -> previous trading day
-    j = sr.judgment_date(date(2027, 2, 15), CAL)
-    assert j == sr.prev_trading_day(CAL, sr.first_trading_day(CAL, 2028, 2))
-    assert j == date(2028, 1, 31)
+    # start in 2027-02 (first trading day 02-15) -> target month 2028-02.
+    # 2028-02-01 is a Tuesday and trading in CAL, so the day before it, Mon 2028-01-31, is the answer.
+    assert sr.judgment_date(date(2027, 2, 15), CAL) == date(2028, 1, 31)
+    # Same start with 2028-01-31 and 2028-02-01 closed: the first trading day of 2028-02 is
+    # Wed 02-02 and the previous trading day is Fri 2028-01-28.
+    cal = CAL - {date(2028, 1, 31), date(2028, 2, 1)}
+    assert sr.first_trading_day(cal, 2028, 2) == date(2028, 2, 2)
+    assert sr.judgment_date(date(2027, 2, 15), cal) == date(2028, 1, 28)
 
 
 def test_judgment_date_needs_calendar_coverage():
@@ -206,17 +270,21 @@ def test_each_alias_collapses_to_canonical(variant, canonical):
 
 
 def test_both_alias_spellings_counted_once_with_union_members():
-    # a1 carries both spellings, a2 only the "類" spelling; the merged category has
-    # 2 members (union).  A naive per-spelling sum would give 4 > 3 and lose to 電子工業.
-    universe = {"a1", "a2", "e1", "e2", "e3"}
+    # a1 carries both spellings, a2 only the "類" spelling.
+    #   union count of the merged 電子通路業 = {a1, a2} = 2   -> beats 半導體業 (3 members)
+    #   per-spelling sum = 1 (業: a1) + 2 (類: a1, a2) = 3    -> would TIE 半導體業, and
+    #   "半導體業" < "電子通路業" by code point, so a sum-based count would pick 半導體業.
+    universe = {"a1", "a2", "e1"}
     ind = {
-        "a1": ["電子通路業", "電子通路類", "電子工業"],
-        "a2": ["電子通路類", "電子工業"],
-        "e1": ["電子工業"], "e2": ["電子工業"], "e3": ["電子工業"],
+        "a1": ["電子通路業", "電子通路類", "半導體業"],
+        "a2": ["電子通路類", "半導體業"],
+        "e1": ["半導體業"],
     }
+    assert "半導體業" < "電子通路業"
     p = sr.primary_industry(ind, universe)
-    assert p["a1"] == "電子通路業" and p["a2"] == "電子通路業"
-    assert p["e1"] == "電子工業"
+    assert p["a1"] == "電子通路業"
+    assert p["a2"] == "電子通路業"
+    assert p["e1"] == "半導體業"
 
 
 def test_only_innovation_board_label_goes_to_other():
@@ -573,67 +641,102 @@ def _frs(done_stamp=0, done_attempt=0, not_done=0, empty=0):
 
 
 def test_complete_by_stamp():
-    ok, ratio = sr.revenue_refresh_complete({"1": {"revenue": TARGET}}, TODAY, TARGET)
+    ok, ratio = sr.revenue_refresh_complete({"1": {"revenue": TARGET}}, TODAY)
     assert ok and ratio == 1.0
 
 
 def test_complete_by_attempt_on_or_after_11th():
     for stamp in ("2026-12-11", "2026-12-12", "2026-12-14"):
         ok, ratio = sr.revenue_refresh_complete({"1": {"revenue": "2026-10-01", "revenue_attempt": stamp}},
-                                                TODAY, TARGET)
+                                                TODAY)
         assert ok and ratio == 1.0
 
 
 def test_attempt_before_11th_does_not_count():
     ok, ratio = sr.revenue_refresh_complete({"1": {"revenue": "2026-10-01", "revenue_attempt": "2026-12-10"}},
-                                            TODAY, TARGET)
+                                            TODAY)
     assert not ok and ratio == 0.0
 
 
 def test_attempt_from_previous_month_does_not_count():
-    ok, ratio = sr.revenue_refresh_complete({"1": {"revenue_attempt": "2026-11-20"}}, TODAY, TARGET)
+    ok, ratio = sr.revenue_refresh_complete({"1": {"revenue_attempt": "2026-11-20"}}, TODAY)
     assert not ok and ratio == 0.0
 
 
 def test_empty_fund_refresh_does_not_count():
-    ok, ratio = sr.revenue_refresh_complete({"1": {}, "2": None}, TODAY, TARGET)
+    ok, ratio = sr.revenue_refresh_complete({"1": {}, "2": None}, TODAY)
     assert not ok and ratio == 0.0
 
 
 def test_exactly_90_percent_is_complete():
     frs = _frs(done_stamp=5, done_attempt=4, not_done=1)       # 9 / 10
-    ok, ratio = sr.revenue_refresh_complete(frs, TODAY, TARGET)
+    ok, ratio = sr.revenue_refresh_complete(frs, TODAY)
     assert ok and ratio == pytest.approx(0.9)
 
 
 def test_just_below_90_percent_is_not_complete():
     frs = _frs(done_stamp=89, not_done=11)                       # 89 / 100
-    ok, ratio = sr.revenue_refresh_complete(frs, TODAY, TARGET)
+    ok, ratio = sr.revenue_refresh_complete(frs, TODAY)
     assert not ok and ratio == pytest.approx(0.89)
     frs = _frs(done_stamp=8, empty=2)                            # 8 / 10
-    assert sr.revenue_refresh_complete(frs, TODAY, TARGET)[0] is False
+    assert sr.revenue_refresh_complete(frs, TODAY)[0] is False
 
 
 def test_insufficient_stamp_counts_as_complete():
     # update_fundamentals stamps fr["revenue"] = target for "insufficient" codes too.
     frs = {f"{i}": {"revenue": TARGET, "revenue_attempt": "2026-12-14"} for i in range(9)}
     frs["x"] = {"revenue_attempt": "2026-12-01"}                 # failed/stale: not done
-    ok, ratio = sr.revenue_refresh_complete(frs, TODAY, TARGET)
+    ok, ratio = sr.revenue_refresh_complete(frs, TODAY)
     assert ok and ratio == pytest.approx(0.9)
 
 
 def test_attempt_threshold_follows_todays_month():
     today = date(2027, 1, 14)
-    target = sr.revenue_target(today)
     frs = {"1": {"revenue_attempt": "2026-12-20"}, "2": {"revenue_attempt": "2027-01-11"}}
-    ok, ratio = sr.revenue_refresh_complete(frs, today, target)
+    ok, ratio = sr.revenue_refresh_complete(frs, today)
     assert ratio == 0.5 and not ok
 
 
 def test_empty_universe_and_bad_attempt_stamp():
-    assert sr.revenue_refresh_complete({}, TODAY, TARGET) == (False, 0.0)
-    assert sr.revenue_refresh_complete({"1": {"revenue_attempt": "garbage"}}, TODAY, TARGET) == (False, 0.0)
-    assert sr.revenue_refresh_complete({"1": {"revenue_attempt": date(2026, 12, 12)}}, TODAY, TARGET)[0] is True
+    assert sr.revenue_refresh_complete({}, TODAY) == (False, 0.0)
+    assert sr.revenue_refresh_complete({"1": {"revenue_attempt": date(2026, 12, 12)}}, TODAY)[0] is True
+
+
+def test_target_is_derived_from_today():
+    # Stamped with the previous cycle's target: not complete once the 11th passes.
+    stale = {"1": {"revenue": "2026-10-01"}}
+    assert sr.revenue_refresh_complete(stale, date(2026, 12, 14)) == (False, 0.0)    # target is 2026-11-01
+    assert sr.revenue_refresh_complete(stale, date(2026, 11, 14)) == (True, 1.0)     # target is 2026-10-01
+    # Before the 11th the target is two months back.
+    assert sr.revenue_refresh_complete({"1": {"revenue": "2026-11-01"}}, date(2026, 12, 10)) == (False, 0.0)
+    assert sr.revenue_refresh_complete({"1": {"revenue": "2026-10-01"}}, date(2026, 12, 10)) == (True, 1.0)
+
+
+@pytest.mark.parametrize("stamp", [
+    datetime(2026, 12, 11, 7, 5, 3),
+    date(2026, 12, 11),
+    "2026-12-11",
+    "2026-12-11T07:05:03",
+    "2026-12-11T07:05:03+08:00",
+    "2026-12-11 07:05:03",
+])
+def test_attempt_stamp_formats_on_the_11th_count(stamp):
+    assert sr.revenue_refresh_complete({"1": {"revenue_attempt": stamp}}, TODAY) == (True, 1.0)
+
+
+@pytest.mark.parametrize("stamp", [
+    datetime(2026, 12, 10, 23, 59, 59),
+    date(2026, 12, 10),
+    "2026-12-10",
+    "2026-12-10T23:59:59",
+])
+def test_attempt_stamp_formats_on_the_10th_do_not_count(stamp):
+    assert sr.revenue_refresh_complete({"1": {"revenue_attempt": stamp}}, TODAY) == (False, 0.0)
+
+
+@pytest.mark.parametrize("stamp", ["garbage", "", "12/11/2026", 12345, None])
+def test_unparseable_attempt_stamp_is_not_done(stamp):
+    assert sr.revenue_refresh_complete({"1": {"revenue_attempt": stamp}}, TODAY) == (False, 0.0)
 
 
 # --------------------------------------------------------------------------- #
