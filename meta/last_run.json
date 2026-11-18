@@ -1,0 +1,11 @@
+{
+ "run_at": "2026-11-18T12:06:53+08:00",
+ "exit_code": 0,
+ "processed_days": [],
+ "reran_days": [],
+ "alerts": [],
+ "missing_total": 0,
+ "impaired": false,
+ "void": null,
+ "pending_retry": []
+}
