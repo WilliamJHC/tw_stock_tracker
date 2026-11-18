@@ -6,10 +6,11 @@ name: shadow-portfolio
 # queue behind the `backtest-db-state` group, and a failure elsewhere must not stop it.
 #
 # What it does every Taipei weekday 07:00:
-#   1. --prefetch: store the market close + ex-rights data for days not stored yet
-#      (data files only; also the only mode allowed before the start date).
-#   2. the main run (only if meta/lock.json exists on the ledger branch): book the
-#      previous trading day for all 4 candidates + 0050, compute today's rankings.
+#   1. --prefetch (only if meta/lock.json exists): store the market close + ex-rights data
+#      for days not stored yet (data files only; the only mode allowed before the start date).
+#   2. the main run (only if meta/lock.json exists and today >= start_date; a dry-run
+#      dispatch is exempt): book the previous trading day for all 4 candidates + 0050,
+#      compute today's rankings.
 #   3. commit + push the ledger branch (append-only history = evidence that nothing
 #      was edited after the fact).
 #   4. Telegram: on a non-zero exit code or any alert in meta/last_run.json; on
@@ -93,7 +94,13 @@ jobs:
         id: prefetch
         if: env.FACTOR_RUN_MISSING != '1'
         continue-on-error: true
-        run: python scripts/run_shadow_portfolio.py --ledger-dir shadow_ledger --prefetch
+        run: |
+          # --prefetch reads the locked snapshots, so it needs meta/lock.json too
+          if [ ! -f shadow_ledger/meta/lock.json ]; then
+            echo "no meta/lock.json yet -> the experiment is not locked; prefetch skipped"
+            exit 0
+          fi
+          python scripts/run_shadow_portfolio.py --ledger-dir shadow_ledger --prefetch
       - name: main run
         id: main
         if: env.FACTOR_RUN_MISSING != '1' && inputs.prefetch_only != true
@@ -105,6 +112,16 @@ jobs:
           fi
           args=""
           if [ "${{ inputs.dry_run }}" = "true" ]; then args="--dry-run"; fi
+          # Before the start date only --dry-run is allowed (check_lock exits 3 otherwise), so a
+          # scheduled run in the lock-to-start window must be a no-op rather than a red run + alert.
+          if [ -z "$args" ]; then
+            start=$(python -c "import json; print(json.load(open('shadow_ledger/meta/lock.json', encoding='utf-8')).get('start_date') or '')")
+            today=$(TZ=Asia/Taipei date +%Y-%m-%d)
+            if [ -n "$start" ] && [[ "$today" < "$start" ]]; then
+              echo "today $today is before the start date $start; main run skipped (prefetch only)"
+              exit 0
+            fi
+          fi
           python scripts/run_shadow_portfolio.py --ledger-dir shadow_ledger $args
       - name: commit and push ledger
         if: always() && env.FACTOR_RUN_MISSING != '1' && inputs.dry_run != true
