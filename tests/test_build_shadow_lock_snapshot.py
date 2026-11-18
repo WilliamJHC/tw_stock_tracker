@@ -118,3 +118,28 @@ def test_cli_returns_1_on_error_and_0_on_success(tmp_path, capsys):
     assert "universe_sha256" in out and "12 codes" in out
     with pytest.raises(SystemExit):                                    # --write-lock without --start-date
         bsl.main(base + ["--write-lock", str(tmp_path / "l2")])
+
+
+def test_lock_only_uses_the_existing_files_and_reads_no_cache(tmp_path):
+    res = _build(tmp_path)                                           # as if the cloud workflow had built them
+    out_dir = os.path.dirname(res["universe_file"])
+    ledger = str(tmp_path / "ledger")
+    assert bsl.main(["--out-dir", out_dir, "--cache-dir", str(tmp_path / "no_such_cache"), "--lock-only",
+                     "--write-lock", ledger, "--start-date", "2026-11-18"]) == 0
+    lock = json.load(open(tmp_path / "ledger" / "meta" / "lock.json", encoding="utf-8"))
+    assert lock["start_date"] == "2026-11-18" and lock["snapshot_date"] == "2026-11-27"
+    assert (lock["universe_sha256"], lock["industries_sha256"]) == (res["sha"]["universe_sha256"], res["sha"]["industries_sha256"])
+    rsp.check_lock(rsp.Store(ledger), res["universe_file"], res["industries_file"], date(2026, 11, 18), dry_run=False)
+
+
+def test_lock_only_refuses_missing_or_broken_snapshots(tmp_path, capsys):
+    out_dir = str(tmp_path / "shadow")
+    args = ["--out-dir", out_dir, "--lock-only", "--write-lock", str(tmp_path / "ledger"), "--start-date", "2026-11-18"]
+    assert bsl.main(args) == 1                                       # nothing there
+    res = _build(tmp_path)
+    with open(res["industries_file"], "w", encoding="utf-8") as f:
+        f.write('{"industries": []}')                                # wrong shape
+    assert bsl.main(args) == 1
+    assert not os.path.exists(tmp_path / "ledger" / "meta" / "lock.json")
+    with pytest.raises(SystemExit):                                  # --lock-only without --write-lock
+        bsl.main(["--out-dir", out_dir, "--lock-only"])

@@ -18,6 +18,10 @@ With --write-lock <ledger dir> --start-date YYYY-MM-DD it also writes <ledger di
 verifies them).  Nothing here looks at prices or performance (spec A5: no S2 / S3 backtests before
 the lock).
 
+With --lock-only the snapshot files already in --out-dir (e.g. the ones the cloud workflow built and
+the operator committed) are verified with the daily job's loader and only the lock is written; no
+cache is read.
+
 Existing snapshot files are never replaced unless --force is given: a locked snapshot must not be
 rewritten by accident.  Run from the project root.
 """
@@ -115,6 +119,24 @@ def build(cache_dir, out_dir, stamp, snapshot_date, industries_file=None, min_co
                       "primary_other": counts.get(sr.OTHER, 0), "primary_groups": len(counts)}}
 
 
+def existing_snapshot(out_dir, stamp):
+    """Result dict (same shape as ``build``) for snapshot files that already exist in out_dir, plus the
+    snapshot date stored in the universe file.  Verified with the daily job's loader."""
+    uni_path = os.path.join(out_dir, f"universe_{stamp}.json")
+    ind_path = os.path.join(out_dir, f"industries_snapshot_{stamp}.json")
+    for p in (uni_path, ind_path):
+        if not os.path.isfile(p):
+            raise SnapshotError(f"snapshot file not found: {p}")
+    with open(uni_path, encoding="utf-8") as f:
+        snap = date.fromisoformat(json.load(f)["snapshot_date"])
+    universe, primary = rsp.load_snapshots(uni_path, ind_path)
+    counts = Counter(primary.values())
+    return ({"universe_file": uni_path, "industries_file": ind_path,
+             "sha": {"universe_sha256": rsp.sha256_file(uni_path), "industries_sha256": rsp.sha256_file(ind_path)},
+             "stats": {"universe": len(universe), "primary_other": counts.get(sr.OTHER, 0),
+                       "primary_groups": len(counts)}}, snap)
+
+
 def write_lock(ledger_dir, start_date, result, snapshot_date):
     """Write <ledger dir>/meta/lock.json (never replaces an existing lock)."""
     path = os.path.join(ledger_dir, "meta", "lock.json")
@@ -139,11 +161,22 @@ def main(argv=None):
     ap.add_argument("--force", action="store_true", help="replace existing snapshot files")
     ap.add_argument("--write-lock", metavar="LEDGER_DIR", default=None, help="also write LEDGER_DIR/meta/lock.json")
     ap.add_argument("--start-date", default=None, help="start date for lock.json (required with --write-lock)")
+    ap.add_argument("--lock-only", action="store_true",
+                    help="do not build: verify the snapshot files already in --out-dir and write the lock")
     args = ap.parse_args(argv)
     if bool(args.write_lock) != bool(args.start_date):
         ap.error("--write-lock and --start-date go together")
+    if args.lock_only and not args.write_lock:
+        ap.error("--lock-only needs --write-lock and --start-date")
     snap = date.fromisoformat(args.snapshot_date) if args.snapshot_date else date.today()
     try:
+        if args.lock_only:
+            res, snap = existing_snapshot(args.out_dir, args.stamp)
+            print(f"existing snapshot of {snap}: {res['stats']}")
+            for k, v in res["sha"].items():
+                print(f"{k}: {v}")
+            print("lock:", write_lock(args.write_lock, date.fromisoformat(args.start_date), res, snap))
+            return 0
         res = build(args.cache_dir, args.out_dir, args.stamp, snap, args.industries_file, args.min_codes, args.force)
         print(f"universe: {res['stats']['universe']} codes -> {res['universe_file']}")
         print(f"industries: {res['stats']['with_industry_entry']} codes with a category -> {res['industries_file']}")
