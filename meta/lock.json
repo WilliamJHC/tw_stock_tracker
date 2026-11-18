@@ -1,0 +1,8 @@
+{
+ "industries_file": "industries_snapshot_2026-11.json",
+ "industries_sha256": "ee08855cf219d4957ff62e6a8f5e4b285bd2aacb4c664acf39a7023e9f9a4fcc",
+ "snapshot_date": "2026-11-18",
+ "start_date": "2026-11-18",
+ "universe_file": "universe_2026-11.json",
+ "universe_sha256": "7e6c07cf011b2e322e426932bc1ed2c10e6d9737c2cd1963e0049cab692a4f69"
+}
