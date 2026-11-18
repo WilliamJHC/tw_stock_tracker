@@ -119,18 +119,24 @@ meta/lock.json                   鎖定 commit、宇宙與產業快照的雜湊
 - **起跑日前不寫正式 ledger**：程式讀 `meta/lock.json` 的起始日，早於起始日只允許 `dry_run`，避免演練資料混進正式分支。
 - keepalive：查證「推 `shadow-ledger` 是否算 repo 活動」（A5b-12）；不算就加月度 keepalive。
 
-### 階段 5：雲端演練（需要 push）
-- 把程式推上去，用 `workflow_dispatch` 跑 `dry_run`，連跑至少 3 個交易日。
-- 驗：端點在 Actions 上穩定、`factor_run` 快取讀得到、S2 完成判定的實際覆蓋率、執行時間、推 `shadow-ledger` 的權限。
-- 演練寫到 `shadow-ledger-rehearsal` 分支，鎖定前刪掉。
+### 階段 5：雲端演練（需要 push；2026-11-18 依使用者決定改寫）
+原計畫用 `dry_run` 連跑 3 天，有三個問題：(1) 快照檔與 `meta/lock.json` 不存在時 workflow 會 `exit 0` 假綠；(2) dry-run 不寫檔也不 commit，驗不了跨日 state、推送權限與重放；(3) 起始日前的非 dry-run 會被 workflow 整個跳過。改成：
+1. **前置（需 push 同意）**：push `main`（含 F3／F4 分支、快照腳本、`shadow_lock_snapshot.yml`）。
+2. **演練快照**：手動 dispatch `shadow-lock-snapshot`（分支名如 `shadow-snapshot-rehearsal`），fetch 該分支，把 `shadow/` 兩個檔 commit 進 `main`；用 `build_shadow_lock_snapshot.py --write-lock` 產生演練用 `meta/lock.json`（`start_date` 設為演練起始日，例如 2026-11-19），放進本地建立的孤兒分支 `shadow-ledger-rehearsal` 並 push。
+3. **演練**：`workflow_dispatch`，`dry_run=false`、`ledger_branch=shadow-ledger-rehearsal`，連 3 個交易日各一次（11/19、11/20、11/23）。
+4. **判讀不能只看綠燈**：每次要確認 log 有 `booked` 字樣、`shadow-ledger-rehearsal` 有新 commit。
+5. **驗**：端點在 Actions 上穩定（TPEx 慢，A5f-5：量缺資料日頻率）、`factor_run` 快取讀得到、S2 營收覆蓋率（11/19 起 ≥12 日，可提早看 90% 門檻）、執行時間、推 `shadow-ledger-rehearsal` 的權限、對演練分支跑 `--replay --out` 與原帳一致、Telegram 告警送達。
+6. **3 天碰不到換倉**（月初、≥12 日都不在窗內）：換倉、順延、補抓重跑靠單元測試；演練起始日當天會跑到起始建倉。
+7. 演練分支與演練快照在鎖定前清掉（鎖定 commit 內的快照以鎖定日重新產生的為準）。
 - **演練不輸出任何「候選 vs 0050」的比較數字**（A5 紀律）；只看帳對不對、流程通不通。
 
 ### 階段 6：鎖定
-1. 跑 `scripts/build_shadow_lock_snapshot.py`，產生宇宙與主產業快照，commit。
-2. 全部測試通過；派 fresh-context agent 對「程式是否符合規格」做一次審查。
+1. 鎖定日再跑一次 `shadow-lock-snapshot`（新分支名），fetch 後把兩個快照檔放進鎖定 commit（宇宙以雲端快取為準，A5f-6）。
+2. 全部測試通過；派 fresh-context agent 對「程式是否符合規格」做一次審查，並把程式內約 41 處 `# ASSUMPTION:` 逐條歸類成「進規格」或「無兩種合理解讀」。
 3. 使用者同意後 push `main`、打 tag `shadow-lock-v1` 並 push。
 4. 另開一個只改 A7 的 commit，填鎖定 commit、鎖定日、快照日期、起始日、判定日（A5b-3）。
-5. 建立空的 `shadow-ledger` 分支與 `meta/lock.json`。
+5. 建立 `shadow-ledger` 分支與 `meta/lock.json`（`build_shadow_lock_snapshot.py --write-lock`，`start_date` 2026-12-01）。**硬限制：UTC 11/30 23:00（台北 12/1 07:00）排程前完成**；GitHub 排程常遲到，建議最晚 11/27（週五）鎖定。
+6. keepalive 查證（A5b-12）：先查 GitHub 文件；不確定就加月度 keepalive。
 
 ## 4. 派工方式
 
@@ -155,3 +161,11 @@ meta/lock.json                   鎖定 commit、宇宙與產業快照的雜湊
 2. 本地 commit 等雲端演練（階段 5）時跟程式一起 push。
 3. **11/24 進度檢查**：階段 2（ledger 狀態機）若未完成，直接順延起始日到 2027-01 第 1 個交易日，不硬趕。
 4. 開工。
+
+## 7. 使用者決定（2026-11-18，全部照建議）
+
+1. 影子組合狀態機 F3／F4：順延換倉用名義日存下的排名、T−1 缺資料不重複計並加 `ranking_missing` 旗標（規格 A5f-1～3）。
+2. 規格 A5e 九項全部確認（含第 6 項 Yahoo 備援收窄）；兩條字面讀法：重試窗含當天、任一市場缺即整日缺資料（A5f-4、5）。
+3. 宇宙以雲端 Actions 快取 `factor_run` 為準（A5f-6）；快照腳本與 `shadow_lock_snapshot.yml` 提前到階段 5 之前。
+4. 演練改為非 dry-run 寫到 `shadow-ledger-rehearsal`（見階段 5）。
+5. 時程：11/19、11/20、11/23 演練；11/24 檢查點；最晚 11/27 鎖定。

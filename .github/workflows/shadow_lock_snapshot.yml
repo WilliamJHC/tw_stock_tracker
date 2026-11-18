@@ -1,0 +1,70 @@
+name: shadow-lock-snapshot
+
+# One-off helper of the shadow portfolio lock (spec A5f-6): the locked universe is the set of live
+# codes in the cache the daily job really reads, i.e. the Actions cache, so the snapshot is built
+# here and not on a local copy.  It runs scripts/build_shadow_lock_snapshot.py (universe from
+# cache/factor_run, raw industries from FinMind) and pushes shadow/universe_*.json and
+# shadow/industries_snapshot_*.json to a NEW branch (never to main).  The operator fetches that
+# branch and puts the two files into the lock commit on main.
+# Read-only on the cache: this workflow never saves one.
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        type: string
+        description: 'New branch that receives the two snapshot files (must not exist yet)'
+        default: 'shadow-snapshot'
+
+concurrency:
+  group: shadow-lock-snapshot
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: Cloudflare
+    env:
+      FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+      PYTHONIOENCODING: utf-8
+      SNAPSHOT_BRANCH: ${{ inputs.branch }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-actions.txt
+      - run: pip install -r requirements-actions.txt
+      - uses: actions/cache/restore@v4
+        with:
+          path: cache/factor_run
+          key: update-universe-bars-state-${{ github.run_id }}
+          restore-keys: |
+            update-universe-bars-state-
+      - name: build snapshot
+        run: |
+          if [ -z "$FINMIND_TOKEN" ]; then echo "::error::FINMIND_TOKEN is empty"; exit 1; fi
+          if git ls-remote --exit-code --heads origin "$SNAPSHOT_BRANCH" >/dev/null 2>&1; then
+            echo "::error::branch $SNAPSHOT_BRANCH already exists; pick a new name"
+            exit 1
+          fi
+          # the script itself refuses a cache with fewer than 1500 live codes
+          python scripts/build_shadow_lock_snapshot.py --snapshot-date "$(TZ=Asia/Taipei date +%Y-%m-%d)" | tee snapshot.log
+          {
+            echo '### shadow lock snapshot'
+            echo '```'
+            cat snapshot.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: push snapshot branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q -b "$SNAPSHOT_BRANCH"
+          git add shadow/universe_2026-11.json shadow/industries_snapshot_2026-11.json
+          git commit -q -m "shadow lock snapshot $(TZ=Asia/Taipei date +%Y-%m-%d) (run ${GITHUB_RUN_ID})"
+          git push origin "HEAD:refs/heads/$SNAPSHOT_BRANCH"
