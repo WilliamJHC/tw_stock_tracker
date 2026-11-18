@@ -131,11 +131,11 @@ meta/lock.json                   鎖定 commit、宇宙與產業快照的雜湊
 - **演練不輸出任何「候選 vs 0050」的比較數字**（A5 紀律）；只看帳對不對、流程通不通。
 
 ### 階段 6：鎖定
-1. 鎖定日再跑一次 `shadow-lock-snapshot`（新分支名），fetch 後把兩個快照檔放進鎖定 commit（宇宙以雲端快取為準，A5f-6）。
+1. 鎖定日再跑一次 `shadow-lock-snapshot`（新分支名；workflow 以 `--force` 在 `main` 既有的演練快照上重建，只推到新分支）。fetch 後用 `git checkout origin/<分支> -- shadow/` 把兩個快照檔覆蓋進 `main` 的鎖定 commit，並核對 `snapshot_date` 是鎖定日、不是演練日 11/18；job summary 會列出還原的快取 key，鎖定前確認它是最近一次完整的 `update-universe-bars-state-*`。
 2. 全部測試通過；派 fresh-context agent 對「程式是否符合規格」做一次審查，並把程式內約 41 處 `# ASSUMPTION:` 逐條歸類成「進規格」或「無兩種合理解讀」。
 3. 使用者同意後 push `main`、打 tag `shadow-lock-v1` 並 push。
 4. 另開一個只改 A7 的 commit，填鎖定 commit、鎖定日、快照日期、起始日、判定日（A5b-3）。
-5. 建立 `shadow-ledger` 分支與 `meta/lock.json`（`build_shadow_lock_snapshot.py --write-lock`，`start_date` 2026-12-01）。**硬限制：UTC 11/30 23:00（台北 12/1 07:00）排程前完成**；GitHub 排程常遲到，建議最晚 11/27（週五）鎖定。
+5. 建立 `shadow-ledger` 分支與 `meta/lock.json`（`build_shadow_lock_snapshot.py --lock-only --write-lock <目錄> --start-date 2026-12-01 --snapshot-date <鎖定日>`；`--snapshot-date` 與檔案內日期不符會拒絕）。**硬限制：UTC 11/30 23:00（台北 12/1 07:00）排程前完成**；GitHub 排程常遲到，建議最晚 11/27（週五）鎖定。
 6. keepalive 查證（A5b-12）：先查 GitHub 文件；不確定就加月度 keepalive。
 
 ## 4. 派工方式

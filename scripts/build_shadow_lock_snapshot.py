@@ -64,6 +64,9 @@ def live_codes(cache_dir):
         except (OSError, ValueError):
             bad += 1
             continue
+        if not isinstance(entry, dict):
+            bad += 1
+            continue
         if entry.get("skip"):
             skipped += 1
             continue
@@ -128,7 +131,11 @@ def existing_snapshot(out_dir, stamp):
         if not os.path.isfile(p):
             raise SnapshotError(f"snapshot file not found: {p}")
     with open(uni_path, encoding="utf-8") as f:
-        snap = date.fromisoformat(json.load(f)["snapshot_date"])
+        doc = json.load(f)
+    try:
+        snap = date.fromisoformat(doc["snapshot_date"])
+    except (KeyError, TypeError, ValueError) as e:
+        raise SnapshotError(f"{uni_path} has no valid snapshot_date (built by this script?): {e!r}") from e
     universe, primary = rsp.load_snapshots(uni_path, ind_path)
     counts = Counter(primary.values())
     return ({"universe_file": uni_path, "industries_file": ind_path,
@@ -170,8 +177,17 @@ def main(argv=None):
         ap.error("--lock-only needs --write-lock and --start-date")
     snap = date.fromisoformat(args.snapshot_date) if args.snapshot_date else date.today()
     try:
+        # A lock is written once: refuse before any snapshot file is built or replaced, otherwise a failed
+        # run would leave new files next to an old lock whose hashes no longer match (check_lock exit 3).
+        if args.write_lock and os.path.exists(os.path.join(args.write_lock, "meta", "lock.json")):
+            raise SnapshotError(f"{os.path.join(args.write_lock, 'meta', 'lock.json')} already exists: "
+                                "a lock is written once; nothing was changed")
         if args.lock_only:
-            res, snap = existing_snapshot(args.out_dir, args.stamp)
+            res, stored = existing_snapshot(args.out_dir, args.stamp)
+            if args.snapshot_date and snap != stored:
+                raise SnapshotError(f"--snapshot-date {snap} but the snapshot files in {args.out_dir} are "
+                                    f"from {stored}: wrong files committed?")
+            snap = stored
             print(f"existing snapshot of {snap}: {res['stats']}")
             for k, v in res["sha"].items():
                 print(f"{k}: {v}")

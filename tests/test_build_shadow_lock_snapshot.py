@@ -143,3 +143,45 @@ def test_lock_only_refuses_missing_or_broken_snapshots(tmp_path, capsys):
     assert not os.path.exists(tmp_path / "ledger" / "meta" / "lock.json")
     with pytest.raises(SystemExit):                                  # --lock-only without --write-lock
         bsl.main(["--out-dir", out_dir, "--lock-only"])
+
+
+def test_cache_file_that_is_not_a_json_object_counts_as_unreadable(tmp_path):
+    cache, _ = _world(tmp_path)
+    for name, body in (("1200.json", "[]"), ("1201.json", "null"), ("1202.json", "7")):
+        (tmp_path / "factor_run" / name).write_text(body, encoding="utf-8")
+    codes, stats = bsl.live_codes(cache)
+    assert codes == LIVE and stats["bad_json"] == 4                      # 3000 (broken JSON) + the three above
+
+
+def test_force_with_an_existing_lock_changes_nothing(tmp_path, capsys):
+    cache, ind_file = _world(tmp_path)
+    base = ["--cache-dir", cache, "--out-dir", str(tmp_path / "shadow"), "--industries-file", ind_file,
+            "--min-codes", "5", "--snapshot-date", "2026-11-27"]
+    lock_args = ["--write-lock", str(tmp_path / "ledger"), "--start-date", "2026-12-01"]
+    assert bsl.main(base + lock_args) == 0
+    before = {n: (tmp_path / "shadow" / n).read_bytes() for n in os.listdir(tmp_path / "shadow")}
+    lock_before = (tmp_path / "ledger" / "meta" / "lock.json").read_bytes()
+    (tmp_path / "factor_run" / "1500.json").write_text(json.dumps({"bars": []}), encoding="utf-8")   # a new live code
+    assert bsl.main(base[:-2] + ["--snapshot-date", "2026-11-30", "--force"] + lock_args) == 1
+    assert {n: (tmp_path / "shadow" / n).read_bytes() for n in os.listdir(tmp_path / "shadow")} == before
+    assert (tmp_path / "ledger" / "meta" / "lock.json").read_bytes() == lock_before
+    assert "already exists" in capsys.readouterr().err
+
+
+def test_lock_only_rejects_a_snapshot_date_that_differs_from_the_files(tmp_path):
+    res = _build(tmp_path)                                               # files are from 2026-11-27
+    out_dir = os.path.dirname(res["universe_file"])
+    args = ["--out-dir", out_dir, "--lock-only", "--write-lock", str(tmp_path / "ledger"), "--start-date", "2026-12-01"]
+    assert bsl.main(args + ["--snapshot-date", "2026-11-18"]) == 1
+    assert not os.path.exists(tmp_path / "ledger" / "meta" / "lock.json")
+    assert bsl.main(args + ["--snapshot-date", "2026-11-27"]) == 0
+
+
+@pytest.mark.parametrize("body", ['["1100", "1101"]', '{"codes": ["1100", "1101"]}', "{}"])
+def test_lock_only_universe_file_without_a_snapshot_date_is_an_error_not_a_traceback(tmp_path, body):
+    res = _build(tmp_path)
+    with open(res["universe_file"], "w", encoding="utf-8") as f:
+        f.write(body)
+    args = ["--out-dir", os.path.dirname(res["universe_file"]), "--lock-only",
+            "--write-lock", str(tmp_path / "ledger"), "--start-date", "2026-12-01"]
+    assert bsl.main(args) == 1

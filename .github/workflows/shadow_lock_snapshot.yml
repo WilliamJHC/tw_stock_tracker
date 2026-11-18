@@ -39,21 +39,28 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-actions.txt
       - run: pip install -r requirements-actions.txt
-      - uses: actions/cache/restore@v4
+      - id: cache
+        uses: actions/cache/restore@v4
         with:
           path: cache/factor_run
           key: update-universe-bars-state-${{ github.run_id }}
           restore-keys: |
             update-universe-bars-state-
       - name: build snapshot
+        env:
+          CACHE_KEY: ${{ steps.cache.outputs.cache-matched-key }}
         run: |
+          # a failing builder must fail the step, also behind `| tee`
+          set -o pipefail
           if [ -z "$FINMIND_TOKEN" ]; then echo "::error::FINMIND_TOKEN is empty"; exit 1; fi
           if git ls-remote --exit-code --heads origin "$SNAPSHOT_BRANCH" >/dev/null 2>&1; then
             echo "::error::branch $SNAPSHOT_BRANCH already exists; pick a new name"
             exit 1
           fi
           # the script itself refuses a cache with fewer than 1500 live codes
-          python scripts/build_shadow_lock_snapshot.py --snapshot-date "$(TZ=Asia/Taipei date +%Y-%m-%d)" | tee snapshot.log
+          # --force: main already carries the previous (rehearsal) snapshot files; the new ones only go to a new branch
+          echo "restored cache key: ${CACHE_KEY:-<none>}" | tee snapshot.log
+          python scripts/build_shadow_lock_snapshot.py --force --snapshot-date "$(TZ=Asia/Taipei date +%Y-%m-%d)" | tee -a snapshot.log
           {
             echo '### shadow lock snapshot'
             echo '```'
