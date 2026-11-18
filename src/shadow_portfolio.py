@@ -165,24 +165,16 @@ def _impair(meta, reason):
         meta["impaired_reasons"].append(reason)
 
 
-def _set_judgment_date(meta, cal):
-    """(Re)compute the judgment date from the start date; None while the calendar is too short
-    (A5e-9 / A5d-7: the final calendar may not be published yet)."""
+def _set_judgment_date(meta, cal, keep_on_error=False):
+    """(Re)compute the judgment date from the start date (A5e-9 / A5d-7: the final calendar may not
+    be published yet).  A calendar too short to answer sets None, or with `keep_on_error` leaves the
+    previous value untouched (A5d-7: the step-by-step refresh from provisional to final calendar;
+    the final TWSE holiday table replaces the provisional one, this is not a rule change)."""
     try:
         meta["judgment_date"] = sr.judgment_date(_d(meta["start_date"]), cal).isoformat()
     except ValueError:
-        meta["judgment_date"] = None
-
-
-def _refresh_judgment_date(meta, cal):
-    """A5d-7: recompute the judgment date from the calendar of the current step (the final TWSE
-    holiday table replaces the provisional one; this is not a rule change).  A calendar too short
-    to answer leaves the previous value untouched."""
-    try:
-        new = sr.judgment_date(_d(meta["start_date"]), cal).isoformat()
-    except ValueError:
-        return
-    meta["judgment_date"] = new
+        if not keep_on_error:
+            meta["judgment_date"] = None
 
 
 def _add_retry(meta, cal, d, days=RETRY_DAYS):
@@ -399,7 +391,7 @@ def step(state, inputs):
         raise ValueError(f"{d} is not in the supplied trading calendar")
     meta_before = copy.deepcopy(meta)
     _prune_retry(meta, d.isoformat())
-    _refresh_judgment_date(meta, cal)       # provisional calendar -> final calendar (A5d-7, A5e-9)
+    _set_judgment_date(meta, cal, keep_on_error=True)       # provisional calendar -> final (A5d-7, A5e-9)
     if meta["status"] == "not_started":
         rows = _step_pre_start(st, inputs, d, cal)
     else:

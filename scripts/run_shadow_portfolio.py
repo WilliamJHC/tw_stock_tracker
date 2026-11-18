@@ -569,8 +569,7 @@ def merge_markets(twse, tpex):
     out = dict(twse)
     for code, e in tpex.items():
         if code in out:
-            out[code] = {"o": None, "h": None, "l": None, "c": None, "v": None,
-                         "status": "bad_row", "exright_kind": None}
+            out[code] = smd._bad_entry()
         else:
             out[code] = e
     return out
@@ -660,14 +659,13 @@ def benchmark_close_for(raw, day, status, last_close, last_real_date):
 
 def default_load_universe(universe):
     """(universe_data, fund_refresh_by_code, stats) of the locked universe from cache/factor_run.
-    universe_data comes from ``report_factor_ic.load_cached_universe`` (non-skipped codes only);
-    fund_refresh_by_code holds the cache's ``fund_refresh`` of every non-skipped universe code
-    (A5d-4 denominator); stats = {"files": universe codes with a readable cache file (skipped ones
-    included), "bad_json": unreadable files}.
+    universe_data has the shape of ``report_factor_ic.load_cached_universe`` (non-skipped codes only,
+    built by the same ``universe_item_from_cache_entry``); fund_refresh_by_code holds the cache's
+    ``fund_refresh`` of every non-skipped universe code (A5d-4 denominator); stats = {"files":
+    universe codes with a readable cache file (skipped ones included), "bad_json": unreadable files}.
+    Each universe code's file is parsed once, and files of codes outside the universe are not read.
     ASSUMPTION: a universe code without a cache file is not in the denominator."""
-    wanted = set(universe)
-    data = {c: d for c, d in rfi.load_cached_universe().items() if c in wanted}
-    fund, files, bad = {}, 0, 0
+    data, fund, files, bad = {}, {}, 0, 0
     for code in universe:
         p = os.path.join(rfi.RUN_CACHE_DIR, code + ".json")
         if not os.path.isfile(p):
@@ -681,17 +679,9 @@ def default_load_universe(universe):
         files += 1
         if entry.get("skip"):
             continue
+        data[code] = rfi.universe_item_from_cache_entry(entry)
         fund[code] = entry.get("fund_refresh") or {}
     return data, fund, {"files": files, "bad_json": bad}
-
-
-def _valid_close(row):
-    if not row or row.get("status") not in sp.PRICE_OK:
-        return None
-    c = row.get("c")
-    if c is None or isinstance(c, bool) or not (c > 0):
-        return None
-    return float(c)
 
 
 def extend_bars(universe_data, day_inputs, asof):
@@ -723,7 +713,7 @@ def extend_bars(universe_data, day_inputs, asof):
             prices, adj = day_inputs[d]
             f = (adj or {}).get(code)
             f = 1.0 if f is None else float(f)
-            close = _valid_close((prices or {}).get(code))
+            close = sp._close(prices or {}, code)           # the ledger's own rule for "has a close"
             if close is None:
                 pending *= f
                 continue
@@ -792,7 +782,8 @@ class Ranker:
             got = self.loader()
             data, fund = got[0], got[1]
             stats = got[2] if len(got) > 2 else {"files": len(data), "bad_json": 0}
-            data = {c: d for c, d in data.items() if c in set(self.universe)}
+            wanted = set(self.universe)
+            data = {c: d for c, d in data.items() if c in wanted}
             if len(data) < MIN_CACHE_RATIO * len(self.universe):
                 raise ShadowError(f"factor cache holds {len(data)} of {len(self.universe)} universe codes "
                                   f"(< {MIN_CACHE_RATIO:.0%}): cannot rank")

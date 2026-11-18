@@ -28,6 +28,30 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN_CACHE_DIR = os.path.join(BASE_DIR, "cache", "factor_run")
 
 
+def universe_item_from_cache_entry(data):
+    """One universe_data value ({bars, bar_dates, revenue_series, roe_series, ...}) from the parsed
+    content of a non-skipped cache/factor_run/<code>.json."""
+    return {
+        "bars": data["bars"],
+        "bar_dates": [b["date"] for b in data["bars"]],
+        "revenue_series": data["revenue_series"],
+        "roe_series": data["roe_series"],
+        # Phase 6b candidate-factor series -- absent on a cache entry
+        # from before Phase 6b existed and never backfilled (margin
+        # trend isn't retroactively backfilled, see
+        # run_factor_backtest.py's fetch_universe_data() docstring);
+        # .get() default keeps this report running on a mixed-vintage
+        # cache instead of crashing on the older entries.
+        "value_series": data.get("per_pbr_series", []),
+        "gross_margin_trend_series": data.get("gross_margin_trend_series", []),
+        "operating_margin_trend_series": data.get("operating_margin_trend_series", []),
+        # S2.2/S2.3 candidates (docs/institutional_and_accrual_factor_plan.md)
+        # -- same absent-on-old-cache-entry tolerance as the Phase 6b keys.
+        "institutional_flow_series": data.get("institutional_flow_series", []),
+        "accrual_quality_series": data.get("accrual_quality_series", []),
+    }
+
+
 def load_cached_universe():
     """{code: {bars, bar_dates, revenue_series, roe_series}} from every
     non-skipped cache/factor_run/*.json -- same shape fetch_universe_data()
@@ -42,25 +66,7 @@ def load_cached_universe():
         if data.get("skip"):
             continue
         code = os.path.splitext(os.path.basename(path))[0]
-        universe_data[code] = {
-            "bars": data["bars"],
-            "bar_dates": [b["date"] for b in data["bars"]],
-            "revenue_series": data["revenue_series"],
-            "roe_series": data["roe_series"],
-            # Phase 6b candidate-factor series -- absent on a cache entry
-            # from before Phase 6b existed and never backfilled (margin
-            # trend isn't retroactively backfilled, see
-            # run_factor_backtest.py's fetch_universe_data() docstring);
-            # .get() default keeps this report running on a mixed-vintage
-            # cache instead of crashing on the older entries.
-            "value_series": data.get("per_pbr_series", []),
-            "gross_margin_trend_series": data.get("gross_margin_trend_series", []),
-            "operating_margin_trend_series": data.get("operating_margin_trend_series", []),
-            # S2.2/S2.3 candidates (docs/institutional_and_accrual_factor_plan.md)
-            # -- same absent-on-old-cache-entry tolerance as the Phase 6b keys.
-            "institutional_flow_series": data.get("institutional_flow_series", []),
-            "accrual_quality_series": data.get("accrual_quality_series", []),
-        }
+        universe_data[code] = universe_item_from_cache_entry(data)
     return universe_data
 
 
