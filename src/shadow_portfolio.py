@@ -31,7 +31,8 @@ State (all JSON-serialisable; dates are ISO strings)
                        "cash": float,                 # may be slightly negative (A5e-3)
                        "nav": float,                  # == sum(holdings) + cash
                        "rets": [daily return, ...],   # incl. the start-day return
-                       "pending_rebalance": None | {"nominal_date": str, "s2_coverage": {...}|None}}},
+                       "pending_rebalance": None | {"nominal_date": str, "s2_coverage": {...}|None,
+                                                    "ranking": {"asof","ranked","detail"} (optional, F3)}}},
  "frozen_days": {code: consecutive no-close days}     # shared: a code's price status is market-wide
  "last_close": {code: last valid close of a held code},
  "acc_factor": {code: product of ex-rights factors since last_close},   # A5e-8
@@ -228,8 +229,8 @@ def check_invariants(state, tol=1e-6):
 def _mark_nominals(st, d, cal, s2_status):
     """Register today as the nominal rebalance day of every candidate it applies to
     (A1 / A2 / A5b-2).  Never overrides a pending (still unexecuted) rebalance.
-    ASSUMPTION: a new nominal day arriving while an older rebalance is still pending does
-    not create a second one: the single pending rebalance runs once, on the newest rankings."""
+    A new nominal day arriving while an older rebalance is still pending does not create a
+    second one: the single pending rebalance keeps the older nominal day and its ranking (F3)."""
     meta = st["meta"]
     iso = d.isoformat()
     first = sr.first_trading_day(cal, d.year, d.month)
@@ -260,7 +261,8 @@ def _mark_nominals(st, d, cal, s2_status):
 
 def rebalance_due(state, d, calendar, s2_status=None):
     """Candidates that need ``inputs["rankings"]`` on day `d` (start day: all four; later: those
-    whose nominal day is `d` or whose rebalance is still pending).  Pure helper for the caller."""
+    whose nominal day is `d` or whose rebalance is still pending without a ranking stored from its
+    nominal day, F3).  Pure helper for the caller."""
     st = copy.deepcopy(state)
     d = _d(d)
     cal = sorted({_d(x) for x in calendar})
@@ -270,7 +272,9 @@ def rebalance_due(state, d, calendar, s2_status=None):
     if status != "active":
         return []
     _mark_nominals(st, d, cal, s2_status)
-    return [c for c in CANDIDATES if st["candidates"][c]["pending_rebalance"] is not None]
+    return [c for c in CANDIDATES
+            if st["candidates"][c]["pending_rebalance"] is not None
+            and not st["candidates"][c]["pending_rebalance"].get("ranking")]
 
 
 # --------------------------------------------------------------------------- #
@@ -484,11 +488,23 @@ def _step_active(st, inp, d, cal):
     s2_status_missing = (inp.get("s2_status") is None and month_key not in meta["s2"]
                          and d >= sr.first_trading_day_on_or_after(cal, d.year, d.month, sr.S2_EARLIEST_DAY))
     _mark_nominals(st, d, cal, inp.get("s2_status"))
+    # F3 (user decision 2026-11-18): the ranking of the nominal day T is what the rebalance trades,
+    # whenever it is filled (T, a repaired re-run, or a later data day).  It is stored with the
+    # pending rebalance on T itself, also when T is a whole-market missing day (the ranking uses
+    # T-1 data only, A5d-3).  A pending rebalance that had no ranking on T (T-1 data missing, F4)
+    # uses the first ranking supplied on a later day instead.
+    for name in CANDIDATES:
+        p = st["candidates"][name]["pending_rebalance"]
+        if p is not None and p["nominal_date"] == iso and not p.get("ranking") and _has_ranking(rankings, name):
+            rk = rankings[name]
+            p["ranking"] = {"asof": rk.get("asof"), "ranked": list(rk["ranked"]),
+                            "detail": copy.deepcopy(list(rk.get("detail") or []))}
     prev_nav = {c: st["candidates"][c]["nav"] for c in CANDIDATES}
     pre_trade_nav = {}
     pre_flags = {c: [] for c in CANDIDATES}      # adj_missing flags
     delist_flags = {c: [] for c in CANDIDATES}
     rebalance_rows = []
+    no_ranking = set()                           # F4: pending on a data day, no ranking to trade
 
     # A5: a single rebalance deferred by more than 5 trading days -> impaired.
     for name in CANDIDATES:
@@ -573,10 +589,17 @@ def _step_active(st, inp, d, cal):
         for name in CANDIDATES:
             cs = st["candidates"][name]
             p = cs["pending_rebalance"]
-            if p is None or not _has_ranking(rankings, name):
-                continue    # no ranking (T-1 data missing, A5d-3) -> stays pending = deferred
+            if p is None:
+                continue
+            rk = p.get("ranking") or (rankings[name] if _has_ranking(rankings, name) else None)
+            if rk is None:
+                # F4 (user decision 2026-11-18): no ranking (T-1 data missing, A5d-3) -> stays
+                # pending = deferred.  Not a missing day (T-1 is already counted as one) and not
+                # registered for a retry; only flagged.
+                no_ranking.add(name)
+                continue
             pre_trade_nav[name] = cs["nav"]
-            rebalance_rows.append(_rebalance(st, name, prices, rankings[name], p["nominal_date"],
+            rebalance_rows.append(_rebalance(st, name, prices, rk, p["nominal_date"],
                                              iso, written_at, "rebalance", p["s2_coverage"]))
             if p["nominal_date"] != iso:
                 meta["deferrals"].append({"candidate": name, "nominal_date": p["nominal_date"],
@@ -591,6 +614,8 @@ def _step_active(st, inp, d, cal):
         was_deferred = (cs["pending_rebalance"] is not None
                         or any(r["candidate"] == name and r["nominal_date"] != iso for r in rebalance_rows))
         flags = (["missing_day"] if missing else []) + (["rebalance_deferred"] if was_deferred else [])
+        if name in no_ranking:
+            flags.append("ranking_missing")
         if name == S2_NAME and s2_status_missing:
             flags.append("s2_status_missing")
         flags += [f for r in rebalance_rows if r["candidate"] == name for f in r["flags"]]

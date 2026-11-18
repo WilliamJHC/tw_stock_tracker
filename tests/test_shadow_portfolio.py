@@ -616,8 +616,12 @@ def test_missing_ranking_on_a_data_day_defers_without_a_missing_day():
     to_jan3(sim)
     rows = sim.day(JAN4, rankings={S1: default_rank(S1, JAN4), S3: default_rank(S3, JAN4)})   # S0 has none (A5d-3)
     assert reb(rows, S0) == [] and len(reb(rows, S1)) == 1
-    assert daily(rows, S0)["flags"] == ["rebalance_deferred"]
+    # F4 (user decision 2026-11-18): not counted a second time, only flagged
+    assert daily(rows, S0)["flags"] == ["rebalance_deferred", "ranking_missing"]
+    assert "ranking_missing" not in daily(rows, S1)["flags"]
     assert sim.meta()["missing_total"] == 0 and sim.cand(S0)["pending_rebalance"]["nominal_date"] == "2027-01-04"
+    assert sim.meta()["missing_days"] == [] and sim.meta()["pending_retry"] == []
+    assert "ranking" not in sim.cand(S0)["pending_rebalance"]
     rows = sim.day(date(2027, 1, 5))
     assert reb(rows, S0)[0]["fill_date"] == "2027-01-05"
     assert sim.meta()["deferrals"] == [{"candidate": S0, "nominal_date": "2027-01-04",
@@ -1126,14 +1130,21 @@ def test_f9_ranking_not_before_the_fill_date_is_rejected():
         assert sim.state == before
     good = default_rank(S0, JAN4)
     assert good["asof"] == "2026-12-31"
-    # a deferred rebalance needs an asof before the (later) fill date, not the nominal date
-    sim.day(JAN4, prices=None)
+    # a deferred rebalance needs an asof before the (later) fill date, not the nominal date: only
+    # reachable when the nominal day had no ranking at all (F4), else the stored one is used (F3)
+    sim.day(JAN4, prices=None, rankings={c: default_rank(c, JAN4) for c in (S1, S3)})
     rk = default_rank(S0, JAN4)
     rk["asof"] = "2027-01-04"                                             # >= nominal but < fill (1/5): allowed
-    rankings = {c: default_rank(c, JAN4) for c in (S1, S3)}
-    rankings[S0] = rk
+    rankings = {S0: rk}
     sim.day(date(2027, 1, 5), rankings=rankings)
     assert reb(sim.rows, S0)[-1]["signal_asof"] == "2027-01-04"
+    bad = default_rank(S0, JAN4)
+    bad["asof"] = "2027-01-05"                                            # == fill date: look-ahead, rejected
+    sim2 = started()
+    to_jan3(sim2)
+    sim2.day(JAN4, prices=None, rankings={c: default_rank(c, JAN4) for c in (S1, S3)})
+    with pytest.raises(ValueError):
+        sp.step(sim2.state, sim2.inputs(date(2027, 1, 5), px(), None, 100.0, {"complete": False}, {S0: bad}, "w"))
 
 
 def test_f9_start_day_ranking_must_also_precede_the_fill():
@@ -1142,3 +1153,66 @@ def test_f9_start_day_ranking_must_also_precede_the_fill():
     rankings[S1]["asof"] = START.isoformat()
     with pytest.raises(ValueError):
         sp.step(sim.state, sim.inputs(START, px(), None, 100.0, None, rankings, "w"))
+
+
+# --------------------------------------------------------------------------- #
+# F3 / F4 (user decision 2026-11-18)
+# --------------------------------------------------------------------------- #
+
+def _targets_of(rows, name):
+    return set(reb(rows, name)[0]["targets"])
+
+
+def test_f3_deferred_rebalance_trades_the_nominal_day_ranking():
+    """T (1/4) is a missing day; the ranking of 1/4 is stored and traded on 1/5, whatever 1/5 ranks."""
+    sim = started()
+    to_jan3(sim)
+    sim.day(JAN4, prices=None, rank_fn=lambda n, d: default_rank(n, d, shift=0))
+    assert sim.cand(S0)["pending_rebalance"]["ranking"]["asof"] == "2026-12-31"
+    # the caller no longer needs a ranking for the candidates that already hold one
+    assert sp.rebalance_due(sim.state, date(2027, 1, 5), CAL_ISO, {"complete": False, "ratio": 0.5}) == []
+    # even if a different ranking is supplied for 1/5 it is not used
+    rows = sim.day(date(2027, 1, 5), rankings={c: default_rank(c, date(2027, 1, 5), shift=7) for c in (S0, S1, S3)})
+    r = reb(rows, S0)[0]
+    assert (r["nominal_date"], r["fill_date"], r["signal_asof"]) == ("2027-01-04", "2027-01-05", "2026-12-31")
+    assert _targets_of(rows, S0) == set(CODES[:20])                       # shift=0 ranking, not shift=7
+    assert sim.cand(S0)["pending_rebalance"] is None
+
+
+def test_f3_deferred_and_same_day_rebalance_pick_the_same_stocks():
+    """The two paths of the review finding (repaired re-run vs. failed retry) now agree."""
+    direct = started()
+    to_jan3(direct)
+    rows_direct = direct.day(JAN4, rank_fn=lambda n, d: default_rank(n, d, shift=3))
+    deferred = started()
+    to_jan3(deferred)
+    deferred.day(JAN4, prices=None, rank_fn=lambda n, d: default_rank(n, d, shift=3))
+    rows_def = deferred.day(date(2027, 1, 5), rankings={c: default_rank(c, date(2027, 1, 5), shift=11) for c in (S0, S1, S3)})
+    for name in (S0, S1, S3):
+        assert _targets_of(rows_direct, name) == _targets_of(rows_def, name)
+
+
+def test_f3_stored_ranking_is_json_clean_and_survives_snapshot_round_trip():
+    sim = started()
+    to_jan3(sim)
+    sim.day(JAN4, prices=None)
+    snap = json.loads(json.dumps(sim.state))                              # what snapshots/<date>.json holds
+    sim2 = Sim(state=snap)
+    rows = sim2.day(date(2027, 1, 5), rankings={})
+    assert len(reb(rows, S0)) == 1 and len(reb(rows, S1)) == 1 and len(reb(rows, S3)) == 1
+
+
+def test_f4_no_ranking_on_nominal_day_uses_first_later_ranking_and_is_flagged_each_day():
+    sim = started()
+    to_jan3(sim)
+    only_s1_s3 = {c: default_rank(c, JAN4) for c in (S1, S3)}
+    rows = sim.day(JAN4, rankings=only_s1_s3)
+    assert "ranking_missing" in daily(rows, S0)["flags"]
+    rows = sim.day(date(2027, 1, 5), rankings={})                         # still nothing
+    assert "ranking_missing" in daily(rows, S0)["flags"] and reb(rows, S0) == []
+    assert sim.meta()["missing_total"] == 0 and sim.meta()["pending_retry"] == []
+    rows = sim.day(date(2027, 1, 6), rankings={S0: default_rank(S0, date(2027, 1, 6), shift=2)})
+    r = reb(rows, S0)[0]
+    assert (r["nominal_date"], r["signal_asof"]) == ("2027-01-04", "2027-01-05")
+    assert "ranking_missing" not in daily(rows, S0)["flags"]
+    assert sim.meta()["deferrals"][-1]["trading_days"] == 2

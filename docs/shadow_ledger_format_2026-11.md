@@ -87,3 +87,4 @@ step(state: dict, inputs: dict) -> (new_state: dict, rows: list[dict])
 4. `mark_superseded(rows, index)` 的 `index` 由 `supersede_index(original_rows)` 產生，鍵為「檔案＋日期（rebalances 用 `nominal_date`）」；舊的「`{date: written_at}`」用法已移除。
 5. 階段 3 新增的目錄：`snapshots/`、`rankings/<日期>.json`（當日 07:00 算好存檔的各候選排名與 `asof`）、`s2/<日期>.json`。
 6. `state.meta` 新增 `status`（`not_started`／`active`／`void`／`ended`）、`start_date`、`start_wait`、`start_history`、`judgment_date`、`impaired_reasons`、`judgment`。
+7. 順延換倉的排名與缺資料計數（A5f，2026-11-18）：`pending_rebalance` 可帶 `ranking`（`asof`／`ranked`／`detail`），在名義日當天存入、成交後隨 `pending_rebalance` 清除；`rebalance_due` 不再回報已存排名的候選。daily flags 新增 `ranking_missing`（待辦換倉、當天有資料但沒有任何排名可用）。
