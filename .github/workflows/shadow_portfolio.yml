@@ -123,10 +123,36 @@ jobs:
             fi
           fi
           python scripts/run_shadow_portfolio.py --ledger-dir shadow_ledger $args
+      # meta/last_run.json is written at the end of every real daily run (also after a data
+      # failure, but not after a lock failure, an uncaught crash or a cancel).  Whether this run
+      # rewrote it tells the next two steps if the ledger on disk is a finished run's output.
+      # Must happen before the commit step, which makes the file look unchanged.
+      - name: classify run (did it rewrite meta/last_run.json?)
+        if: always() && env.FACTOR_RUN_MISSING != '1'
+        run: |
+          fresh=0
+          if [ -n "$(git -C shadow_ledger status --porcelain -- meta/last_run.json 2>/dev/null)" ]; then
+            fresh=1
+          fi
+          echo "last_run.json rewritten by this run: $fresh"
+          echo "LAST_RUN_FRESH=$fresh" >> "$GITHUB_ENV"
       - name: commit and push ledger
         if: always() && env.FACTOR_RUN_MISSING != '1' && inputs.dry_run != true
         working-directory: shadow_ledger
+        env:
+          MAIN_OUTCOME: ${{ steps.main.outcome }}
         run: |
+          # A main run that died without finishing (crash, timeout, cancel, lock failure) may have
+          # left a half-booked day on disk (rows appended, snapshot not yet written).  Pushing it
+          # would make every later run fail the consistency check, so drop it: the workspace is
+          # thrown away anyway and the next run books the day again from the pushed state.
+          # (A failure that did write last_run.json ended in a controlled way and is pushed.)
+          if [ "$MAIN_OUTCOME" != "success" ] && [ "$MAIN_OUTCOME" != "skipped" ] && [ "$LAST_RUN_FRESH" != "1" ]; then
+            echo "::warning::main run ended without finishing (outcome: $MAIN_OUTCOME); discarding uncommitted ledger changes"
+            git reset -q --hard 2>/dev/null || true     # fails on an orphan branch without commits
+            git clean -fdq
+            exit 0
+          fi
           git add -A
           if git diff --cached --quiet; then
             echo "nothing to commit"
@@ -148,11 +174,16 @@ jobs:
       - name: alert
         if: always()
         run: |
+          # Real newlines, not "\n" + printf "$msg": alert texts contain '%' (coverage ratios),
+          # which printf would take for a format specifier.
+          nl=$'\n'
           msg=""
-          if [ "$FACTOR_RUN_MISSING" = "1" ]; then msg="$msg\ncache/factor_run missing/too small; nothing was run"; fi
-          if [ "${{ steps.prefetch.outcome }}" = "failure" ]; then msg="$msg\nprefetch step failed"; fi
-          if [ "${{ steps.main.outcome }}" = "failure" ]; then msg="$msg\nmain run failed (exit code != 0; 2=void, 3=lock check, 4=replay mismatch)"; fi
-          if [ -f shadow_ledger/meta/last_run.json ]; then
+          if [ "$FACTOR_RUN_MISSING" = "1" ]; then msg="$msg${nl}cache/factor_run missing/too small; nothing was run"; fi
+          if [ "${{ steps.prefetch.outcome }}" = "failure" ]; then msg="$msg${nl}prefetch step failed"; fi
+          if [ "${{ steps.main.outcome }}" = "failure" ]; then msg="$msg${nl}main run failed (exit code != 0; 2=void, 3=lock check, 4=replay mismatch)"; fi
+          # Only this run's own alerts: a dry run, prefetch-only run or a crash leaves the previous
+          # day's last_run.json in place, which must not be sent again.
+          if [ "$LAST_RUN_FRESH" = "1" ] && [ -f shadow_ledger/meta/last_run.json ]; then
             alerts=$(python - <<'PY'
           import json
           try:
@@ -163,10 +194,10 @@ jobs:
               print(a)
           PY
           )
-            if [ -n "$alerts" ]; then msg="$msg\n$alerts"; fi
+            if [ -n "$alerts" ]; then msg="$msg${nl}$alerts"; fi
           fi
           if [ -n "$msg" ]; then
-            text=$(printf '[shadow portfolio] %s\n%s' "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" "$(printf "$msg")")
+            text=$(printf '[shadow portfolio] %s\n%s' "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" "$msg")
             curl -sS --max-time 20 \
               "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \

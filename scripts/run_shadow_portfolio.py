@@ -1289,8 +1289,10 @@ def run_daily(store, now, fetchers, universe_file, industries_file, dry_run=Fals
     if state["meta"]["status"] == "void":
         return _void_exit(state, report)
 
-    if state["meta"]["status"] in ("active", "not_started"):
-        state = run_repairs(ctx, state, lock, primary, today, done)
+    # Repairs also run once the portfolio has "ended": step() ends it on the judgment day even when
+    # that day's whole-market data is missing, and A5d-7 gives that day a 10-day retry window.  The
+    # re-run restarts from the snapshot before the missing day, so it re-ends the state by itself.
+    state = run_repairs(ctx, state, lock, primary, today, done)
 
     # (1) book every closed, not yet processed trading day
     closed = [d for d in cal if d < today]

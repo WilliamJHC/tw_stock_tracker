@@ -1148,6 +1148,22 @@ def test_the_state_listing_a_day_whose_prices_are_complete_is_detected_as_a_fork
     assert job(world, ledger, uni, ind, date(2026, 12, 12)) == 1
 
 
+def test_judgment_day_with_missing_data_is_repaired_after_the_state_has_ended(tmp_path, monkeypatch):
+    # The judgment day is moved onto DOWN_DAY (TPEx down until the job of 2026-12-14).  step() ends the
+    # state on that day even though its data is missing; the A5d-7 retry must still run afterwards.
+    monkeypatch.setattr(sr, "judgment_date", lambda start, cal: DOWN_DAY)
+    world = World()
+    ledger, uni, ind = make_ledger(tmp_path)
+    run_jobs(world, ledger, uni, ind, START, date(2026, 12, 11))
+    meta = final_state(ledger)["meta"]
+    assert meta["status"] == "ended" and meta["judgment"]["complete"] is False
+    assert [p["date"] for p in meta["pending_retry"]] == ["2026-12-09"]
+    run_jobs(world, ledger, uni, ind, date(2026, 12, 14), date(2026, 12, 14), prefetch=False)
+    meta = final_state(ledger)["meta"]
+    assert meta["status"] == "ended" and meta["judgment"]["complete"] is True
+    assert meta["pending_retry"] == [] and "2026-12-09" not in meta["missing_days"]
+
+
 def test_a_dry_run_refuses_to_continue_over_a_pending_rerun(tmp_path):
     world = World()
     ledger, uni, ind = make_ledger(tmp_path)
